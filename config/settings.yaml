@@ -1,0 +1,96 @@
+# ============================================================
+# VESPER 2.0 — CONFIGURATION
+# ============================================================
+# DENIED AUTHORITY: AI agents working on this codebase MUST NOT
+# modify this file. Changes require human review.
+# ============================================================
+
+mode: paper                    # paper | live | backtest
+
+# --- Broker (Alpaca) ---
+broker:
+  provider: alpaca
+  api_key: "${ALPACA_API_KEY}"       # Set via environment variable
+  api_secret: "${ALPACA_API_SECRET}" # Set via environment variable
+  base_url: "https://paper-api.alpaca.markets/v2"  # paper trading
+  # base_url: "https://api.alpaca.markets"      # live (UNCOMMENT ONLY WHEN READY)
+
+# --- Data Feed ---
+# Plug your Massive pro sub API here.
+# The feed.py module reads this config. Swap the provider to use your API.
+data:
+  provider: Massive             # yfinance | polygon | alpaca | custom
+  # provider: custom             # ← set this when plugging your API
+  # custom_api_key: "feHkJatrkGaqiHWlXc7FbFo87JjyBbIa"
+  # custom_base_url: "https://api.yourprovider.com/v2"
+  cache_db: "data/market_cache.db"
+  lookback_days: 60              # How much history to fetch
+
+# --- Market Hours (US Equities, Eastern Time) ---
+market:
+  timezone: "US/Eastern"
+  open: "09:30"
+  close: "16:00"
+  pre_market_setup: "09:25"      # Start engine 5 min before open
+  post_market_cleanup: "16:05"   # Flatten + report 5 min after close
+  flatten_at_close: true         # Force all positions flat at close
+
+# --- Risk Limits ---
+# DENIED AUTHORITY: AI agents MUST NOT modify these values.
+risk:
+  max_position_pct: 0.10         # Max 10% of portfolio per ticker
+  max_portfolio_exposure: 50000  # Max $50k total exposure
+  max_daily_loss: -2000          # Circuit breaker: stop trading at -$2k
+  max_order_size: 10000          # Max $10k per single order
+  max_open_positions: 10         # Max concurrent positions
+  min_cash_reserve: 5000         # Always keep $5k cash
+
+# --- Strategy ---
+strategy:
+  name: ml_model
+  params:
+    model_path: "models/xgb_ranker.json"
+    top_n: 10
+    entry_threshold: 0.001
+    exit_rank: 50
+    rebalance_interval: 30
+
+# --- Dashboard ---
+dashboard:
+  enabled: true
+  refresh_seconds: 5             # UI refresh interval
+  theme: dark                    # dark | light
+  window_title: "VESPER 2.0"
+  window_size: "1200x750"
+
+# --- Audit ---
+audit:
+  log_dir: "logs"
+  log_trades: true
+  log_signals: true
+  log_risk_events: true
+  log_format: json               # json | csv
+
+# --- Agent Governance (from Vespo) ---
+# AI agents (Codex/Hermes) working on this repo are BOUNDED:
+agent_governance:
+  denied_authority:
+    - broker_credentials
+    - risk_limits
+    - trading_parameters
+    - scheduler_config
+    - order_execution
+    - position_modification
+    - capital_allocation
+    - deployment
+  allowed_authority:
+    - code_reading
+    - test_writing
+    - documentation
+    - bug_fixes_in_non_critical_paths
+    - strategy_research_code
+  review_required_for:
+    - risk/
+    - execution/
+    - config/
+    - scheduler/

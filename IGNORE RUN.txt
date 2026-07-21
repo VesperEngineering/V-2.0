@@ -1,0 +1,91 @@
+RUN
+
+# Backtest (no keys needed)
+python scripts/run_backtest.py
+
+# Paper trading with dashboard
+python scripts/run_paper.py
+
+Plugging your data API
+
+Edit vesper/data/feed.py, implement the CustomFeed class,
+then set data.provider: custom in config/settings.yaml.
+
+
+Structure
+
+vesper/
+  engine.py        Core loop: data -> strategy -> risk -> broker
+  data/            Market data feed, cache, calendar
+  strategy/        Strategy framework + momentum example
+  execution/       Broker abstraction (Alpaca / paper simulator)
+  risk/            Position limits, circuit breaker, monitor
+  scheduler/       Market-hours scheduler (open to close)
+  dashboard/       Tkinter live dashboard
+  audit/           Append-only JSON trade log
+  state.py         Crash recovery
+  notify.py        Telegram alerts
+  secrets.py       .env loader
+
+
+
+---
+
+## FILE 5 — `config/settings.yaml`
+
+```yaml
+mode: paper                # paper | live | backtest
+
+broker:
+  provider: alpaca
+  api_key: "${ALPACA_API_KEY}"
+  api_secret: "${ALPACA_API_SECRET}"
+  # Paper trading URL (default):
+  base_url: "https://paper-api.alpaca.markets"
+  # Live URL (only when ready):
+  # base_url: "https://api.alpaca.markets"
+
+data:
+  provider: yfinance       # yfinance | custom
+  cache_db: "data/market_cache.db"
+  lookback_days: 60
+
+market:
+  timezone: "US/Eastern"
+  open: "09:30"
+  close: "16:00"
+  pre_market_setup: "09:25"
+  post_market_cleanup: "16:05"
+  flatten_at_close: true
+
+risk:
+  max_position_pct: 0.10       # Max 10% of portfolio per ticker
+  max_portfolio_exposure: 50000 # Max $50k total exposure
+  max_daily_loss: -2000         # Circuit breaker at -$2k
+  max_order_size: 10000         # Max $10k per order
+  max_open_positions: 10
+  min_cash_reserve: 5000
+
+strategy:
+  name: momentum
+  params:
+    lookback: 20
+    top_n: 5
+    rebalance_interval: 30     # minutes
+    entry_threshold: 0.02
+    exit_threshold: -0.01
+
+dashboard:
+  refresh_seconds: 5
+  theme: dark
+  window_title: "VESPER 2.0"
+  window_size: "1200x750"
+
+notifications:
+  enabled: false               # Set true after adding Telegram token
+  telegram_token: "${TELEGRAM_BOT_TOKEN}"
+  telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+  min_interval_seconds: 60
+
+audit:
+  log_dir: "logs"

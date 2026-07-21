@@ -1,0 +1,23 @@
+universe:
+  - AAPL
+  - MSFT
+  - NVDA
+  - GOOGL
+  - AMZN
+  - META
+  - TSLA
+  - AMD
+  - NFLX
+  - CRM
+  - ORCL
+  - ADBE
+  - INTC
+  - QCOM
+  - AVGO
+  - TXN
+  - IBM
+  - NOW
+  - UBER
+  - SHOP
+  - JPM
+

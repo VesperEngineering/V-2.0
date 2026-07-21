@@ -1,0 +1,45 @@
+vesper-2.0/
+├── README.md
+├── requirements.txt
+├── config/
+│   ├── settings.yaml
+│   └── universe.yaml
+├── vesper/
+│   ├── __init__.py
+│   ├── engine.py                  # Core trading engine
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── feed.py                # Data abstraction (plug your API here)
+│   │   ├── storage.py             # SQLite local cache
+│   │   └── calendar.py            # Market hours / holidays
+│   ├── strategy/
+│   │   ├── __init__.py
+│   │   ├── base.py                # Strategy base class
+│   │   └── momentum.py            # Example: cross-sectional momentum
+│   ├── execution/
+│   │   ├── __init__.py
+│   │   ├── broker.py              # Broker abstraction (Alpaca default)
+│   │   ├── orders.py              # Order lifecycle
+│   │   └── positions.py           # Position tracker
+│   ├── risk/
+│   │   ├── __init__.py
+│   │   ├── limits.py              # Pre-trade checks
+│   │   ├── monitor.py             # Real-time risk
+│   │   └── circuit_breaker.py     # Daily loss kill switch
+│   ├── scheduler/
+│   │   ├── __init__.py
+│   │   └── engine.py              # Market-hours scheduler
+│   ├── dashboard/
+│   │   ├── __init__.py
+│   │   └── app.py                 # Tkinter dashboard (complete)
+│   └── audit/
+│       ├── __init__.py
+│       └── logger.py              # Trade/signal audit trail
+├── scripts/
+│   ├── run_paper.py               # Paper trading entry point
+│   ├── run_live.py                # Live trading entry point
+│   └── run_backtest.py            # Backtest runner
+└── tests/
+    ├── test_risk.py
+    ├── test_strategy.py
+    └── test_calendar.py
