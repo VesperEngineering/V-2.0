@@ -72,18 +72,59 @@ placeholders before staging. `.env` was neither opened nor staged.
 
 ## Staging and commit evidence
 
-Pending initial commit at report-draft time. This section is finalized after the
-explicit staging inspection and initial `master` commit.
+The explicit staging set contained **177 files** and was inspected with `git diff
+--cached --name-status`. It contained the classified source, configuration,
+models, reports, tests, assets, and documentation only. A forbidden-path check
+found no `.env`, virtualenv, Fusion/Hermes/CodeGraph state, pytest state,
+worktree state, local operator directories, protected data/research paths,
+databases, or bytecode in the index.
+
+Initial baseline commit:
+
+- SHA: `01d06f2f56fabd5b78eab4a7b9d7b86f02c1700f`
+- Message: `feat(VS-003): establish reviewed VESPER repository baseline`
+- Tree inventory: 177 tracked files, 17,018 inserted lines.
+
+The staged-text credential scan found only the sanitized `.env.example`,
+environment-variable references, code identifiers, and test references; it found
+no credential value to disclose. `git diff --cached --check` reported 129
+pre-existing whitespace diagnostics in preserved input documentation and one
+pre-existing blank line at EOF in `vesper/dashboard/worker_monitor.py`. They
+were not normalized because this restoration is required to preserve the
+existing review surface rather than make unrelated source/doc edits.
 
 ## VS-002 repair record
 
-Pending initial commit. The guarded repair will use only `git -C
-C:/Users/bgonn/Desktop/v20/.worktrees/cool-sage reset --hard <baseline-sha>` and
-will be followed by matching-HEAD, required-path, and clean-status checks.
+After the required clean/empty guard, the linked worktree was populated only
+with:
+
+```text
+git -C C:/Users/bgonn/Desktop/v20/.worktrees/cool-sage reset --hard \
+  01d06f2f56fabd5b78eab4a7b9d7b86f02c1700f
+```
+
+Both root `master` and `fusion/vs-002` then resolved to
+`01d06f2f56fabd5b78eab4a7b9d7b86f02c1700f`, had 177 tracked files, and had
+clean status/diff results. The repaired worktree contains `AGENTS.md`,
+`SKILLS/CODE.md`, `tests/test_risk.py`, and `reports/`.
 
 ## Verification results
 
-Pending initial commit. The baseline regression intentionally requires a
-resolvable `HEAD` and will run only after commit creation. No lint, typecheck,
-or build command is declared by this repository; those gates are unavailable and
-are not invented.
+All executed checks passed against the initial baseline:
+
+- `tests/test_repository_baseline.py`: **2 passed** in 0.33s using the README
+  Windows temporary-directory environment.
+- `tests/test_risk.py`: **5 passed** in 1.79s using the same environment.
+- `.venv\Scripts\python.exe -m py_compile tests\test_repository_baseline.py
+  vesper\engine.py`: passed.
+- Root/VS-002 `git rev-parse --verify HEAD`, required tracked-path checks,
+  `git ls-files`, worktree porcelain, clean status, and clean `git diff HEAD`:
+  passed; both no longer have unborn/all-zero heads or zero tracked files.
+- `git check-ignore -v` confirmed `.env`, `.venv`, `.fusion`, `.codegraph`,
+  `.pytest_tmp`, `.worktrees`, and both protected VESPER data/research paths
+  are ignored by the documented `.gitignore` rules.
+
+No lint, typecheck, or build command is declared by this repository, so those
+gates are unavailable and were not invented. No broker, provider, scheduler,
+trading path, protected data/research file, risk/trading setting, model artifact
+content, or credential file was modified.
