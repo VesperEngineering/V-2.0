@@ -1,0 +1,24 @@
+{
+  "model_path": "models\\xgb_ranker.json",
+  "label_horizon": 5,
+  "basket_size": 10,
+  "history_days": 200,
+  "results": {
+    "ml_model": {
+      "evaluation_dates": 80,
+      "mean_coverage": 100.0,
+      "mean_top_return": 0.008274013798518262,
+      "mean_bottom_return": 0.0028439205831935115,
+      "mean_top_bottom_spread": 0.00543009321532475,
+      "mean_rank_ic": 0.036061123951578275
+    },
+    "momentum": {
+      "evaluation_dates": 80,
+      "mean_coverage": 100.0,
+      "mean_top_return": 0.006254454427488251,
+      "mean_bottom_return": 0.010392076415679293,
+      "mean_top_bottom_spread": -0.004137621988191042,
+      "mean_rank_ic": -0.029054988207901387
+    }
+  }
+}

@@ -1,0 +1,11 @@
+2026-07-22 16:35:20,992 | Loading bars from vesper\data\massive\sp500\sp500_ohlcv.sqlite
+2026-07-22 16:35:32,427 | Loaded 502 tickers
+2026-07-22 16:35:32,428 | Loading split adjustments from D:\vesper\vesper_data\split_adjustments.json
+2026-07-22 16:35:36,732 | Applied split adjustments to 502 tickers
+2026-07-22 16:35:36,732 | Building training set...
+2026-07-22 16:36:16,229 | Training set after z-score: X=(2454458, 24), y=(2454458,)
+2026-07-22 16:36:16,374 | Train samples: 1780896 | Test samples: 673562
+2026-07-22 16:36:16,374 | Training model...
+2026-07-22 16:36:18,628 | Train IC: 0.0430 | Out-of-sample IC: 0.0320
+2026-07-22 16:36:18,629 | Model saved to models\xgb_ranker.json
+2026-07-22 16:36:18,637 | Model metadata saved to models\xgb_ranker.metadata.json

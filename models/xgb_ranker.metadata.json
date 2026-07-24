@@ -1,0 +1,21 @@
+{
+  "model_path": "models\\xgb_ranker.json",
+  "sha256": "e39e7bab699aef4d5623df16e53ef393163f5ede9daa118315fd376eb9a5b4c5",
+  "label_horizon": 5,
+  "train_ic": 0.0433,
+  "out_of_sample_ic": 0.0324,
+  "train_samples": 1780896,
+  "test_samples": 675562,
+  "model_parameters": {
+    "n_estimators": 50,
+    "max_depth": 2,
+    "learning_rate": 0.05,
+    "subsample": 0.6,
+    "colsample_bytree": 0.6,
+    "reg_alpha": 5.0,
+    "reg_lambda": 20.0,
+    "objective": "reg:squarederror",
+    "n_jobs": -1,
+    "random_state": 42
+  }
+}

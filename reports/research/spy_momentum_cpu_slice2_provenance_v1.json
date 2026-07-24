@@ -1,0 +1,40 @@
+{
+  "approval": {
+    "authority": "Brennan",
+    "date": "2026-07-23",
+    "scope": "SPY-only research claim; frozen V20-local derived snapshot; research-only CPU evaluation"
+  },
+  "adapter": {
+    "path": "C:\\Users\\bgonn\\Desktop\\v20\\vesper\\data\\massive\\adapters\\total_return_ohlcv_adapter_20260717T153500Z.sqlite",
+    "sha256": "825252f94efb228df37683d58a1199cbc101828bbe7f53079e9d066c28e5a70c",
+    "size_bytes": 51003392,
+    "modified_at_utc": "2026-07-17T15:39:01.596973+00:00",
+    "modified_at_ns": 1784302741596972700,
+    "metadata": {
+      "generated_at": "2026-07-17T15:39:01.593969+00:00",
+      "price_basis": "total_return_adjusted",
+      "timeframe": "1day"
+    },
+    "known_limitation": "The V20-local derived adapter has row-level source hashes but is not a V20-local raw-to-derived reconstruction."
+  },
+  "before": {
+    "scripts/spy_momentum_cpu_experiment.py": "absent",
+    "tests/test_spy_momentum_cpu_experiment.py": "absent"
+  },
+  "after": {
+    "scripts/spy_momentum_cpu_experiment.py": {
+      "sha256": "e03e15c8f229fdfa2143c4dec8af44895ec7d75e6cde8c9a8ba7b6754f1994f1",
+      "size_bytes": 8362
+    },
+    "tests/test_spy_momentum_cpu_experiment.py": {
+      "sha256": "0d8706bacb50315a67447457f6f80d63f91592c461c25632c6fccfa98d091cae",
+      "size_bytes": 6513
+    },
+    "backup_policy": "No backups were required because both implementation files were absent before this task."
+  },
+  "exclusions": [
+    "No protected-data write",
+    "No selection or final outcome computation",
+    "No trainer, engine, strategy, config, model, schedule, broker, risk, or execution change"
+  ]
+}

@@ -1,0 +1,1047 @@
+{
+  "run": 30,
+  "max_runs": 36,
+  "baseline": {
+    "out_of_sample_ic": 0.0324,
+    "ranking_spread": 0.0026008221361376706,
+    "rank_ic": 0.03077755290242885,
+    "model_sha256": "e39e7bab699aef4d5623df16e53ef393163f5ede9daa118315fd376eb9a5b4c5",
+    "parameters": {
+      "n_estimators": 50,
+      "max_depth": 2,
+      "learning_rate": 0.05,
+      "subsample": 0.6,
+      "colsample_bytree": 0.6,
+      "reg_alpha": 5.0,
+      "reg_lambda": 20.0
+    }
+  },
+  "accepted": [],
+  "rejected": [
+    {
+      "run": 12,
+      "hypothesis": "Use 30 trees at depth 1 with stronger L1/L2 penalties to test a simpler, more strongly regularized capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 30,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 10.0,
+        "reg_lambda": 30.0
+      },
+      "candidate": {
+        "model_sha256": "db5af68f24e699b545fa874c295128da5961f0c1e119a746aafd1ee1b2184c31",
+        "train_ic": 0.03328071876068426,
+        "out_of_sample_ic": 0.0331249964519023,
+        "rank_ic": 0.03719193648104671,
+        "ranking_spread": 0.006511829525043669,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.0007249964519023025,
+        "ranking_spread_delta": 0.003911007388905999,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_12_train.log",
+        "ranking_report": "reports/model_iteration_run_12_ranking.json",
+        "ranking_log": "reports/model_iteration_run_12_ranking.log"
+      }
+    },
+    {
+      "run": 1,
+      "hypothesis": "Stronger regularization with a smaller 30-tree capacity may improve chronological out-of-sample IC without materially degrading ranking spread.",
+      "parameters": {
+        "n_estimators": 30,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 10.0,
+        "reg_lambda": 30.0
+      },
+      "candidate": {
+        "model_sha256": "9d9f20408b78434357e5e195bd3be8164b9dde3ae44787c062576687aeffffff",
+        "train_ic": 0.040195497470912465,
+        "out_of_sample_ic": 0.03241314224840958,
+        "rank_ic": 0.03141386404906528,
+        "ranking_spread": 0.002983912588812687,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 1.3142248409582e-05,
+        "ranking_spread_delta": 0.0003830904526750163,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_01_train.log",
+        "ranking_report": "reports/model_iteration_run_01_ranking.json",
+        "ranking_log": "reports/model_iteration_run_01_ranking.log"
+      }
+    },
+    {
+      "run": 2,
+      "hypothesis": "Reduce the already strongly regularized candidate from 30 to 20 trees while holding the prior stronger regularization fixed, to test whether lower capacity improves chronological out-of-sample IC without unacceptable spread loss.",
+      "parameters": {
+        "n_estimators": 20,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 10.0,
+        "reg_lambda": 30.0
+      },
+      "candidate": {
+        "model_sha256": "a9aca59bcb98172630c0a179714f626c4d48ea4a655bc5ff27ab8b32f5fe86d4",
+        "train_ic": 0.03909933318615606,
+        "out_of_sample_ic": 0.03145507442213751,
+        "rank_ic": 0.03237694524889166,
+        "ranking_spread": 0.00263336863504589,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.0009449255778624863,
+        "ranking_spread_delta": 3.2546498908219475e-05,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_02_train.log",
+        "ranking_report": "reports/model_iteration_run_02_ranking.json",
+        "ranking_log": "reports/model_iteration_run_02_ranking.log"
+      }
+    },
+    {
+      "run": 3,
+      "hypothesis": "Use an intermediate 40-tree capacity with the predeclared stronger regularization from run 1 to test whether it improves chronological out-of-sample IC while retaining positive ranking spread.",
+      "parameters": {
+        "n_estimators": 40,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 10.0,
+        "reg_lambda": 30.0
+      },
+      "candidate": {
+        "model_sha256": "0bb87d30eaab92a68d132ca70369f4b8ab7b538d7109c4da9c078b55003ceb87",
+        "train_ic": 0.04117161229756324,
+        "out_of_sample_ic": 0.03199194319430613,
+        "rank_ic": 0.03162601031183492,
+        "ranking_spread": 0.002402537065179588,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.0004080568056938705,
+        "ranking_spread_delta": -0.0001982850709580825,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_03_train.log",
+        "ranking_report": "reports/model_iteration_run_03_ranking.json",
+        "ranking_log": "reports/model_iteration_run_03_ranking.log"
+      }
+    },
+    {
+      "run": 4,
+      "hypothesis": "Hold the accepted 50-tree, depth-2 capacity fixed while increasing L1/L2 regularization to test whether the stronger penalty improves chronological out-of-sample IC without degrading ranking spread beyond the acceptance gate.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 10.0,
+        "reg_lambda": 30.0
+      },
+      "candidate": {
+        "model_sha256": "b5b138ea5624cc8f6029af6ced2397b5bd5661f14982d326d881b02202a984ca",
+        "train_ic": 0.04287413268519001,
+        "out_of_sample_ic": 0.03219565335001898,
+        "rank_ic": 0.032384566629403214,
+        "ranking_spread": 0.0022688779196414722,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.00020434664998102148,
+        "ranking_spread_delta": -0.0003319442164961984,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement and ranking-spread retention both failed the acceptance gate; active trainer and model artifacts restored from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_04_train.log",
+        "ranking_report": "reports/model_iteration_run_04_ranking.json",
+        "ranking_log": "reports/model_iteration_run_04_ranking.log"
+      }
+    },
+    {
+      "run": 5,
+      "hypothesis": "Reduce tree depth from 2 to 1 while holding the accepted 50-tree regularization fixed, testing a simpler capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "76baca0b058f0a1c8bfab483aecaf7296233d6127c190069943198768d9f92ec",
+        "train_ic": 0.034566627041346984,
+        "out_of_sample_ic": 0.03276786552592034,
+        "rank_ic": 0.03603789337200317,
+        "ranking_spread": 0.0053979006708292,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.00036786552592034394,
+        "ranking_spread_delta": 0.0027970785346915295,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_05_train.log",
+        "ranking_report": "reports/model_iteration_run_05_ranking.json",
+        "ranking_log": "reports/model_iteration_run_05_ranking.log"
+      }
+    },
+    {
+      "run": 6,
+      "hypothesis": "Reduce the depth-1 candidate capacity from 50 to 40 trees while holding all other baseline regularization fixed, testing a simpler regularization/capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 40,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "71add4647ce379629b161a7129dad144ff9bede17ffa636715f26ab4b0161769",
+        "train_ic": 0.03372805572585448,
+        "out_of_sample_ic": 0.03272135064594113,
+        "rank_ic": 0.036398854053397524,
+        "ranking_spread": 0.007050086386519013,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.00032135064594112755,
+        "ranking_spread_delta": 0.004449264250381342,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_06_train.log",
+        "ranking_report": "reports/model_iteration_run_06_ranking.json",
+        "ranking_log": "reports/model_iteration_run_06_ranking.log"
+      }
+    },
+    {
+      "run": 7,
+      "hypothesis": "Reduce the depth-1 candidate capacity from 40 to 30 trees while holding all other baseline regularization fixed, testing a simpler regularization/capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 30,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "1851ee64b2238262bf46060045b0185adbcd84c61af77a7901595905913a6e37",
+        "train_ic": 0.03327862819982271,
+        "out_of_sample_ic": 0.033127007744720174,
+        "rank_ic": 0.03719193648104671,
+        "ranking_spread": 0.006511829525043669,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.0007270077447201762,
+        "ranking_spread_delta": 0.003911007388905999,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_07_train.log",
+        "ranking_report": "reports/model_iteration_run_07_ranking.json",
+        "ranking_log": "reports/model_iteration_run_07_ranking.log"
+      }
+    },
+    {
+      "run": 8,
+      "hypothesis": "Reduce the depth-1 candidate capacity from 30 to 20 trees while holding all other accepted-baseline regularization fixed, testing the next simpler predeclared regularization/capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 20,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "3e4ef9cec26bdd876f210e9ff5dc19b0ac67131871cdd8738d1e45d63fb5e55e",
+        "train_ic": 0.031966199170981646,
+        "out_of_sample_ic": 0.03183591600198372,
+        "rank_ic": 0.040818061815244264,
+        "ranking_spread": 0.005664465400270946,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.0005640839980162807,
+        "ranking_spread_delta": 0.0030636432641332756,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_08_train.log",
+        "ranking_report": "reports/model_iteration_run_08_ranking.json",
+        "ranking_log": "reports/model_iteration_run_08_ranking.log"
+      }
+    },
+    {
+      "run": 9,
+      "hypothesis": "Reduce the depth-1 candidate capacity from 20 to 10 trees while holding all accepted-baseline regularization fixed, testing the next simpler predeclared capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 10,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "90ea6883ac6373cf35842eb472b2055da66e6c9aef059f6c22a3cf05d697beb0",
+        "train_ic": 0.030757615711524453,
+        "out_of_sample_ic": 0.033631352371348094,
+        "rank_ic": 0.02110998448504807,
+        "ranking_spread": 2.09589724087687e-05,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.0012313523713480962,
+        "ranking_spread_delta": -0.002579863163728902,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement and ranking-spread retention both failed the acceptance gate; active trainer and model artifacts restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_09_train.log",
+        "ranking_report": "reports/model_iteration_run_09_ranking.json",
+        "ranking_log": "reports/model_iteration_run_09_ranking.log"
+      }
+    },
+    {
+      "run": 10,
+      "hypothesis": "Use 25 trees at depth 1 while holding the accepted baseline regularization fixed, testing the next simpler predeclared capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 25,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "a19f7dc5aa3351f76ad48885aa23a9c3366725c5965ff953b36a7e26f50308ad",
+        "train_ic": 0.032684556785547166,
+        "out_of_sample_ic": 0.03281557615868135,
+        "rank_ic": 0.03894697471735943,
+        "ranking_spread": 0.0066829384792535616,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.000415576158681353,
+        "ranking_spread_delta": 0.004082116343115891,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_10_train.log",
+        "ranking_report": "reports/model_iteration_run_10_ranking.json",
+        "ranking_log": "reports/model_iteration_run_10_ranking.log"
+      }
+    },
+    {
+      "run": 11,
+      "hypothesis": "Use 35 trees at depth 1 while holding the accepted baseline regularization fixed, testing the next simpler predeclared capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 35,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "2bcd70fa4ef310c2a432633e64e4627484538a2e7a68fb8a475bc701e3088f73",
+        "train_ic": 0.0333080717816584,
+        "out_of_sample_ic": 0.033218466534187856,
+        "rank_ic": 0.03673469756055101,
+        "ranking_spread": 0.006105654295143264,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.000818466534187854,
+        "ranking_spread_delta": 0.003504832159005593,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer and model artifacts restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_11_train.log",
+        "ranking_report": "reports/model_iteration_run_11_ranking.json",
+        "ranking_log": "reports/model_iteration_run_11_ranking.log"
+      }
+    },
+    {
+      "run": 13,
+      "hypothesis": "Hold the accepted 50-tree depth-2 capacity fixed while increasing L1/L2 regularization moderately to test a simpler, more strongly regularized variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 7.5,
+        "reg_lambda": 25.0
+      },
+      "candidate": {
+        "model_sha256": "9ae378799ca99d88191d7d8ee166fc446a8ee8a95add75ef261a6aa7aba74dde",
+        "train_ic": 0.0429982387835976,
+        "out_of_sample_ic": 0.032131509077872156,
+        "rank_ic": 0.03270456811564869,
+        "ranking_spread": 0.0021628471591358194,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.00026849092212784254,
+        "ranking_spread_delta": -0.0004379749770018512,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold and ranking spread fell below the allowed baseline retention floor; active trainer and model artifacts restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_13_train.log",
+        "ranking_report": "reports/model_iteration_run_13_ranking.json",
+        "ranking_log": "reports/model_iteration_run_13_ranking.log"
+      }
+    },
+    {
+      "run": 14,
+      "hypothesis": "Hold the accepted 50-tree depth-2 capacity fixed while increasing only L2 regularization from 20.0 to 30.0, testing a simpler, more strongly regularized variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 30.0
+      },
+      "candidate": {
+        "model_sha256": "6960ad42e1ed20eed592b81bb44dc81cfb76d55e39e59159f667903c4ed750ac",
+        "train_ic": 0.04331106265191619,
+        "out_of_sample_ic": 0.03216241994769957,
+        "rank_ic": 0.0303547222457543,
+        "ranking_spread": 0.0027288632308654403,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.000237580052300429,
+        "ranking_spread_delta": 0.00012804109472776964,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_14_train.log",
+        "ranking_report": "reports/model_iteration_run_14_ranking.json",
+        "ranking_log": "reports/model_iteration_run_14_ranking.log"
+      }
+    },
+    {
+      "run": 15,
+      "hypothesis": "Use 45 trees at depth 1 with accepted baseline regularization to test an untried simpler capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 45,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "a7dc0e9e6b2da91808881904a8f062109406d01bab7896c91d114d321ff9b694",
+        "train_ic": 0.034082916694362995,
+        "out_of_sample_ic": 0.03301696613689403,
+        "rank_ic": 0.03499939953976207,
+        "ranking_spread": 0.007223360131562535,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.0006169661368940343,
+        "ranking_spread_delta": 0.004622537995424864,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectations restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_15_train.log",
+        "ranking_report": "reports/model_iteration_run_15_ranking.json",
+        "ranking_log": "reports/model_iteration_run_15_ranking.log"
+      }
+    },
+    {
+      "run": 16,
+      "hypothesis": "Use 45 trees at depth 2 with accepted baseline regularization to test an untried simpler capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 45,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "0a46605f4da2477ef4f1f41910aef454a5c45895ef96d8eb279600d1e5d88a40",
+        "train_ic": 0.04244344666685142,
+        "out_of_sample_ic": 0.03263877196556826,
+        "rank_ic": 0.02995820986705338,
+        "ranking_spread": 0.0020195310296678643,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.00023877196556826297,
+        "ranking_spread_delta": -0.0005812911064698063,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectations restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_16_train.log",
+        "ranking_report": "reports/model_iteration_run_16_ranking.json",
+        "ranking_log": "reports/model_iteration_run_16_ranking.log"
+      }
+    },
+    {
+      "run": 17,
+      "hypothesis": "Use 50 trees at depth 1 with moderately stronger L1/L2 penalties to test a simpler, more strongly regularized capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 7.5,
+        "reg_lambda": 25.0
+      },
+      "candidate": {
+        "model_sha256": "73d3ec6a8138ac9f24d4123d723bc5d6cd336f3971aebbfba5eb5cfc5a41f562",
+        "train_ic": 0.034566609474194314,
+        "out_of_sample_ic": 0.03276851443568127,
+        "rank_ic": 0.03606727667144044,
+        "ranking_spread": 0.00543009321532475,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.0003685144356812692,
+        "ranking_spread_delta": 0.002829271079187079,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectations restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_17_train.log",
+        "ranking_report": "reports/model_iteration_run_17_ranking.json",
+        "ranking_log": "reports/model_iteration_run_17_ranking.log"
+      }
+    },
+    {
+      "run": 18,
+      "hypothesis": "Hold the accepted 50-tree depth-2 capacity and L1 penalty fixed while increasing only L2 regularization from 20.0 to 25.0, testing one stronger regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 25.0
+      },
+      "candidate": {
+        "model_sha256": "a2325019d35413ce9a8ee65af9da5b1d5f35705624891713da7eb587c6c961f5",
+        "train_ic": 0.04332702666088006,
+        "out_of_sample_ic": 0.032154089026278,
+        "rank_ic": 0.030358922618084327,
+        "ranking_spread": 0.0027288632308654403,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.0002459109737220008,
+        "ranking_spread_delta": 0.00012804109472776964,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_18_train.log",
+        "ranking_report": "reports/model_iteration_run_18_ranking.json",
+        "ranking_log": "reports/model_iteration_run_18_ranking.log"
+      }
+    },
+    {
+      "run": 19,
+      "hypothesis": "Use 50 trees at depth 1 with stronger L1/L2 regularization (alpha=10.0, lambda=30.0) to test one simpler, more strongly regularized capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 1,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 10.0,
+        "reg_lambda": 30.0
+      },
+      "candidate": {
+        "model_sha256": "51d9f9a5acc3bb47ba7160fc6bf2a30645b5beeb879b7e36cce463f465f7e12a",
+        "train_ic": 0.034566582523414734,
+        "out_of_sample_ic": 0.03276915019442291,
+        "rank_ic": 0.036061123951578275,
+        "ranking_spread": 0.00543009321532475,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": 0.0003691501944229139,
+        "ranking_spread_delta": 0.002829271079187079,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectations restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_19_train.log",
+        "ranking_report": "reports/model_iteration_run_19_ranking.json",
+        "ranking_log": "reports/model_iteration_run_19_ranking.log"
+      }
+    },
+    {
+      "run": 20,
+      "hypothesis": "Hold the accepted 50-tree depth-2 capacity and L1 penalty fixed while increasing only L2 regularization from 20.0 to 40.0, testing one stronger regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 40.0
+      },
+      "candidate": {
+        "model_sha256": "8e6411bced18601aa04933def69be03625c8a1478718d7c76167062991f0a339",
+        "train_ic": 0.04295210787366323,
+        "out_of_sample_ic": 0.032013318839637754,
+        "rank_ic": 0.03233247917281359,
+        "ranking_spread": 0.0015305630821767229,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.00038668116036224415,
+        "ranking_spread_delta": -0.0010702590539609477,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold and ranking spread fell below the allowed baseline retention floor; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_20_train.log",
+        "ranking_report": "reports/model_iteration_run_20_ranking.json",
+        "ranking_log": "reports/model_iteration_run_20_ranking.log"
+      }
+    },
+    {
+      "run": 21,
+      "hypothesis": "Use 40 trees at depth 2 with the accepted baseline regularization to test an untried simpler capacity variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 40,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "57af8e8a4646b8d8c5ddf84d28fd6ee764a7859d11faaa28f305b2801a8be24e",
+        "train_ic": 0.04148302974115597,
+        "out_of_sample_ic": 0.032243079056789956,
+        "rank_ic": 0.029920810498898665,
+        "ranking_spread": 0.0016746787831725253,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.00015692094321004268,
+        "ranking_spread_delta": -0.0009261433529651453,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold and ranking spread fell below the allowed baseline retention floor; active trainer, model, metadata, and candidate-specific test expectations restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_21_train.log",
+        "ranking_report": "reports/model_iteration_run_21_ranking.json",
+        "ranking_log": "reports/model_iteration_run_21_ranking.log"
+      }
+    },
+    {
+      "run": 22,
+      "hypothesis": "Hold accepted tree capacity and penalties fixed while reducing subsample from 0.6 to 0.5, testing one stronger stochastic regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.5,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "dafa36488121a34b519f066fd12804fa4c0629c925f104f8c2583f3484616a94",
+        "train_ic": 0.04303759698422317,
+        "out_of_sample_ic": 0.03159494421402148,
+        "rank_ic": 0.03451130349313051,
+        "ranking_spread": 0.0029484595057124243,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.0008050557859785173,
+        "ranking_spread_delta": 0.00034763736957475365,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_22_train.log",
+        "ranking_report": "reports/model_iteration_run_22_ranking.json",
+        "ranking_log": "reports/model_iteration_run_22_ranking.log"
+      }
+    },
+    {
+      "run": 23,
+      "hypothesis": "Hold accepted tree capacity and penalties fixed while reducing colsample_bytree from 0.6 to 0.5, testing one stronger stochastic regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.5,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "eadbc871a6ac7f7c34d2e487d95cb67264b7ce7fa852856ffdf26ff0c9c2dd93",
+        "train_ic": 0.04268709579917504,
+        "out_of_sample_ic": 0.031898664148222095,
+        "rank_ic": 0.03224247123007792,
+        "ranking_spread": 0.0024326538162643923,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.0005013358517779037,
+        "ranking_spread_delta": -0.00016816831987327826,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_23_train.log",
+        "ranking_report": "reports/model_iteration_run_23_ranking.json",
+        "ranking_log": "reports/model_iteration_run_23_ranking.log"
+      }
+    },
+    {
+      "run": 24,
+      "hypothesis": "Hold accepted tree capacity, sampling, and L1/L2 penalties fixed while adding min_child_weight=5.0, testing one stronger tree-growth regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0,
+        "min_child_weight": 5.0
+      },
+      "candidate": {
+        "model_sha256": "e39e7bab699aef4d5623df16e53ef393163f5ede9daa118315fd376eb9a5b4c5",
+        "train_ic": 0.043278363663298396,
+        "out_of_sample_ic": 0.03237051282662846,
+        "rank_ic": 0.03077755290242885,
+        "ranking_spread": 0.0026008221361376706,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -2.9487173371540998e-05,
+        "ranking_spread_delta": 0.0,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_24_train.log",
+        "ranking_report": "reports/model_iteration_run_24_ranking.json",
+        "ranking_log": "reports/model_iteration_run_24_ranking.log"
+      }
+    },
+    {
+      "run": 25,
+      "hypothesis": "Hold the accepted tree capacity, sampling, and L1/L2 penalties fixed while increasing min_child_weight from the previously tested 5.0 to 10.0, testing one stronger tree-growth regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0,
+        "min_child_weight": 10.0
+      },
+      "candidate": {
+        "model_sha256": "e39e7bab699aef4d5623df16e53ef393163f5ede9daa118315fd376eb9a5b4c5",
+        "train_ic": 0.043278363663298396,
+        "out_of_sample_ic": 0.03237051282662846,
+        "rank_ic": 0.03077755290242885,
+        "ranking_spread": 0.0026008221361376706,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -2.9487173371540998e-05,
+        "ranking_spread_delta": 0.0,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; candidate artifact hash was identical to the accepted baseline; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_25_train.log",
+        "ranking_report": "reports/model_iteration_run_25_ranking.json",
+        "ranking_log": "reports/model_iteration_run_25_ranking.log"
+      }
+    },
+    {
+      "run": 26,
+      "hypothesis": "Hold accepted capacity, sampling, and L1/L2 penalties fixed while adding gamma=1.0, testing one stronger tree-split regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0,
+        "gamma": 1.0
+      },
+      "candidate": {
+        "model_sha256": "e39e7bab699aef4d5623df16e53ef393163f5ede9daa118315fd376eb9a5b4c5",
+        "train_ic": 0.043278363663298396,
+        "out_of_sample_ic": 0.03237051282662846,
+        "rank_ic": 0.03077755290242885,
+        "ranking_spread": 0.0026008221361376706,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -2.9487173371540998e-05,
+        "ranking_spread_delta": 0.0,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; candidate artifact hash was identical to the accepted baseline; active trainer and model artifacts restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_26_train.log",
+        "ranking_report": "reports/model_iteration_run_26_ranking.json",
+        "ranking_log": "reports/model_iteration_run_26_ranking.log"
+      }
+    },
+    {
+      "run": 27,
+      "hypothesis": "Hold the accepted baseline capacity, sampling, and L1/L2 penalties fixed while adding max_delta_step=1.0, testing one stronger XGBoost update regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0,
+        "max_delta_step": 1.0
+      },
+      "candidate": {
+        "model_sha256": "e9e74b657ca4c1060aec65dbbb9f84197a61e558c6b027d3d89375daa97e04be",
+        "train_ic": 0.043278363663298396,
+        "out_of_sample_ic": 0.03237051282662846,
+        "rank_ic": 0.03077755290242885,
+        "ranking_spread": 0.0026008221361376706,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -2.9487173371540998e-05,
+        "ranking_spread_delta": 0.0,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_27_train.log",
+        "ranking_report": "reports/model_iteration_run_27_ranking.json",
+        "ranking_log": "reports/model_iteration_run_27_ranking.log"
+      }
+    },
+    {
+      "run": 28,
+      "hypothesis": "Hold accepted tree capacity, depth, column sampling, and L1/L2 penalties fixed while reducing row subsampling from 0.6 to 0.5, testing one stronger stochastic regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.5,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "candidate": {
+        "model_sha256": "dafa36488121a34b519f066fd12804fa4c0629c925f104f8c2583f3484616a94",
+        "train_ic": 0.04303759698422317,
+        "out_of_sample_ic": 0.03159494421402148,
+        "rank_ic": 0.03451130349313051,
+        "ranking_spread": 0.0029484595057124243,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.0008050557859785173,
+        "ranking_spread_delta": 0.00034763736957475365,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; candidate reproduced the run-22 artifact/metrics; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_28_train.log",
+        "ranking_report": "reports/model_iteration_run_28_ranking.json",
+        "ranking_log": "reports/model_iteration_run_28_ranking.log"
+      }
+    },
+    {
+      "run": 29,
+      "hypothesis": "Hold accepted tree capacity, depth, sampling, and L1/L2 penalties fixed while increasing min_child_weight from the XGBoost default to 2.0, testing one stronger tree-split regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.05,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0,
+        "min_child_weight": 2.0
+      },
+      "candidate": {
+        "model_sha256": "e39e7bab699aef4d5623df16e53ef393163f5ede9daa118315fd376eb9a5b4c5",
+        "train_ic": 0.043278363663298396,
+        "out_of_sample_ic": 0.03237051282662846,
+        "rank_ic": 0.03077755290242885,
+        "ranking_spread": 0.0026008221361376706,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -2.9487173371540998e-05,
+        "ranking_spread_delta": 0.0,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; candidate model hash matched the accepted baseline; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline.",
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_29_train.log",
+        "ranking_report": "reports/model_iteration_run_29_ranking.json",
+        "ranking_log": "reports/model_iteration_run_29_ranking.log"
+      }
+    },
+    {
+      "run": 30,
+      "hypothesis": "Hold accepted tree count, depth, sampling, and L1/L2 penalties fixed while reducing learning_rate from 0.05 to 0.04, testing one lower-effective-capacity regularization variant under the frozen chronological protocol.",
+      "parameters": {
+        "n_estimators": 50,
+        "max_depth": 2,
+        "learning_rate": 0.04,
+        "subsample": 0.6,
+        "colsample_bytree": 0.6,
+        "reg_alpha": 5.0,
+        "reg_lambda": 20.0
+      },
+      "artifacts": {
+        "training_log": "reports/model_iteration_run_30_train.log",
+        "ranking_report": "reports/model_iteration_run_30_ranking.json",
+        "ranking_log": "reports/model_iteration_run_30_ranking.log"
+      },
+      "candidate": {
+        "model_sha256": "cbe1167c23741468db8c602062c2774dc38b8218a0105705e0b44110330a4f68",
+        "train_ic": 0.042011309061259265,
+        "out_of_sample_ic": 0.03210731393799562,
+        "rank_ic": 0.032856996059789076,
+        "ranking_spread": 0.002895056125693724,
+        "train_samples": 1780896,
+        "test_samples": 673562
+      },
+      "baseline_comparison": {
+        "out_of_sample_ic_delta": -0.00029268606200438113,
+        "ranking_spread_delta": 0.0002942339895560535,
+        "minimum_out_of_sample_ic": 0.0354,
+        "minimum_ranking_spread": 0.0024008221361376705
+      },
+      "verdict": "rejected: out-of-sample IC improvement did not meet the required 0.003 threshold; active trainer, model, metadata, and candidate-specific test expectation restored byte-for-byte from baseline."
+    }
+  ]
+}

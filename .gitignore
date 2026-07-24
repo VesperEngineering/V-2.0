@@ -1,0 +1,31 @@
+# Credentials and local configuration
+.env
+
+# Runtime data, logs, caches, and generated Python files
+/data/
+logs/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.db
+*.sqlite3
+.pytest_cache/
+.pytest_tmp/
+
+# Fusion and local developer tooling state
+.fusion/
+.codegraph/
+.hermes/
+.worktrees/
+hermes-local/
+quant workers/
+IGNORE RUN.txt
+
+# Protected provider and model-research data (read-only local dependencies)
+vesper/data/massive/
+vesper/data/model_research/

@@ -1,0 +1,4213 @@
+{
+  "method": "Current run_backtest.py logic mirrored exactly; each day intentionally reuses the start-of-day risk snapshots.",
+  "window": {
+    "start": "2026-03-24",
+    "end": "2026-07-22",
+    "sessions": 82
+  },
+  "final": {
+    "equity": 93843.77999999998,
+    "cash": 71543.80999999998,
+    "return": -0.06156220000000016
+  },
+  "risk_reason_counts": {
+    "approved qty=43": 1,
+    "approved qty=120": 1,
+    "approved qty=205": 1,
+    "approved qty=54": 1,
+    "approved qty=57": 1,
+    "approved qty=177": 1,
+    "approved qty=345": 1,
+    "approved qty=44": 1,
+    "approved qty=56": 1,
+    "approved qty=36": 1,
+    "risk-reducing order": 16,
+    "max positions reached (10)": 10,
+    "portfolio exposure at limit": 60,
+    "approved qty=20": 1,
+    "approved qty=134": 1,
+    "approved qty=124": 1,
+    "approved qty=32": 1,
+    "approved qty=82": 1,
+    "approved qty=99": 1,
+    "approved qty=26": 1,
+    "approved qty=35": 1,
+    "approved qty=38": 1,
+    "approved qty=55": 1,
+    "max positions reached (15)": 20,
+    "circuit breaker: P&L $-3,206 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,705 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-6,706 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-6,576 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-6,727 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-8,289 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-7,599 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-8,540 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-8,587 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-7,461 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-6,054 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-6,580 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,651 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,590 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,398 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,894 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,611 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,756 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-6,045 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,888 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,811 <= limit $-2,000": 10,
+    "circuit breaker: P&L $-5,900 <= limit $-2,000": 10
+  },
+  "broker_status_counts": {
+    "FILLED": 36
+  },
+  "stale_snapshot_approvals": 18,
+  "daily": [
+    {
+      "date": "2026-03-24",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-03-25",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-03-26",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-03-27",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-03-30",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-03-31",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-01",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-02",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-06",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-07",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-08",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-09",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-10",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-13",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-14",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-15",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-16",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-17",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-20",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-21",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-22",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-23",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-24",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-27",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-28",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-29",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-04-30",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-01",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-04",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-05",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-06",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-07",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-08",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-11",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-12",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-13",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-14",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-15",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-18",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-19",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-20",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-21",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-22",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-26",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-27",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-28",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-05-29",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-01",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-02",
+      "equity": 100000,
+      "cash": 100000,
+      "exposure": 0,
+      "positions": 0,
+      "signals": 0,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-03",
+      "equity": 100000.0,
+      "cash": 5066.909999999989,
+      "exposure": 94933.09000000001,
+      "positions": 10,
+      "signals": 10,
+      "approved_buys": 10,
+      "filled_orders": 10,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-04",
+      "equity": 101445.09999999999,
+      "cash": 14675.159999999989,
+      "exposure": 86769.94,
+      "positions": 9,
+      "signals": 11,
+      "approved_buys": 0,
+      "filled_orders": 1,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-05",
+      "equity": 100578.37999999999,
+      "cash": 14675.159999999989,
+      "exposure": 85903.22,
+      "positions": 9,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-08",
+      "equity": 100039.86999999998,
+      "cash": 24309.959999999992,
+      "exposure": 75729.90999999999,
+      "positions": 8,
+      "signals": 11,
+      "approved_buys": 0,
+      "filled_orders": 1,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-09",
+      "equity": 100468.46999999999,
+      "cash": 24309.959999999992,
+      "exposure": 76158.51,
+      "positions": 8,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-10",
+      "equity": 99443.21,
+      "cash": 33806.759999999995,
+      "exposure": 65636.45000000001,
+      "positions": 7,
+      "signals": 11,
+      "approved_buys": 0,
+      "filled_orders": 1,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-11",
+      "equity": 99801.59999999999,
+      "cash": 33806.759999999995,
+      "exposure": 65994.84,
+      "positions": 7,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-12",
+      "equity": 100498.75,
+      "cash": 44568.35999999999,
+      "exposure": 55930.39,
+      "positions": 6,
+      "signals": 11,
+      "approved_buys": 0,
+      "filled_orders": 1,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-15",
+      "equity": 100319.64000000001,
+      "cash": 11964.769999999982,
+      "exposure": 88354.87000000002,
+      "positions": 15,
+      "signals": 11,
+      "approved_buys": 10,
+      "filled_orders": 11,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-16",
+      "equity": 99983.22999999998,
+      "cash": 11964.769999999982,
+      "exposure": 88018.45999999999,
+      "positions": 15,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-17",
+      "equity": 96794.15999999997,
+      "cash": 11964.769999999982,
+      "exposure": 84829.39,
+      "positions": 15,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-18",
+      "equity": 94294.63999999996,
+      "cash": 11964.769999999982,
+      "exposure": 82329.86999999998,
+      "positions": 15,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-22",
+      "equity": 93294.38999999998,
+      "cash": 24728.20999999998,
+      "exposure": 68566.18000000001,
+      "positions": 12,
+      "signals": 13,
+      "approved_buys": 0,
+      "filled_orders": 3,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-23",
+      "equity": 93424.44999999997,
+      "cash": 24728.20999999998,
+      "exposure": 68696.23999999999,
+      "positions": 12,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-24",
+      "equity": 93272.99999999999,
+      "cash": 24728.20999999998,
+      "exposure": 68544.79000000001,
+      "positions": 12,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-25",
+      "equity": 91711.15999999999,
+      "cash": 29097.98999999998,
+      "exposure": 62613.170000000006,
+      "positions": 11,
+      "signals": 11,
+      "approved_buys": 0,
+      "filled_orders": 1,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-26",
+      "equity": 92401.33999999997,
+      "cash": 29097.98999999998,
+      "exposure": 63303.34999999999,
+      "positions": 11,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-29",
+      "equity": 91459.63999999998,
+      "cash": 29097.98999999998,
+      "exposure": 62361.65,
+      "positions": 11,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-06-30",
+      "equity": 91413.20999999998,
+      "cash": 29097.98999999998,
+      "exposure": 62315.22,
+      "positions": 11,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-01",
+      "equity": 92538.74999999997,
+      "cash": 37534.00999999998,
+      "exposure": 55004.74,
+      "positions": 9,
+      "signals": 12,
+      "approved_buys": 0,
+      "filled_orders": 2,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-02",
+      "equity": 93946.00999999998,
+      "cash": 37534.00999999998,
+      "exposure": 56412.0,
+      "positions": 9,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-06",
+      "equity": 93419.99999999997,
+      "cash": 53854.06999999998,
+      "exposure": 39565.92999999999,
+      "positions": 7,
+      "signals": 12,
+      "approved_buys": 0,
+      "filled_orders": 2,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-07",
+      "equity": 94349.09999999998,
+      "cash": 58070.06999999998,
+      "exposure": 36279.03,
+      "positions": 6,
+      "signals": 11,
+      "approved_buys": 0,
+      "filled_orders": 1,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-08",
+      "equity": 94410.37999999998,
+      "cash": 71543.80999999998,
+      "exposure": 22866.57,
+      "positions": 4,
+      "signals": 12,
+      "approved_buys": 0,
+      "filled_orders": 2,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-09",
+      "equity": 94601.64999999998,
+      "cash": 71543.80999999998,
+      "exposure": 23057.84,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-10",
+      "equity": 94105.88999999998,
+      "cash": 71543.80999999998,
+      "exposure": 22562.08,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-13",
+      "equity": 94389.49999999999,
+      "cash": 71543.80999999998,
+      "exposure": 22845.69,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-14",
+      "equity": 94243.50999999998,
+      "cash": 71543.80999999998,
+      "exposure": 22699.7,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-15",
+      "equity": 93954.82999999999,
+      "cash": 71543.80999999998,
+      "exposure": 22411.019999999997,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-16",
+      "equity": 94111.64999999998,
+      "cash": 71543.80999999998,
+      "exposure": 22567.839999999997,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-17",
+      "equity": 94189.15999999997,
+      "cash": 71543.80999999998,
+      "exposure": 22645.35,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-20",
+      "equity": 94099.76999999999,
+      "cash": 71543.80999999998,
+      "exposure": 22555.96,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    },
+    {
+      "date": "2026-07-21",
+      "equity": 93843.77999999998,
+      "cash": 71543.80999999998,
+      "exposure": 22299.969999999998,
+      "positions": 4,
+      "signals": 10,
+      "approved_buys": 0,
+      "filled_orders": 0,
+      "rejected_orders": 0
+    }
+  ],
+  "orders": [
+    {
+      "date": "2026-06-03",
+      "symbol": "ADSK",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=43",
+      "adjusted_qty": 43,
+      "price": 229.6,
+      "broker_status": "FILLED",
+      "fill_price": 229.6,
+      "cash_after": 90127.2,
+      "positions_after": 1
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=120",
+      "adjusted_qty": 120,
+      "price": 82.05,
+      "broker_status": "FILLED",
+      "fill_price": 82.05,
+      "cash_after": 80281.2,
+      "positions_after": 2
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "BSX",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=205",
+      "adjusted_qty": 205,
+      "price": 47.69,
+      "broker_status": "FILLED",
+      "fill_price": 47.69,
+      "cash_after": 70504.75,
+      "positions_after": 3
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "ACN",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=54",
+      "adjusted_qty": 54,
+      "price": 177.43,
+      "broker_status": "FILLED",
+      "fill_price": 177.43,
+      "cash_after": 60923.53,
+      "positions_after": 4
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "ALB",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=57",
+      "adjusted_qty": 57,
+      "price": 168.34,
+      "broker_status": "FILLED",
+      "fill_price": 168.34,
+      "cash_after": 51328.149999999994,
+      "positions_after": 5
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "CTSH",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=177",
+      "adjusted_qty": 177,
+      "price": 53.51,
+      "broker_status": "FILLED",
+      "fill_price": 53.51,
+      "cash_after": 41856.87999999999,
+      "positions_after": 6
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=345",
+      "adjusted_qty": 345,
+      "price": 27.17,
+      "broker_status": "FILLED",
+      "fill_price": 27.17,
+      "cash_after": 32483.22999999999,
+      "positions_after": 7
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "BA",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=44",
+      "adjusted_qty": 44,
+      "price": 210.58,
+      "broker_status": "FILLED",
+      "fill_price": 210.58,
+      "cash_after": 23217.70999999999,
+      "positions_after": 8
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=56",
+      "adjusted_qty": 56,
+      "price": 161.71,
+      "broker_status": "FILLED",
+      "fill_price": 161.71,
+      "cash_after": 14161.949999999988,
+      "positions_after": 9
+    },
+    {
+      "date": "2026-06-03",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=36",
+      "adjusted_qty": 36,
+      "price": 252.64,
+      "broker_status": "FILLED",
+      "fill_price": 252.64,
+      "cash_after": 5066.909999999989,
+      "positions_after": 10
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "CCL",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 27.85,
+      "broker_status": "FILLED",
+      "fill_price": 27.85,
+      "cash_after": 14675.159999999989
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "BBY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 70.99
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 30.77
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "DLTR",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 109.27
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 761.57
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "CSGP",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 33.66
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "EFX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 170.99
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "CMCSA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 23.33
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "CLX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 89.63
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "DRI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 193.46
+    },
+    {
+      "date": "2026-06-04",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (10)",
+      "adjusted_qty": null,
+      "price": 258.42
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 466.38
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 138.81
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 401.39
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 453.01
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 251.44
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "AKAM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 149.32
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "APA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 36.57
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "DLTR",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 108.8
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 30.96
+    },
+    {
+      "date": "2026-06-05",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 108.13
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "ALGN",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 172.05,
+      "broker_status": "FILLED",
+      "fill_price": 172.05,
+      "cash_after": 24309.959999999992
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 490.33
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "AKAM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 141.87
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 244.99
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 27.01
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 403.89
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "DLTR",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 107.69
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "EFX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 167.89
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 30.86
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 143.6
+    },
+    {
+      "date": "2026-06-08",
+      "symbol": "AMZN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 245.22
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 475.505
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 237.88
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "AKAM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 137.81
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 404.62
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 120.36
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "APA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 36.61
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "DVN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 44.07
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "EFX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 168.37
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "AMZN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 244.19
+    },
+    {
+      "date": "2026-06-09",
+      "symbol": "AAPL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 290.55
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "CME",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 263.8,
+      "broker_status": "FILLED",
+      "fill_price": 263.8,
+      "cash_after": 33806.759999999995
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 452.4
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "AKAM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 129.97
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 392.67
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 233.38
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "DLTR",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 110.32
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 856.16
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 25.99
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 118.8
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "A",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 131.62
+    },
+    {
+      "date": "2026-06-10",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 149.22
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 488.45
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 218.8
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "CSGP",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 32.65
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "EFX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 159.58
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "AKAM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 132.46
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "A",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 129.55
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "APA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 36.78
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "DVN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 44.61
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 121.83
+    },
+    {
+      "date": "2026-06-11",
+      "symbol": "ADM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 78.9
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "EL",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 89.68,
+      "broker_status": "FILLED",
+      "fill_price": 89.68,
+      "cash_after": 44568.35999999999
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 204.02
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 511.57
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "AKAM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 133.5
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "CSGP",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 32.84
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "EFX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 163.71
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 121.1
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "CRL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 187.51
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "AMZN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 238.55
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "DLTR",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 114.0
+    },
+    {
+      "date": "2026-06-12",
+      "symbol": "A",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "portfolio exposure at limit",
+      "adjusted_qty": null,
+      "price": 129.84
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "BA",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 228.95,
+      "broker_status": "FILLED",
+      "fill_price": 228.95,
+      "cash_after": 54642.15999999999
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=20",
+      "adjusted_qty": 20,
+      "price": 206.36,
+      "broker_status": "FILLED",
+      "fill_price": 206.36,
+      "cash_after": 50514.95999999999,
+      "positions_after": 6
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "CSGP",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=134",
+      "adjusted_qty": 134,
+      "price": 32.04,
+      "broker_status": "FILLED",
+      "fill_price": 32.04,
+      "cash_after": 46221.59999999999,
+      "positions_after": 7
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "APA",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=124",
+      "adjusted_qty": 124,
+      "price": 34.77,
+      "broker_status": "FILLED",
+      "fill_price": 34.77,
+      "cash_after": 41910.11999999999,
+      "positions_after": 8
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "AKAM",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=32",
+      "adjusted_qty": 32,
+      "price": 134.2,
+      "broker_status": "FILLED",
+      "fill_price": 134.2,
+      "cash_after": 37615.71999999999,
+      "positions_after": 9
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=82",
+      "adjusted_qty": 82,
+      "price": 52.38,
+      "broker_status": "FILLED",
+      "fill_price": 52.38,
+      "cash_after": 33320.55999999998,
+      "positions_after": 10
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "DVN",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=99",
+      "adjusted_qty": 99,
+      "price": 43.53,
+      "broker_status": "FILLED",
+      "fill_price": 43.53,
+      "cash_after": 29011.089999999982,
+      "positions_after": 11
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "EFX",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=26",
+      "adjusted_qty": 26,
+      "price": 165.13,
+      "broker_status": "FILLED",
+      "fill_price": 165.13,
+      "cash_after": 24717.70999999998,
+      "positions_after": 12
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=35",
+      "adjusted_qty": 35,
+      "price": 120.17,
+      "broker_status": "FILLED",
+      "fill_price": 120.17,
+      "cash_after": 20511.75999999998,
+      "positions_after": 13
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "DLTR",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=38",
+      "adjusted_qty": 38,
+      "price": 112.88,
+      "broker_status": "FILLED",
+      "fill_price": 112.88,
+      "cash_after": 16222.319999999982,
+      "positions_after": 14
+    },
+    {
+      "date": "2026-06-15",
+      "symbol": "BBY",
+      "action": "BUY",
+      "risk_approved": true,
+      "risk_reason": "approved qty=55",
+      "adjusted_qty": 55,
+      "price": 77.41,
+      "broker_status": "FILLED",
+      "fill_price": 77.41,
+      "cash_after": 11964.769999999982,
+      "positions_after": 15
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 507.29
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "CRL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 184.79
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 416.0
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "A",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 128.34
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 119.42
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 568.23
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 88.13
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "COP",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 111.34
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "ADM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 78.02
+    },
+    {
+      "date": "2026-06-16",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 110.17
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 82.46
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 105.72
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 116.14
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "BAX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 19.39
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 29.52
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "A",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 124.33
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "CMCSA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 22.69
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 85.77
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "CTAS",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 169.64
+    },
+    {
+      "date": "2026-06-17",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "max positions reached (15)",
+      "adjusted_qty": null,
+      "price": 414.45
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 112.58
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 246.38
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 82.05
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "COP",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 107.74
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "CMCSA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 22.43
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "AMT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 176.05
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "ADM",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 75.1
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "CVX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 173.63
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 842.25
+    },
+    {
+      "date": "2026-06-18",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-3,206 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 617.11
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "DLTR",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 113.93,
+      "broker_status": "FILLED",
+      "fill_price": 113.93,
+      "cash_after": 16294.109999999982
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "CSCO",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 121.53,
+      "broker_status": "FILLED",
+      "fill_price": 121.53,
+      "cash_after": 20547.65999999998
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "BBY",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 76.01,
+      "broker_status": "FILLED",
+      "fill_price": 76.01,
+      "cash_after": 24728.20999999998
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 111.42
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 245.2
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 105.57
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 83.12
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "CLX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 90.6
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "CMCSA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 22.32
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 831.67
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "AMZN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 232.79
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 173.76
+    },
+    {
+      "date": "2026-06-22",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,705 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 29.48
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 519.85
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 407.26
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 168.49
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 28.72
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 103.63
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 110.86
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 242.26
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 83.76
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "AMZN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 234.11
+    },
+    {
+      "date": "2026-06-23",
+      "symbol": "CLX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,706 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 92.64
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 519.74
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 801.35
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 28.91
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 231.68
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 82.14
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 170.9
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 83.27
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 108.99
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "AMT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 174.46
+    },
+    {
+      "date": "2026-06-24",
+      "symbol": "AMZN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,576 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 234.27
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "ARE",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 53.29,
+      "broker_status": "FILLED",
+      "fill_price": 53.29,
+      "cash_after": 29097.98999999998
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 28.46
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 784.71
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 79.53
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "AMZN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 227.01
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 225.0
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 102.59
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 417.93
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 81.5
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "AAPL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 275.15
+    },
+    {
+      "date": "2026-06-25",
+      "symbol": "AMT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,727 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 168.72
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 386.91
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 778.63
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 521.58
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 221.0
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 29.07
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 80.54
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 626.84
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 110.54
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 113.77
+    },
+    {
+      "date": "2026-06-26",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,289 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 104.56
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 780.24
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 29.19
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 391.78
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 101.28
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 78.63
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 173.43
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 218.58
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 28.1
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "AMT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 168.67
+    },
+    {
+      "date": "2026-06-29",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,599 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 79.37
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 168.66
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 28.57
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 75.73
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 397.17
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 99.29
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 794.79
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 106.73
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "CME",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 220.83
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "AMT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 163.57
+    },
+    {
+      "date": "2026-06-30",
+      "symbol": "EL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,540 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 78.95
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "EFX",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 162.17,
+      "broker_status": "FILLED",
+      "fill_price": 162.17,
+      "cash_after": 33314.40999999998
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "ADBE",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 210.98,
+      "broker_status": "FILLED",
+      "fill_price": 210.98,
+      "cash_after": 37534.00999999998
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 650.91
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 388.98
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 28.52
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 991.41
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 540.88
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 157.06
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 104.89
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 76.53
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "BF.B",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 25.83
+    },
+    {
+      "date": "2026-07-01",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-8,587 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 100.33
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 603.04
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 377.16
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 517.82
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 963.53
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 27.91
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 76.6
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 164.59
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 112.69
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "AMT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 166.03
+    },
+    {
+      "date": "2026-07-02",
+      "symbol": "BG",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-7,461 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 106.46
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "ADSK",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 207.54,
+      "broker_status": "FILLED",
+      "fill_price": 207.54,
+      "cash_after": 46458.22999999998
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "ACN",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 136.96,
+      "broker_status": "FILLED",
+      "fill_price": 136.96,
+      "cash_after": 53854.06999999998
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 592.79
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 27.51
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 969.92
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 388.83
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "CCI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 74.92
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 49.87
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "AMT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 162.11
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 29.24
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "AZO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 2957.71
+    },
+    {
+      "date": "2026-07-06",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,054 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 156.88
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "APA",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 34.0,
+      "broker_status": "FILLED",
+      "fill_price": 34.0,
+      "cash_after": 58070.06999999998
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 554.5
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 516.11
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 26.68
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 158.61
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 379.03
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 940.12
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 49.41
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "CMCSA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 23.41
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "DE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 603.61
+    },
+    {
+      "date": "2026-07-07",
+      "symbol": "BF.B",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,580 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 25.91
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "DVN",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 43.31,
+      "broker_status": "FILLED",
+      "fill_price": 43.31,
+      "cash_after": 62357.75999999998
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "BSX",
+      "action": "CLOSE",
+      "risk_approved": true,
+      "risk_reason": "risk-reducing order",
+      "adjusted_qty": null,
+      "price": 44.81,
+      "broker_status": "FILLED",
+      "fill_price": 44.81,
+      "cash_after": 71543.80999999998
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 570.5
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 25.64
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 174.68
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 48.04
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 148.51
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 158.22
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 948.08
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 385.4
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 517.405
+    },
+    {
+      "date": "2026-07-08",
+      "symbol": "BF.B",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,651 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 25.78
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 588.66
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 938.39
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 162.24
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 26.72
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 48.51
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "BF.B",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 25.22
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 149.55
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 393.64
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 28.33
+    },
+    {
+      "date": "2026-07-09",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,590 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 178.17
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 602.5
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 159.06
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 26.83
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 27.515
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 47.88
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "DE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 586.86
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 151.58
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "ACN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 135.23
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 952.41
+    },
+    {
+      "date": "2026-07-10",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,398 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 179.45
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 575.39
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 534.39
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 155.99
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 931.47
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 26.61
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 386.01
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 27.445
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 48.08
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 148.85
+    },
+    {
+      "date": "2026-07-13",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,894 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 180.59
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 595.7
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 548.13
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 933.34
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "ARE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 47.5
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 27.52
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "BF.B",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 25.1
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "BSX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 42.63
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "BAX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 21.8
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 149.99
+    },
+    {
+      "date": "2026-07-14",
+      "symbol": "EFX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,611 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 166.93
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 579.43
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 529.14
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 914.3
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 157.04
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 111.77
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 27.28
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "BF.B",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 25.07
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "CINF",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 172.43
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "CASY",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 808.49
+    },
+    {
+      "date": "2026-07-15",
+      "symbol": "AZO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,756 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 2970.57
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 560.93
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 500.94
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 877.17
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 153.14
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 178.41
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 380.53
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 109.66
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "CI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 283.82
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "C",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 131.71
+    },
+    {
+      "date": "2026-07-16",
+      "symbol": "BA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-6,045 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 214.34
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 529.66
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 495.76
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 176.76
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 151.2
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 880.28
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 375.36
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 111.94
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "CRL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 224.35
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "CPRT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 27.61
+    },
+    {
+      "date": "2026-07-17",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,888 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 149.39
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 525.7
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 503.57
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 864.3
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "APH",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 150.51
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "ALGN",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 175.05
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "ADI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 372.46
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 110.7
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "CCL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 26.04
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "BAX",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 22.07
+    },
+    {
+      "date": "2026-07-20",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,811 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 144.79
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "AMAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 564.55
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "AMD",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 544.43
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "CAT",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 889.97
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "DHR",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 179.01
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "ADBE",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 227.16
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "DHI",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 143.52
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "BA",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 204.8
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "DECK",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 103.31
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "CRL",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 219.4
+    },
+    {
+      "date": "2026-07-21",
+      "symbol": "CSCO",
+      "action": "BUY",
+      "risk_approved": false,
+      "risk_reason": "circuit breaker: P&L $-5,900 <= limit $-2,000",
+      "adjusted_qty": null,
+      "price": 112.18
+    }
+  ]
+}

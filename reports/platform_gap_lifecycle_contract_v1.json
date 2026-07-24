@@ -1,0 +1,182 @@
+{
+  "schema_version": "v1",
+  "contract_status": {
+    "value": "proposed_not_implemented",
+    "basis": "E",
+    "evidence": [
+      "reports/agent_platform_strategy.md:203-216",
+      "reports/agent_platform_strategy.md:245-252"
+    ]
+  },
+  "scope": {
+    "value": "platform-neutral deterministic lifecycle and idempotent scheduler/task receipt contract for V20 G4 and G8",
+    "basis": "N"
+  },
+  "decision_owner": {
+    "value": "Brennan",
+    "basis": "E",
+    "evidence": ["AGENTS.md:93-106", "reports/agent_platform_strategy.md:5"]
+  },
+  "observed_primitives": [
+    {
+      "field": "task_id",
+      "basis": "E",
+      "evidence": ["V20 Kanban tasks table and current task graph"]
+    },
+    {
+      "field": "task_runs",
+      "basis": "E",
+      "evidence": ["V20 Kanban task_runs table and current run rows"]
+    },
+    {
+      "field": "task_events",
+      "basis": "E",
+      "evidence": ["V20 Kanban task_events table and current event rows"]
+    },
+    {
+      "field": "task_links",
+      "basis": "E",
+      "evidence": ["V20 Kanban task_links table and current dependency graph"]
+    },
+    {
+      "field": "claim_lock_claim_expires_heartbeat",
+      "basis": "E",
+      "evidence": ["V20 Kanban tasks/task_runs schema and current claims"]
+    },
+    {
+      "field": "idempotency_key_column",
+      "basis": "E",
+      "evidence": ["V20 Kanban tasks schema"]
+    }
+  ],
+  "lifecycle": {
+    "ordered_stages": ["ADMISSION", "CONTRACT", "IMPLEMENT", "TRAIN", "BACKTEST", "REVIEW", "NEXT"],
+    "basis": "N",
+    "stages": [
+      {
+        "name": "ADMISSION",
+        "role_id": {"value": "product", "basis": "N"},
+        "entry_guard": {"value": "immutable workflow_id; originating Brennan instruction or admitted V20 contract reference; authority classification", "basis": "E/N"},
+        "exit_guard": {"value": "scope, owner, dependencies, evidence location, acceptance criteria, stop condition; exact approval reference for denied authority before runnable", "basis": "E/N"},
+        "allowed_exit_outcomes": ["VERIFIED", "REJECTED", "BLOCKED"]
+      },
+      {
+        "name": "CONTRACT",
+        "role_id": {"value": "quant-research", "basis": "N"},
+        "entry_guard": {"value": "authoritative ADMISSION receipt outcome VERIFIED", "basis": "N"},
+        "exit_guard": {"value": "frozen testable contract binds scope, inputs, clocks, metrics, acceptance criteria, stop conditions, evidence", "basis": "N"},
+        "allowed_exit_outcomes": ["VERIFIED", "FAILED", "BLOCKED", "INTERRUPTED", "AMBIGUOUS"]
+      },
+      {
+        "name": "IMPLEMENT",
+        "role_id": {"value": "development", "basis": "N"},
+        "entry_guard": {"value": "authoritative CONTRACT receipt outcome VERIFIED", "basis": "N"},
+        "exit_guard": {"value": "implementation evidence and verification satisfy frozen contract", "basis": "N"},
+        "allowed_exit_outcomes": ["VERIFIED", "FAILED", "BLOCKED", "INTERRUPTED", "AMBIGUOUS"]
+      },
+      {
+        "name": "TRAIN",
+        "role_id": {"value": "ml-systems", "basis": "N"},
+        "entry_guard": {"value": "authoritative IMPLEMENT receipt outcome VERIFIED and explicit research-only training authorization in contract", "basis": "N"},
+        "exit_guard": {"value": "frozen input, code/environment identity, execution bounds, output evidence", "basis": "N"},
+        "allowed_exit_outcomes": ["VERIFIED", "FAILED", "BLOCKED", "INTERRUPTED", "AMBIGUOUS"]
+      },
+      {
+        "name": "BACKTEST",
+        "role_id": {"value": "portfolio-research", "basis": "N"},
+        "entry_guard": {"value": "authoritative TRAIN receipt outcome VERIFIED, or sealed contract explicitly specifies no-training evaluation", "basis": "N"},
+        "exit_guard": {"value": "contract-bound inputs, costs, outputs, integrity checks", "basis": "N"},
+        "allowed_exit_outcomes": ["VERIFIED", "FAILED", "BLOCKED", "INTERRUPTED", "AMBIGUOUS"]
+      },
+      {
+        "name": "REVIEW",
+        "role_id": {"value": "risk-review", "basis": "N"},
+        "entry_guard": {"value": "authoritative BACKTEST receipt outcome VERIFIED", "basis": "N"},
+        "exit_guard": {"value": "independent verdict with exact reviewed evidence", "basis": "E/N"},
+        "allowed_exit_outcomes": ["VERIFIED", "FAILED", "BLOCKED", "INCONCLUSIVE", "INTERRUPTED", "AMBIGUOUS"]
+      },
+      {
+        "name": "NEXT",
+        "role_id": {"value": "product", "basis": "N"},
+        "entry_guard": {"value": "authoritative REVIEW receipt has recorded verdict", "basis": "N"},
+        "exit_guard": {"value": "STOP, CLOSE, REQUEST_NEW_ADMISSION, or HUMAN_APPROVAL_REQUIRED; no automatic execution", "basis": "E/N"},
+        "allowed_exit_outcomes": ["VERIFIED", "BLOCKED"]
+      }
+    ],
+    "transition_rules": [
+      {"value": "Only immediate forward transitions are permitted; stages cannot be skipped.", "basis": "N"},
+      {"value": "Forward transition atomically appends predecessor authoritative exit receipt, persists successor READY, and binds successor to receipt_id; inability to do so yields AMBIGUOUS and no dispatch.", "basis": "N"},
+      {"value": "ACTIVE requires entry guard and exclusive durable lease.", "basis": "N"},
+      {"value": "Missing receipt, evidence reference, authority reference, or valid predecessor outcome fails closed.", "basis": "N"}
+    ]
+  },
+  "identity_and_idempotency": {
+    "workflow_id": {"value": "assigned once at ADMISSION; never reused, renamed, or reassigned", "basis": "N"},
+    "attempt_id": {"value": "assigned once per execution claim; retry uses new ID with retry_of_attempt_id", "basis": "N"},
+    "receipt_id": {"value": "assigned once per immutable append-only receipt", "basis": "N"},
+    "idempotency_key": {"value": "same workflow_id, stage, and key returns existing attempt/receipt and creates no duplicate runnable attempt", "basis": "N", "evidence": ["existing Kanban tasks.idempotency_key column"]}
+  },
+  "lease": {
+    "scope": {"value": "V20 board namespace", "basis": "N"},
+    "invariant": {"value": "at most one unexpired ACTIVE lease per role_id", "basis": "N"},
+    "fields": [
+      {"name": "lease_id", "basis": "N"},
+      {"name": "workflow_id", "basis": "N"},
+      {"name": "stage", "basis": "N"},
+      {"name": "role_id", "basis": "E/N"},
+      {"name": "attempt_id", "basis": "N"},
+      {"name": "issued_at_utc", "basis": "N"},
+      {"name": "expires_at_utc", "basis": "E/N"},
+      {"name": "renewed_at_utc", "basis": "E/N"}
+    ],
+    "expiry_rule": {"value": "expiry records INTERRUPTED and requires reconciliation; it is neither proof of failure nor authorization to retry", "basis": "N"}
+  },
+  "outcomes": [
+    {"name": "VERIFIED", "meaning": "exit guard independently evidenced", "basis": "N"},
+    {"name": "REJECTED", "meaning": "ADMISSION declined before downstream stage runnable", "basis": "N"},
+    {"name": "FAILED", "meaning": "known guard or verification failure", "basis": "N"},
+    {"name": "BLOCKED", "meaning": "named missing dependency or human decision", "basis": "E/N"},
+    {"name": "INCONCLUSIVE", "meaning": "REVIEW evidence does not justify positive or negative conclusion", "basis": "N"},
+    {"name": "INTERRUPTED", "meaning": "lease/process/dispatcher ended before verified exit receipt", "basis": "E/N"},
+    {"name": "AMBIGUOUS", "meaning": "durable or external effect cannot be proven", "basis": "N"}
+  ],
+  "reconciliation": {
+    "trigger": {"value": "INTERRUPTED or AMBIGUOUS", "basis": "N"},
+    "separation": {"value": "distinct reconciler reads immutable inputs, effects, and prior receipts", "basis": "N"},
+    "allowed_results": ["VERIFIED", "FAILED", "BLOCKED"],
+    "prohibited_before_reconciliation": ["automatic retry", "successor dispatch", "model replacement", "schedule action", "authority escalation"],
+    "basis": "N"
+  },
+  "dependency_propagation": {
+    "ready_rule": {"value": "all required predecessors have authoritative VERIFIED receipts meeting their exit guards", "basis": "N"},
+    "block_rule": {"value": "any predecessor REJECTED, FAILED, BLOCKED, INTERRUPTED, AMBIGUOUS, or INCONCLUSIVE blocks dependents with exact blocked_by_receipt_ids and propagated outcome", "basis": "N"},
+    "observed_evidence": ["current V20 Kanban task_links and parent-driven promotions"]
+  },
+  "receipt_schema": [
+    {"name": "schema_version", "required": true, "basis": "N"},
+    {"name": "receipt_id", "required": true, "basis": "N"},
+    {"name": "workflow_id", "required": true, "basis": "E/N"},
+    {"name": "attempt_id", "required": true, "basis": "E/N"},
+    {"name": "stage", "required": true, "basis": "N"},
+    {"name": "role_id", "required": true, "basis": "E/N"},
+    {"name": "event_type", "required": true, "basis": "E/N"},
+    {"name": "outcome", "required": "for EXIT or RECONCILIATION", "basis": "E/N"},
+    {"name": "occurred_at_utc", "required": true, "basis": "E/N"},
+    {"name": "predecessor_receipt_ids", "required": true, "basis": "N"},
+    {"name": "blocked_by_receipt_ids", "required": "when blocked", "basis": "N"},
+    {"name": "authority_reference", "required": "when authority gate applies", "basis": "E/N"},
+    {"name": "contract_reference", "required": "after CONTRACT", "basis": "N"},
+    {"name": "evidence", "required": true, "basis": "E/N"},
+    {"name": "lease", "required": "for ACTIVE/HEARTBEAT/EXIT", "basis": "E/N"},
+    {"name": "idempotency_key", "required": "for dispatch/effecting attempt", "basis": "E/N"},
+    {"name": "effect_scope", "required": true, "basis": "N"},
+    {"name": "ambiguity_reason", "required": "when ambiguous", "basis": "N"},
+    {"name": "retry_of_attempt_id", "required": "when retry", "basis": "N"},
+    {"name": "producer", "required": true, "basis": "E/N"}
+  ],
+  "current_gate": {
+    "value": "Brennan review; no implementation or authority action is authorized by this proposed contract",
+    "basis": "E/N",
+    "evidence": ["AGENTS.md:93-115", "reports/research/data_evaluation_admission_review_v1.md:46-52"]
+  }
+}
