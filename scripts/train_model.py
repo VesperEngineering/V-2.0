@@ -20,6 +20,12 @@ import xgboost as xgb
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from vesper.data.features import compute_features, FEATURE_COLS
+from vesper.data.split_adjustments import (
+    SPLIT_ADJUSTMENTS_PATH,
+    SPLIT_ADJUSTMENTS_SHA256,
+    apply_split_adjustments,
+    load_split_adjustments,
+)
 
 logger = logging.getLogger("train_model")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
@@ -40,38 +46,6 @@ MODEL_PARAMS = {
     "n_jobs": -1,
     "random_state": 42,
 }
-
-# Candidate paths for split-adjustment map (cumulative forward factors)
-SPLIT_ADJ_PATHS = [
-    Path("vesper/data/massive/split_adjustments.json"),
-]
-
-
-def _load_split_adjustments() -> dict[str, dict[str, float]] | None:
-    """Load cumulative forward split-adjustment factors if available."""
-    for p in SPLIT_ADJ_PATHS:
-        if p.exists():
-            logger.info("Loading split adjustments from %s", p)
-            return json.loads(p.read_text())
-    return None
-
-
-def _apply_split_adjustments(
-    bars: dict[str, pd.DataFrame], adjustments: dict[str, dict[str, float]]
-) -> dict[str, pd.DataFrame]:
-    """Multiply price columns by cumulative forward split factors."""
-    adjusted = {}
-    for ticker, df in bars.items():
-        df = df.copy()
-        adj = adjustments.get(ticker, {})
-        if adj:
-            # Build a series of factors aligned to df index
-            factor = pd.Series({pd.Timestamp(d): v for d, v in adj.items()})
-            factor = factor.reindex(df.index, method="ffill").fillna(1.0)
-            for col in ("open", "high", "low", "close"):
-                df[col] = df[col] * factor
-        adjusted[ticker] = df
-    return adjusted
 
 
 def load_bars(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
@@ -203,13 +177,13 @@ def main():
     conn.close()
     logger.info("Loaded %d tickers", len(bars))
 
-    # Split adjustment (if available)
-    split_adj = _load_split_adjustments()
-    if split_adj:
-        bars = _apply_split_adjustments(bars, split_adj)
-        logger.info("Applied split adjustments to %d tickers", len(split_adj))
-    else:
-        logger.warning("No split adjustments found; using raw prices")
+    split_adj = load_split_adjustments(
+        SPLIT_ADJUSTMENTS_PATH,
+        expected_sha256=SPLIT_ADJUSTMENTS_SHA256,
+        required_tickers=bars,
+    )
+    bars = apply_split_adjustments(bars, split_adj)
+    logger.info("Applied split adjustments to %d tickers", len(split_adj))
 
     logger.info("Building training set...")
     X, y, dates = build_training_set(bars)

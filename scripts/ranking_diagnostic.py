@@ -16,6 +16,12 @@ import yaml
 
 from vesper.data.features import FEATURE_COLS, compute_features, zscore_features
 from vesper.data.feed import create_feed
+from vesper.data.split_adjustments import (
+    SPLIT_ADJUSTMENTS_PATH,
+    SPLIT_ADJUSTMENTS_SHA256,
+    apply_split_adjustments,
+    load_split_adjustments,
+)
 
 
 LABEL_HORIZON = 5
@@ -130,12 +136,19 @@ def main():
     with open("config/universe.yaml", encoding="utf-8") as f:
         universe = yaml.safe_load(f)["universe"]
 
+    split_adj = load_split_adjustments(
+        SPLIT_ADJUSTMENTS_PATH,
+        expected_sha256=SPLIT_ADJUSTMENTS_SHA256,
+        required_tickers=universe,
+    )
+
     model_path = Path(config["strategy"]["params"]["model_path"])
     model = xgb.XGBRegressor()
     model.load_model(model_path)
 
     end = datetime.now()
     data = create_feed(config).get_bars(universe, end - timedelta(days=args.history_days), end)
+    data = apply_split_adjustments(data, split_adj)
     results = run_diagnostic(data=data, model=model, basket_size=args.basket_size)
     report = {
         "model_path": str(model_path),

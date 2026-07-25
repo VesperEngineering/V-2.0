@@ -1,0 +1,73 @@
+{
+  "receipt_schema_version": 1,
+  "receipt_revision": 2,
+  "receipt_id": "v20-gate-a-split-adjustments-2026-07-25",
+  "immutable": true,
+  "admission_status": "accepted",
+  "created_at": "2026-07-25T03:40:01-04:00",
+  "correction_reference": "Corrected before admission after independent review deleg_6eb3da27 identified checkout-dependent CRLF working-tree hashes; revision 2 binds canonical LF/staged Git blob bytes.",
+  "approval_reference": "User explicitly approved Gate A on 2026-07-25: create the byte-identical V20-local artifact and make only the narrow fail-closed validator, loader, training, diagnostic, and test changes.",
+  "source_commit": "0246a0496986f2955f827fad9e993b6a12afa0ab",
+  "split_policy_version": "gate-a-v1",
+  "label_horizon_sessions": 5,
+  "source_artifact": {
+    "path": "D:\\vesper\\vesper_data\\split_adjustments.json",
+    "bytes": 48162992,
+    "sha256": "f4f20d413783b0dd0d32b8bbf8e018d96b8098dba2351a2495737a8ec9dd763a",
+    "provenance_statement": "Accepted legacy Vesper candidate. Original producer metadata is unavailable; admission is bound to this exact observed path, byte count, and SHA-256 rather than inferred provenance."
+  },
+  "admitted_artifact": {
+    "path": "vesper/data/massive/split_adjustments.json",
+    "bytes": 48162992,
+    "sha256": "f4f20d413783b0dd0d32b8bbf8e018d96b8098dba2351a2495737a8ec9dd763a",
+    "transfer": "byte-identical copy; no normalization, reserialization, or regeneration"
+  },
+  "ohlcv_snapshot": {
+    "path": "vesper/data/massive/sp500/sp500_ohlcv.sqlite",
+    "bytes": 266952704,
+    "sha256": "6ad6bc7ced7781b9f94dea030b06b71ed55a1f889a7e925cbb428398cecc1bb0"
+  },
+  "universe": {
+    "path": "config/universe.yaml",
+    "count": 100,
+    "sha256": "2a034bb8d680f55e34a8b27e75ae288a225b809753f158d9bae83ab1af72994e"
+  },
+  "feature_code_hash_basis": "SHA-256 of file bytes with CRLF normalized to LF; equivalent to staged Git blob content",
+  "feature_code_identity": {
+    "vesper/data/split_adjustments.py": "521a2e2b0ed6d9ab04ba76882dfb99019be755acb977d681f3e6da11849badce",
+    "vesper/data/features.py": "8f5fde2dd04d463ec88427b9cc864b928620a22a921e7efe3daed6c69bf471e1",
+    "scripts/train_model.py": "85f645e049c597da199b62d1d6b849b9c5e792f471fd45c171421f5e84717e62",
+    "scripts/ranking_diagnostic.py": "8a49b590cfbbb08d8a8e278baf5fe43da67b7015faf7f27d8330a852535eb4da"
+  },
+  "runtime": {
+    "python": "3.11.15",
+    "pandas": "3.0.3",
+    "numpy": "2.4.6",
+    "xgboost": "3.2.0"
+  },
+  "validation": {
+    "source_hash_matches_declared_hash": true,
+    "local_hash_matches_source_hash": true,
+    "ticker_count": 502,
+    "factor_entry_count": 2479293,
+    "date_min": "2003-09-10",
+    "date_max": "2026-07-10",
+    "invalid_ticker_date_or_factor_fields": 0,
+    "duplicate_keys": 0,
+    "empty_factor_maps": 0,
+    "required_universe_count": 100,
+    "missing_required_tickers": [],
+    "valid_extra_ticker_count": 402,
+    "price_columns_adjusted": ["open", "high", "low", "close"],
+    "volume_treatment": "unchanged",
+    "pre_first_factor_treatment": "factor 1.0",
+    "post_last_factor_treatment": "forward-fill the last admitted cumulative factor",
+    "input_frames_mutated": false
+  },
+  "authorizations": {
+    "training_authorized": false,
+    "model_promotion_authorized": false,
+    "paper_execution_authorized": false,
+    "live_execution_authorized": false
+  }
+}

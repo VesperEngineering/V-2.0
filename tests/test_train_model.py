@@ -1,12 +1,80 @@
+import sys
 from pathlib import Path
+
+import pandas as pd
+import pytest
 
 from scripts import train_model
 
 
-def test_split_adjustment_paths_stay_inside_v20():
-    assert train_model.SPLIT_ADJ_PATHS == [
-        Path("vesper/data/massive/split_adjustments.json"),
-    ]
+def test_split_adjustment_path_stays_inside_v20():
+    assert train_model.SPLIT_ADJUSTMENTS_PATH == Path(
+        "vesper/data/massive/split_adjustments.json"
+    )
+
+
+def test_training_stops_before_features_when_split_adjustments_are_missing(
+    monkeypatch, tmp_path
+):
+    database_path = tmp_path / "sp500_ohlcv.sqlite"
+    database_path.touch()
+    monkeypatch.setattr(train_model, "SP500_DB", database_path)
+    monkeypatch.setattr(train_model, "MODEL_PATH", tmp_path / "model.json")
+    monkeypatch.setattr(
+        train_model,
+        "SPLIT_ADJUSTMENTS_PATH",
+        tmp_path / "missing-split-adjustments.json",
+    )
+    monkeypatch.setattr(train_model, "load_bars", lambda connection: {"AAA": object()})
+    monkeypatch.setattr(
+        train_model,
+        "build_training_set",
+        lambda bars: pytest.fail("features must not run without split adjustments"),
+    )
+    monkeypatch.setattr(sys, "argv", ["train_model.py"])
+
+    with pytest.raises(FileNotFoundError, match="Split adjustments not found"):
+        train_model.main()
+
+
+def test_training_applies_split_adjustments_before_features(monkeypatch, tmp_path):
+    database_path = tmp_path / "sp500_ohlcv.sqlite"
+    database_path.touch()
+    index = pd.to_datetime(["2024-01-02"])
+    bars = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [100.0],
+                "high": [110.0],
+                "low": [90.0],
+                "close": [105.0],
+                "volume": [1000],
+            },
+            index=index,
+        )
+    }
+    captured = {}
+
+    monkeypatch.setattr(train_model, "SP500_DB", database_path)
+    monkeypatch.setattr(train_model, "MODEL_PATH", tmp_path / "model.json")
+    monkeypatch.setattr(train_model, "load_bars", lambda connection: bars)
+    monkeypatch.setattr(
+        train_model,
+        "load_split_adjustments",
+        lambda *args, **kwargs: {"AAA": {"2024-01-02": 0.5}},
+    )
+
+    def capture_features(data):
+        captured["close"] = data["AAA"]["close"].iloc[0]
+        raise RuntimeError("stop after adjustment")
+
+    monkeypatch.setattr(train_model, "build_training_set", capture_features)
+    monkeypatch.setattr(sys, "argv", ["train_model.py"])
+
+    with pytest.raises(RuntimeError, match="stop after adjustment"):
+        train_model.main()
+
+    assert captured["close"] == 52.5
 
 
 def test_metadata_serializes_active_model_parameters(tmp_path):
