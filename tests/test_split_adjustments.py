@@ -9,7 +9,7 @@ from vesper.data.split_adjustments import apply_split_adjustments, load_split_ad
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RECEIPT_PATH = ROOT / "reports" / "gate_a_split_adjustment_admission_v1.json"
+RECEIPT_PATH = ROOT / "reports" / "gate_a_split_adjustment_admission_v2.json"
 
 
 def _write_adjustments(path, payload):
@@ -17,15 +17,28 @@ def _write_adjustments(path, payload):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_admission_receipt_binds_canonical_feature_code():
+def test_admission_receipt_binds_canonical_tracked_inputs():
     receipt = json.loads(RECEIPT_PATH.read_text(encoding="utf-8"))
-    assert receipt["feature_code_hash_basis"] == (
+    canonical_hash_basis = (
         "SHA-256 of file bytes with CRLF normalized to LF; equivalent to staged Git blob content"
     )
+    assert receipt["tracked_text_hash_basis"] == canonical_hash_basis
 
     for relative_path, expected_hash in receipt["feature_code_identity"].items():
         canonical_bytes = (ROOT / relative_path).read_bytes().replace(b"\r\n", b"\n")
         assert hashlib.sha256(canonical_bytes).hexdigest() == expected_hash
+
+    universe_bytes = (ROOT / receipt["universe"]["path"]).read_bytes().replace(
+        b"\r\n", b"\n"
+    )
+    assert hashlib.sha256(universe_bytes).hexdigest() == receipt["universe"]["sha256"]
+
+    superseded = receipt["supersedes_receipt"]
+    assert superseded["path"] == "reports/gate_a_split_adjustment_admission_v1.json"
+    superseded_bytes = (ROOT / superseded["path"]).read_bytes().replace(
+        b"\r\n", b"\n"
+    )
+    assert hashlib.sha256(superseded_bytes).hexdigest() == superseded["sha256"]
 
 
 def test_load_split_adjustments_rejects_missing_file(tmp_path):
