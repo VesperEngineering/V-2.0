@@ -1,0 +1,33 @@
+{
+  "bindings": {
+    "contract_sha256": "87653af97402aa9255a5cc986a667e4d96d09117892d2d00daa6ac1d41da64ca",
+    "database_sha256": "825252f94efb228df37683d58a1199cbc101828bbe7f53079e9d066c28e5a70c",
+    "evaluator_sha256": "cc222e5b7f638f2823dccaf5d8af49bc26c6e022aa84d9363fc5a3169aed3e3a",
+    "repo_commit": "b46d29623f133548a6a438ac2f8da6d10872d093"
+  },
+  "blocks": 312,
+  "decision": "SELECTION_DIRECTION_PASS_NOT_CONFIRMATORY",
+  "limitations": [
+    "Selection evidence is not a final holdout and cannot support promotion, trading, or deployment.",
+    "No final-holdout outcomes were accessed or computed.",
+    "Adjusted prices are research-accounting values, not executable market prices."
+  ],
+  "metrics": {
+    "baseline_cumulative_net_return": 0.19884999426121097,
+    "candidate_cumulative_net_return": 0.36929040471941876,
+    "candidate_invested_block_fraction": 0.6987179487179487,
+    "candidate_positive_block_fraction": 0.4230769230769231,
+    "paired_mean_net_difference": 0.00030310810357609563,
+    "paired_moving_block_bootstrap_95pct": [
+      -0.0011250741438489607,
+      0.0018439680289577738
+    ]
+  },
+  "phase": "selection",
+  "predeclared_selection_gate": {
+    "candidate_cumulative_net_return_positive": true,
+    "paired_direction_positive": true
+  },
+  "receipt": "spy_momentum_cpu_selection_v1",
+  "research_only": true
+}

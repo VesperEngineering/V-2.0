@@ -1,0 +1,37 @@
+{
+  "adapter": {
+    "first_session": "2003-09-10",
+    "last_session": "2026-06-30",
+    "metadata": {
+      "generated_at": "2026-07-17T15:39:01.593969+00:00",
+      "price_basis": "total_return_adjusted",
+      "source_table": "total_return_adjusted_day_aggs",
+      "timeframe": "1day"
+    },
+    "path": "C:\\Users\\bgonn\\Desktop\\v20\\vesper\\data\\massive\\adapters\\total_return_ohlcv_adapter_20260717T153500Z.sqlite",
+    "sha256": "825252f94efb228df37683d58a1199cbc101828bbe7f53079e9d066c28e5a70c",
+    "spy_row_count": 5737
+  },
+  "audit_date_utc": "2026-07-25",
+  "decision": "ADMIT_SELECTION",
+  "decision_scope": "development and selection only; not final holdout admission; no selection outcomes computed",
+  "gates": {
+    "adapter_identity": "pass",
+    "approved_spy_scope": "pass",
+    "backing_db_consistency": "pass: 0 missing/hash/value mismatches",
+    "local_snapshot_stability": "pass: zero OHLCV mismatches across overlapping 20260622, 20260701T182338Z, and 20260701T182524Z snapshots",
+    "no_writes": "pass",
+    "source_mapping": "pass: every SPY row has nonempty source_ticker/source_as_of_date/source_key/source_sha256",
+    "spy_integrity": "pass: unique monotonic timestamps; finite positive OHLC",
+    "total_return_metadata": "pass"
+  },
+  "limitations": [
+    "Raw-to-derived reconstruction requires external D:\\vesper inputs absent from V20; this receipt claims frozen-input reproducibility, not raw rebuild reproducibility.",
+    "The 2026-06-30 adapter cutoff is not final-holdout data.",
+    "Adjusted prices are research-accounting values, not executable market prices."
+  ],
+  "receipt": "spy_momentum_cpu_slice3_data_admission_v1",
+  "repo_commit": "b46d29623f133548a6a438ac2f8da6d10872d093",
+  "required_next_action": "Freeze and independently review the selection contract before any selection outcome computation.",
+  "reviewer": "independent read-only review deleg_a704af61"
+}
