@@ -32,6 +32,7 @@ def test_forecast_record_is_a_frozen_closed_shadow_contract():
         as_of_timestamp=as_of,
         horizon_sessions=5,
         target_definition=TARGET_DEFINITION,
+        raw_model_score=0.75,
         standardized_score=1.25,
         rank=1,
         model_artifact_path="models/xgb_ranker.json",
@@ -39,6 +40,7 @@ def test_forecast_record_is_a_frozen_closed_shadow_contract():
         dataset_identity_sha256=SHA_B,
         adjustment_identity_sha256=SHA_C,
         feature_identity_sha256=SHA_D,
+        universe_identity_sha256=SHA_E,
         expert_version="xgb-2026.07.24",
         feature_version="features-v1",
         run_manifest_sha256=SHA_E,
@@ -50,12 +52,15 @@ def test_forecast_record_is_a_frozen_closed_shadow_contract():
     assert record.as_of_timestamp == as_of
     assert record.horizon_sessions == 5
     assert record.target_definition == TARGET_DEFINITION
+    assert record.raw_model_score == 0.75
+    assert record.raw_score_units == "standardized_forward_return_label_score"
     assert record.standardized_score == 1.25
     assert record.rank == 1
     assert record.schema_version == "1"
     assert record.expert_id == "xgb_ranker"
     assert record.expert_version == "xgb-2026.07.24"
     assert record.feature_version == "features-v1"
+    assert record.universe_identity_sha256 == SHA_E
     assert record.run_manifest_sha256 == SHA_E
     assert record.score_units == "cross_sectional_zscore"
     assert record.direction == "higher_is_better"
@@ -77,6 +82,7 @@ def _valid_record_kwargs():
         "as_of_timestamp": datetime(2026, 7, 24, 16, 0),
         "horizon_sessions": 5,
         "target_definition": TARGET_DEFINITION,
+        "raw_model_score": 0.0,
         "standardized_score": 0.0,
         "rank": 1,
         "model_artifact_path": "models/xgb_ranker.json",
@@ -84,6 +90,7 @@ def _valid_record_kwargs():
         "dataset_identity_sha256": SHA_B,
         "adjustment_identity_sha256": SHA_C,
         "feature_identity_sha256": SHA_D,
+        "universe_identity_sha256": SHA_E,
         "expert_version": "xgb-2026.07.24",
         "feature_version": "features-v1",
         "run_manifest_sha256": SHA_E,
@@ -99,6 +106,7 @@ def _valid_record_kwargs():
         ("dataset_identity_sha256", "a" * 63),
         ("adjustment_identity_sha256", "g" * 64),
         ("feature_identity_sha256", " " * 64),
+        ("universe_identity_sha256", "9" * 63),
         ("run_manifest_sha256", "e" * 63),
     ],
 )
@@ -110,12 +118,13 @@ def test_forecast_record_rejects_invalid_provenance(field, value):
         ForecastRecord(**kwargs)
 
 
+@pytest.mark.parametrize("field", ["raw_model_score", "standardized_score"])
 @pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
-def test_forecast_record_rejects_nonfinite_scores(score):
+def test_forecast_record_rejects_nonfinite_scores(field, score):
     kwargs = _valid_record_kwargs()
-    kwargs["standardized_score"] = score
+    kwargs[field] = score
 
-    with pytest.raises(ValueError, match="standardized_score"):
+    with pytest.raises(ValueError, match=field):
         ForecastRecord(**kwargs)
 
 
@@ -131,6 +140,7 @@ def test_forecast_record_rejects_nonfinite_scores(score):
         ("expert_version", " "),
         ("feature_version", ""),
         ("target_definition", "next_close_return"),
+        ("raw_score_units", "raw_return"),
         ("score_units", "raw_return"),
         ("direction", "lower_is_better"),
         ("data_freshness_status", "stale"),
@@ -342,6 +352,11 @@ def test_generate_shadow_forecasts_returns_inert_provenance_complete_records(
         ("ZZZ", 2),
     ]
     assert all(record.standardized_score == 0.0 for record in records)
+    assert all(record.raw_model_score == 0.0 for record in records)
+    assert all(
+        record.raw_score_units == "standardized_forward_return_label_score"
+        for record in records
+    )
     assert all(record.horizon_sessions == 5 for record in records)
     assert all(record.target_definition == TARGET_DEFINITION for record in records)
     assert all(record.as_of_timestamp == as_of for record in records)
@@ -360,6 +375,10 @@ def test_generate_shadow_forecasts_returns_inert_provenance_complete_records(
     assert all(record.adjustment_identity_sha256 == SHA_C for record in records)
     expected_feature_sha = _canonical_sha256(FEATURE_COLS)
     assert all(record.feature_identity_sha256 == expected_feature_sha for record in records)
+    expected_universe_sha = _canonical_sha256(
+        ["A", "AAA", "AAPL", "B", "C", "MSFT", "ZZZ"]
+    )
+    assert all(record.universe_identity_sha256 == expected_universe_sha for record in records)
     assert all(record.schema_version == "1" for record in records)
     assert all(record.expert_id == "xgb_ranker" for record in records)
     assert all(record.expert_version == "xgb-2026.07.24" for record in records)
@@ -549,6 +568,7 @@ def test_generate_shadow_forecasts_standardizes_cross_sectional_model_scores(
     )
 
     assert [record.symbol for record in records] == ["A", "B", "C"]
+    assert [record.raw_model_score for record in records] == [1.0, 0.0, -1.0]
     assert [record.standardized_score for record in records] == pytest.approx(
         [1.0, 0.0, -1.0]
     )

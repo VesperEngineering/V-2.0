@@ -194,6 +194,7 @@ class MLModelStrategy(Strategy):
                 valid_until_timestamp=valid_until_timestamp,
                 horizon_sessions=compatibility["label_horizon"],
                 target_definition=compatibility["target_definition"],
+                raw_model_score=raw_score,
                 standardized_score=standardized[rank - 1],
                 rank=rank,
                 model_artifact_path=str(self.model_path),
@@ -201,11 +202,12 @@ class MLModelStrategy(Strategy):
                 dataset_identity_sha256=dataset_identity_sha256,
                 adjustment_identity_sha256=adjustment_identity_sha256,
                 feature_identity_sha256=compatibility["feature_identity_sha256"],
+                universe_identity_sha256=compatibility["universe_identity_sha256"],
                 expert_version=expert_version,
                 feature_version=feature_version,
                 run_manifest_sha256=run_manifest_sha256,
             )
-            for rank, (sym, _) in enumerate(ranked, start=1)
+            for rank, (sym, raw_score) in enumerate(ranked, start=1)
         ]
 
     def generate_signals(self, data, current_positions, timestamp):

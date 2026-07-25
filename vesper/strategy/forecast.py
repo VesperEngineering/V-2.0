@@ -15,6 +15,7 @@ class ForecastRecord:
     as_of_timestamp: datetime
     valid_until_timestamp: datetime
     horizon_sessions: int
+    raw_model_score: float
     standardized_score: float
     rank: int
     model_artifact_path: str
@@ -22,12 +23,14 @@ class ForecastRecord:
     dataset_identity_sha256: str
     adjustment_identity_sha256: str
     feature_identity_sha256: str
+    universe_identity_sha256: str
     expert_version: str
     feature_version: str
     run_manifest_sha256: str
     schema_version: str = "1"
     expert_id: str = "xgb_ranker"
     target_definition: str = "cross_sectional_5_session_forward_return_rank"
+    raw_score_units: str = "standardized_forward_return_label_score"
     score_units: str = "cross_sectional_zscore"
     direction: str = "higher_is_better"
     data_freshness_status: str = "current"
@@ -53,23 +56,39 @@ class ForecastRecord:
             ("schema_version", "1"),
             ("expert_id", "xgb_ranker"),
             ("target_definition", "cross_sectional_5_session_forward_return_rank"),
+            ("raw_score_units", "standardized_forward_return_label_score"),
             ("score_units", "cross_sectional_zscore"),
             ("direction", "higher_is_better"),
             ("data_freshness_status", "current"),
         ):
             if getattr(self, field) != expected:
                 raise ValueError(f"{field} must be {expected}")
-        if self.horizon_sessions != 5:
+        if (
+            isinstance(self.horizon_sessions, bool)
+            or not isinstance(self.horizon_sessions, int)
+            or self.horizon_sessions != 5
+        ):
             raise ValueError("horizon_sessions must be 5")
-        if not math.isfinite(self.standardized_score):
-            raise ValueError("standardized_score must be finite")
-        if self.rank < 1:
-            raise ValueError("rank must be positive")
+        for field in ("raw_model_score", "standardized_score"):
+            value = getattr(self, field)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(f"{field} must be finite")
+        if (
+            isinstance(self.rank, bool)
+            or not isinstance(self.rank, int)
+            or self.rank < 1
+        ):
+            raise ValueError("rank must be a positive integer")
         for field in (
             "model_artifact_sha256",
             "dataset_identity_sha256",
             "adjustment_identity_sha256",
             "feature_identity_sha256",
+            "universe_identity_sha256",
             "run_manifest_sha256",
         ):
             if not _SHA256.fullmatch(getattr(self, field)):
