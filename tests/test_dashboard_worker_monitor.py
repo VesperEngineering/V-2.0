@@ -1,3 +1,4 @@
+import threading
 import time
 import tkinter as tk
 
@@ -9,6 +10,16 @@ from vesper.dashboard.worker_monitor import (
     status_marker,
     worker_rows,
 )
+
+
+def _snapshot():
+    return {
+        "workers": [],
+        "activity": [],
+        "selected_task_id": None,
+        "output": "No emitted worker output is available.",
+        "observed_at": "09:45:00",
+    }
 
 
 def test_worker_rows_show_one_current_state_per_known_worker():
@@ -90,7 +101,8 @@ def test_running_task_without_a_heartbeat_is_not_shown_as_working():
     assert state_style(rows[0]["state"])[1] == "○ running · no heartbeat"
 
 
-def test_dashboard_live_team_button_shows_read_only_monitor_in_main_window():
+def test_dashboard_live_team_button_shows_read_only_monitor_in_main_window(monkeypatch):
+    monkeypatch.setattr("vesper.dashboard.worker_monitor.load_worker_snapshot", lambda *_args: _snapshot())
     root = tk.Tk()
     root.withdraw()
     try:
@@ -114,7 +126,8 @@ def test_dashboard_live_team_button_shows_read_only_monitor_in_main_window():
         root.destroy()
 
 
-def test_worker_selection_switches_the_read_only_output_target():
+def test_worker_selection_switches_the_read_only_output_target(monkeypatch):
+    monkeypatch.setattr("vesper.dashboard.worker_monitor.load_worker_snapshot", lambda *_args: _snapshot())
     root = tk.Tk()
     root.withdraw()
     try:
@@ -141,5 +154,29 @@ def test_worker_selection_switches_the_read_only_output_target():
 
         assert monitor._selected_task_id == "data-task"
         monitor.close()
+    finally:
+        root.destroy()
+
+
+def test_close_cancels_and_joins_an_in_flight_snapshot_loader(monkeypatch):
+    started = threading.Event()
+
+    def blocking_snapshot(_selected_task_id, cancelled):
+        started.set()
+        assert cancelled.wait(1)
+        return _snapshot()
+
+    monkeypatch.setattr("vesper.dashboard.worker_monitor.load_worker_snapshot", blocking_snapshot)
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = DashboardApp(root)
+        app.live_team_btn.invoke()
+        monitor = app._worker_monitor
+        assert started.wait(1)
+
+        monitor.close()
+
+        assert not monitor._load_thread.is_alive()
     finally:
         root.destroy()

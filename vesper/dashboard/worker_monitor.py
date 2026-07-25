@@ -135,24 +135,36 @@ def redact_worker_output(text, max_lines=400):
     return "\n".join(lines)
 
 
-def _run_kanban(*args):
-    result = subprocess.run(
+def _run_kanban(*args, cancelled=None):
+    process = subprocess.Popen(
         ["hermes", "kanban", "--board", "v20", *args],
         cwd=PROJECT_ROOT,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
-        timeout=12,
         creationflags=CREATE_NO_WINDOW,
     )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Kanban read failed")
-    return result.stdout
+    deadline = time.monotonic() + 12
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.1)
+            break
+        except subprocess.TimeoutExpired:
+            if (cancelled is not None and cancelled.is_set()) or time.monotonic() >= deadline:
+                process.terminate()
+                stdout, stderr = process.communicate()
+                if cancelled is not None and cancelled.is_set():
+                    raise RuntimeError("Kanban read cancelled")
+                raise RuntimeError("Kanban read timed out")
+    if process.returncode:
+        raise RuntimeError(stderr.strip() or stdout.strip() or "Kanban read failed")
+    return stdout
 
 
-def load_worker_snapshot(selected_task_id=None):
+def load_worker_snapshot(selected_task_id=None, cancelled=None):
     """Read the V20 board and one selected emitted worker log."""
-    tasks = json.loads(_run_kanban("list", "--json"))
+    tasks = json.loads(_run_kanban("list", "--json", cancelled=cancelled))
     rows = worker_rows(tasks, time.time())
     task_ids = {task.get("id") for task in tasks}
     if selected_task_id not in task_ids:
@@ -160,7 +172,7 @@ def load_worker_snapshot(selected_task_id=None):
         selected_task_id = (active or next((row for row in rows if row["task_id"]), {})).get("task_id")
     output = "No emitted worker output is available."
     if selected_task_id:
-        output = redact_worker_output(_run_kanban("log", selected_task_id))
+        output = redact_worker_output(_run_kanban("log", selected_task_id, cancelled=cancelled))
     activity = sorted(
         tasks,
         key=lambda task: task.get("completed_at") or task.get("started_at") or task.get("created_at") or 0,
@@ -184,6 +196,8 @@ class WorkerMonitorWindow:
 
         self._closing = False
         self._in_flight = False
+        self._load_cancel = threading.Event()
+        self._load_thread = None
         self._selected_task_id = None
         self._result_queue = queue.Queue()
         self._poll_after = None
@@ -294,14 +308,18 @@ class WorkerMonitorWindow:
         if self._closing:
             return
         if not self._in_flight:
-            self._in_flight = True
-            selected = self._selected_task_id
-            threading.Thread(target=self._load, args=(selected,), daemon=True).start()
+            self._start_load(self._selected_task_id)
         self._poll_after = self.window.after(2000, self._request_refresh)
+
+    def _start_load(self, selected):
+        self._in_flight = True
+        self._load_cancel.clear()
+        self._load_thread = threading.Thread(target=self._load, args=(selected,), daemon=True)
+        self._load_thread.start()
 
     def _load(self, selected):
         try:
-            self._result_queue.put(("snapshot", load_worker_snapshot(selected)))
+            self._result_queue.put(("snapshot", load_worker_snapshot(selected, self._load_cancel)))
         except Exception as exc:
             self._result_queue.put(("error", str(exc)))
 
@@ -356,8 +374,7 @@ class WorkerMonitorWindow:
 
         self._selected_label.config(text=self._selected_task_id or "No task selected")
         if selected_task_id != snapshot["selected_task_id"] and selected_task_id and not self._in_flight:
-            self._in_flight = True
-            threading.Thread(target=self._load, args=(selected_task_id,), daemon=True).start()
+            self._start_load(selected_task_id)
         elif snapshot["output"] != self._last_output:
             at_bottom = self._output.yview()[1] >= 0.99
             position = self._output.yview()[0]
@@ -379,8 +396,7 @@ class WorkerMonitorWindow:
             self._selected_task_id = task_id
             self._last_output = None
             if not self._in_flight:
-                self._in_flight = True
-                threading.Thread(target=self._load, args=(self._selected_task_id,), daemon=True).start()
+                self._start_load(self._selected_task_id)
 
     def _pulse(self):
         if self._closing:
@@ -392,6 +408,9 @@ class WorkerMonitorWindow:
         if self._closing:
             return
         self._closing = True
+        self._load_cancel.set()
+        if self._load_thread is not None and self._load_thread.is_alive():
+            self._load_thread.join(timeout=2)
         for callback in (self._poll_after, self._drain_after, self._pulse_after):
             if callback is not None:
                 try:

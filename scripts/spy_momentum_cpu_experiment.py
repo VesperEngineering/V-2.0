@@ -25,7 +25,17 @@ class Block(NamedTuple):
 
 
 class VerifiedPhase(NamedTuple):
+    """Public phase-shaped value; not authorization to compute outcomes."""
+
     phase: str
+
+
+class _VerifiedPhase(NamedTuple):
+    phase: str
+    capability: object
+
+
+_PHASE_CAPABILITY = object()
 
 
 def _sha256(path: Path) -> str:
@@ -90,7 +100,8 @@ def load_spy_rows(database: Path, expected_sha256: str) -> pd.DataFrame:
         if metadata.get("timeframe") != "1day":
             raise ValueError("one-day timeframe required")
         rows = pd.read_sql_query(
-            "SELECT data.timestamp, data.open, data.high, data.low, data.close, source.source_sha256 "
+            "SELECT data.timestamp, data.open, data.high, data.low, data.close, "
+            "source.source_ticker, source.source_as_of_date, source.source_key, source.source_sha256 "
             "FROM ohlcv_data AS data "
             "LEFT JOIN ohlcv_source_map AS source "
             "ON source.ticker = data.ticker "
@@ -108,10 +119,12 @@ def load_spy_rows(database: Path, expected_sha256: str) -> pd.DataFrame:
     if not np.isfinite(prices.to_numpy(dtype=float)).all() or (prices <= 0).any().any():
         raise ValueError("finite positive OHLC prices required")
     rows[["open", "high", "low", "close"]] = prices
-    if rows["source_sha256"].isna().any() or not rows["source_sha256"].map(
-        lambda value: isinstance(value, str) and bool(value.strip())
-    ).all():
-        raise ValueError("source hashes required")
+    source_fields = ["source_ticker", "source_as_of_date", "source_key", "source_sha256"]
+    if rows[source_fields].isna().any().any() or not all(
+        rows[field].map(lambda value: isinstance(value, str) and bool(value.strip())).all()
+        for field in source_fields
+    ):
+        raise ValueError("source mapping required")
     return rows
 
 
@@ -165,10 +178,10 @@ def _net_return(rows: pd.DataFrame, block: Block, invested: bool, cost_bps: int)
 
 
 def evaluate_blocks(
-    rows: pd.DataFrame, blocks: list[Block], phase_context: VerifiedPhase | None = None, cost_bps: int = 10
+    rows: pd.DataFrame, blocks: list[Block], phase_context: _VerifiedPhase | None = None, cost_bps: int = 10
 ) -> list[dict]:
     """Return paired candidate/baseline block accounting for an admitted phase only."""
-    if not isinstance(phase_context, VerifiedPhase):
+    if not isinstance(phase_context, _VerifiedPhase) or phase_context.capability is not _PHASE_CAPABILITY:
         raise ValueError("verified phase context required")
     return [
         {
@@ -220,17 +233,27 @@ def assert_partition_purge_and_embargo(blocks_by_partition: dict[str, list[Block
         assert_purge(boundary, formations)
 
 
-def require_phase_access(phase: str, sealed_manifest: Path | None = None, expected_sha256: str | None = None):
+def require_phase_access(
+    phase: str,
+    sealed_manifest: Path | None = None,
+    expected_sha256: str | None = None,
+    contract_sha256: str | None = None,
+    database_sha256: str | None = None,
+    freeze: dict | None = None,
+):
     if phase not in {"development", "selection", "final"}:
         raise ValueError("unknown phase")
-    if phase != "final":
-        return VerifiedPhase(phase)
-    if sealed_manifest is None or expected_sha256 is None:
-        raise ValueError("final phase requires a sealed manifest")
-    manifest = _verified_json(sealed_manifest, expected_sha256)
-    if manifest.get("phase") != "final" or manifest.get("sealed") is not True:
-        raise ValueError("final phase requires a sealed manifest")
-    return VerifiedPhase(phase)
+    if phase == "final":
+        if None in (sealed_manifest, expected_sha256, contract_sha256, database_sha256, freeze):
+            raise ValueError("final phase requires complete sealed-manifest bindings")
+        _verify_final_manifest(
+            sealed_manifest,
+            expected_sha256,
+            contract_sha256,
+            database_sha256,
+            freeze,
+        )
+    return _VerifiedPhase(phase, _PHASE_CAPABILITY)
 
 
 def moving_block_interval(differences, seed: int = 42, samples: int = 10_000, block_length: int = 4):
@@ -273,7 +296,14 @@ def main():
             args.database_sha256,
             contract["freeze"],
         )
-    require_phase_access(args.phase, args.sealed_manifest, args.sealed_manifest_sha256)
+    require_phase_access(
+        args.phase,
+        args.sealed_manifest,
+        args.sealed_manifest_sha256,
+        args.contract_sha256,
+        args.database_sha256,
+        contract["freeze"],
+    )
     rows = load_spy_rows(args.database, args.database_sha256)
     assert_partition_purge_and_embargo(build_partition_blocks(rows, contract.get("partitions")))
     print(json.dumps({"phase": args.phase, "spy_rows": len(rows), "integrity_only": True}, indent=2))

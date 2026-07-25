@@ -172,7 +172,7 @@ def test_candidate_and_baseline_share_block_prices_dates_and_cost_rate(tmp_path)
     assert result["candidate"]["net_return"] == result["baseline"]["net_return"]
 
 
-def test_outcome_evaluation_refuses_unverified_phase_context(tmp_path):
+def test_outcome_evaluation_refuses_public_or_unverified_phase_context(tmp_path):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
     rows = experiment.load_spy_rows(database, _sha256(database))
@@ -180,6 +180,8 @@ def test_outcome_evaluation_refuses_unverified_phase_context(tmp_path):
 
     with pytest.raises(ValueError, match="verified phase context"):
         experiment.evaluate_blocks(rows, [block])
+    with pytest.raises(ValueError, match="verified phase context"):
+        experiment.evaluate_blocks(rows, [block], experiment.VerifiedPhase("final"))
 
 
 def test_cli_rejects_contract_database_provenance_mismatch(tmp_path):
@@ -223,16 +225,25 @@ def test_load_rejects_missing_or_nonfinite_ohlc_prices(tmp_path, column, value):
         experiment.load_spy_rows(database, _sha256(database))
 
 
-def test_load_rejects_absent_source_mapping_and_malformed_metadata(tmp_path):
+def test_load_rejects_absent_or_malformed_source_mapping_and_metadata(tmp_path):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
     with sqlite3.connect(database) as connection:
         connection.execute("DELETE FROM ohlcv_source_map WHERE rowid = 1")
 
-    with pytest.raises(ValueError, match="source hashes required"):
+    with pytest.raises(ValueError, match="source mapping required"):
         experiment.load_spy_rows(database, _sha256(database))
 
-    database = _write_adapter(tmp_path / "malformed")
+    database = _write_adapter(tmp_path / "malformed-source-map")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE ohlcv_source_map SET source_ticker = NULL, source_as_of_date = NULL, source_key = NULL WHERE rowid = 1"
+        )
+
+    with pytest.raises(ValueError, match="source mapping required"):
+        experiment.load_spy_rows(database, _sha256(database))
+
+    database = _write_adapter(tmp_path / "malformed-metadata")
     with sqlite3.connect(database) as connection:
         connection.execute("DELETE FROM adapter_metadata WHERE key = 'price_basis'")
 
@@ -328,15 +339,27 @@ def test_five_session_purge_and_embargo_reject_boundary_leakage():
     experiment.assert_embargo(20, [26], required_sessions=5)
 
 
-def test_final_phase_requires_a_matching_sealed_manifest(tmp_path):
+def test_final_phase_requires_complete_matching_sealed_manifest_bindings(tmp_path):
     experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database, phase="final")
+    manifest = _write_final_manifest(tmp_path, contract, database)
 
-    with pytest.raises(ValueError, match="sealed manifest"):
-        experiment.require_phase_access("final")
+    with pytest.raises(ValueError, match="complete sealed-manifest bindings"):
+        experiment.require_phase_access("final", manifest, _sha256(manifest))
 
-    manifest = tmp_path / "sealed.json"
-    manifest.write_text(json.dumps({"sealed": True, "phase": "final"}), encoding="utf-8")
-    experiment.require_phase_access("final", manifest, _sha256(manifest))
+    phase_context = experiment.require_phase_access(
+        "final",
+        manifest,
+        _sha256(manifest),
+        _sha256(contract),
+        _sha256(database),
+        json.loads(contract.read_text(encoding="utf-8"))["freeze"],
+    )
+    rows = experiment.load_spy_rows(database, _sha256(database))
+    block = experiment.build_blocks(rows, [20])[0]
+
+    assert experiment.evaluate_blocks(rows, [block], phase_context)
 
 
 def test_bootstrap_interval_is_deterministic_for_a_fixed_seed():
