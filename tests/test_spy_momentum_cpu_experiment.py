@@ -131,17 +131,23 @@ def test_feature_return_uses_only_rows_at_or_before_formation(tmp_path):
     assert experiment.feature_return(rows, 20) == before == pytest.approx(0.2)
 
 
-def test_label_is_next_open_through_five_sessions_later(tmp_path):
+def test_baseline_label_is_next_open_through_five_sessions_later(tmp_path):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database)
     rows = experiment.load_spy_rows(database, _sha256(database))
+    result = experiment.evaluate_phase_outcomes(
+        "development",
+        contract_path=contract,
+        contract_sha256=_sha256(contract),
+        database=database,
+        database_sha256=_sha256(database),
+        cost_bps=0,
+    )[0]
 
-    block = experiment.build_blocks(rows, [20])[0]
-
-    assert block.feature_position == 20
-    assert block.entry_position == 21
-    assert block.exit_position == 25
-    assert block.label_return == pytest.approx(rows.loc[25, "open"] / rows.loc[21, "open"] - 1)
+    assert result["baseline"]["entry_position"] == 21
+    assert result["baseline"]["exit_position"] == 25
+    assert result["baseline"]["net_return"] == pytest.approx(rows.loc[25, "open"] / rows.loc[21, "open"] - 1)
 
 
 def test_future_discontinuity_does_not_remove_a_known_label(tmp_path):
@@ -157,11 +163,15 @@ def test_future_discontinuity_does_not_remove_a_known_label(tmp_path):
 def test_candidate_and_baseline_share_block_prices_dates_and_cost_rate(tmp_path):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
-    rows = experiment.load_spy_rows(database, _sha256(database))
-    block = experiment.build_blocks(rows, [20])[0]
+    contract = _write_contract(tmp_path, database)
 
-    result = experiment.evaluate_blocks(
-        rows, [block], experiment.require_phase_access("development"), cost_bps=10
+    result = experiment.evaluate_phase_outcomes(
+        "development",
+        contract_path=contract,
+        contract_sha256=_sha256(contract),
+        database=database,
+        database_sha256=_sha256(database),
+        cost_bps=10,
     )[0]
 
     assert result["candidate"]["entry_position"] == result["baseline"]["entry_position"] == 21
@@ -172,16 +182,108 @@ def test_candidate_and_baseline_share_block_prices_dates_and_cost_rate(tmp_path)
     assert result["candidate"]["net_return"] == result["baseline"]["net_return"]
 
 
-def test_outcome_evaluation_refuses_public_or_unverified_phase_context(tmp_path):
+def test_atomic_outcome_entrypoint_prevents_cross_database_row_substitution(tmp_path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path / "authorized")
+    other_database = _write_adapter(tmp_path / "other", closes=np.arange(200.0, 232.0))
+    contract = _write_contract(tmp_path, database)
+
+    assert not hasattr(experiment, "require_phase_access")
+    assert not hasattr(experiment, "evaluate_blocks")
+
+    outcomes = experiment.evaluate_phase_outcomes(
+        "development",
+        contract_path=contract,
+        contract_sha256=_sha256(contract),
+        database=database,
+        database_sha256=_sha256(database),
+    )
+    assert len(outcomes) == 1
+    assert "rows" not in outcomes[0]
+
+    with pytest.raises(ValueError, match="contract provenance mismatch"):
+        experiment.evaluate_phase_outcomes(
+            "development",
+            contract_path=contract,
+            contract_sha256=_sha256(contract),
+            database=other_database,
+            database_sha256=_sha256(other_database),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutated_input,expected_error",
+    [("contract", "contract changed during evaluation"), ("database", "database changed during evaluation")],
+)
+def test_atomic_outcomes_reject_contract_or_database_toctou(tmp_path, monkeypatch, mutated_input, expected_error):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
-    rows = experiment.load_spy_rows(database, _sha256(database))
-    block = experiment.build_blocks(rows, [20])[0]
+    contract = _write_contract(tmp_path, database)
+    original_build = experiment.build_partition_blocks
 
-    with pytest.raises(ValueError, match="verified phase context"):
-        experiment.evaluate_blocks(rows, [block])
-    with pytest.raises(ValueError, match="verified phase context"):
-        experiment.evaluate_blocks(rows, [block], experiment.VerifiedPhase("final"))
+    def mutate_after_build(rows, partitions):
+        blocks = original_build(rows, partitions)
+        if mutated_input == "contract":
+            contract.write_text(contract.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        else:
+            with sqlite3.connect(database) as connection:
+                connection.execute("UPDATE ohlcv_data SET close = close + 1 WHERE rowid = 32")
+        return blocks
+
+    monkeypatch.setattr(experiment, "build_partition_blocks", mutate_after_build)
+
+    with pytest.raises(ValueError, match=expected_error):
+        experiment.evaluate_phase_outcomes(
+            "development",
+            contract_path=contract,
+            contract_sha256=_sha256(contract),
+            database=database,
+            database_sha256=_sha256(database),
+        )
+
+
+def test_self_sealed_tampered_final_contract_never_authorizes_outcomes(tmp_path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database, phase="final", partitions={"final": [21]})
+    manifest = _write_final_manifest(tmp_path, contract, database)
+
+    with pytest.raises(ValueError, match="external final approval required"):
+        experiment.evaluate_phase_outcomes(
+            "final",
+            contract_path=contract,
+            contract_sha256=_sha256(contract),
+            database=database,
+            database_sha256=_sha256(database),
+            sealed_manifest=manifest,
+            expected_sha256=_sha256(manifest),
+        )
+
+
+def test_atomic_outcome_api_exposes_no_reusable_authority_or_row_inputs(tmp_path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database)
+
+    assert not hasattr(experiment, "require_phase_access")
+    assert not hasattr(experiment, "evaluate_blocks")
+    assert not hasattr(experiment, "_VerifiedPhase")
+    assert not hasattr(experiment, "_PHASE_CAPABILITY")
+    assert not hasattr(experiment, "_verify_phase_integrity")
+    assert not hasattr(experiment, "_evaluate_blocks")
+    assert not hasattr(experiment, "_net_return")
+    assert not hasattr(experiment.Block, "label_return")
+    assert experiment.evaluate_phase_outcomes.__closure__ is None
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'rows'"):
+        experiment.evaluate_phase_outcomes(
+            "development",
+            contract_path=contract,
+            contract_sha256=_sha256(contract),
+            database=database,
+            database_sha256=_sha256(database),
+            rows=pd.DataFrame(),
+        )
 
 
 def test_cli_rejects_contract_database_provenance_mismatch(tmp_path):
@@ -346,20 +448,25 @@ def test_final_phase_requires_complete_matching_sealed_manifest_bindings(tmp_pat
     manifest = _write_final_manifest(tmp_path, contract, database)
 
     with pytest.raises(ValueError, match="complete sealed-manifest bindings"):
-        experiment.require_phase_access("final", manifest, _sha256(manifest))
+        experiment.evaluate_phase_outcomes(
+            "final",
+            contract_path=contract,
+            contract_sha256=_sha256(contract),
+            database=database,
+            database_sha256=_sha256(database),
+            sealed_manifest=manifest,
+        )
 
-    phase_context = experiment.require_phase_access(
-        "final",
-        manifest,
-        _sha256(manifest),
-        _sha256(contract),
-        _sha256(database),
-        json.loads(contract.read_text(encoding="utf-8"))["freeze"],
-    )
-    rows = experiment.load_spy_rows(database, _sha256(database))
-    block = experiment.build_blocks(rows, [20])[0]
-
-    assert experiment.evaluate_blocks(rows, [block], phase_context)
+    with pytest.raises(ValueError, match="external final approval required"):
+        experiment.evaluate_phase_outcomes(
+            "final",
+            contract_path=contract,
+            contract_sha256=_sha256(contract),
+            database=database,
+            database_sha256=_sha256(database),
+            sealed_manifest=manifest,
+            expected_sha256=_sha256(manifest),
+        )
 
 
 def test_bootstrap_interval_is_deterministic_for_a_fixed_seed():

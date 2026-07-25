@@ -21,21 +21,6 @@ class Block(NamedTuple):
     entry_position: int
     exit_position: int
     feature_return: float
-    label_return: float
-
-
-class VerifiedPhase(NamedTuple):
-    """Public phase-shaped value; not authorization to compute outcomes."""
-
-    phase: str
-
-
-class _VerifiedPhase(NamedTuple):
-    phase: str
-    capability: object
-
-
-_PHASE_CAPABILITY = object()
 
 
 def _sha256(path: Path) -> str:
@@ -156,40 +141,72 @@ def build_blocks(rows: pd.DataFrame, formation_positions) -> list[Block]:
                 entry_position,
                 exit_position,
                 feature_return(rows, feature_position),
-                exit_open / entry_open - 1,
             )
         )
     return blocks
 
 
-def _net_return(rows: pd.DataFrame, block: Block, invested: bool, cost_bps: int) -> dict:
-    entry_open = float(rows.loc[block.entry_position, "open"])
-    exit_open = float(rows.loc[block.exit_position, "open"])
-    gross_return = exit_open / entry_open - 1 if invested else 0.0
-    cost = 2 * cost_bps / 10_000 if invested else 0.0
-    return {
-        "entry_position": block.entry_position,
-        "exit_position": block.exit_position,
-        "entry_open": entry_open,
-        "exit_open": exit_open,
-        "cost_bps_per_side": cost_bps,
-        "net_return": gross_return - cost,
-    }
-
-
-def evaluate_blocks(
-    rows: pd.DataFrame, blocks: list[Block], phase_context: _VerifiedPhase | None = None, cost_bps: int = 10
+def evaluate_phase_outcomes(
+    phase: str,
+    *,
+    contract_path: Path,
+    contract_sha256: str,
+    database: Path,
+    database_sha256: str,
+    sealed_manifest: Path | None = None,
+    expected_sha256: str | None = None,
+    cost_bps: int = 10,
 ) -> list[dict]:
-    """Return paired candidate/baseline block accounting for an admitted phase only."""
-    if not isinstance(phase_context, _VerifiedPhase) or phase_context.capability is not _PHASE_CAPABILITY:
-        raise ValueError("verified phase context required")
-    return [
-        {
-            "candidate": _net_return(rows, block, block.feature_return > 0, cost_bps),
-            "baseline": _net_return(rows, block, True, cost_bps),
+    """Atomically evaluate only the contract-declared blocks for one admitted phase."""
+    if phase not in {"development", "selection", "final"}:
+        raise ValueError("unknown phase")
+    contract = _verified_json(contract_path, contract_sha256)
+    if contract.get("phase") != phase:
+        raise ValueError("contract phase mismatch")
+    _verify_contract_provenance(contract, database, database_sha256)
+    if phase == "final":
+        if sealed_manifest is None or expected_sha256 is None:
+            raise ValueError("final phase requires complete sealed-manifest bindings")
+        _verify_final_manifest(
+            sealed_manifest,
+            expected_sha256,
+            contract_sha256,
+            database_sha256,
+            contract["freeze"],
+        )
+        raise ValueError("external final approval required for outcome evaluation")
+    rows = load_spy_rows(database, database_sha256)
+    blocks_by_partition = build_partition_blocks(rows, contract.get("partitions"))
+    assert_partition_purge_and_embargo(blocks_by_partition)
+    if phase not in blocks_by_partition:
+        raise ValueError("contract phase blocks required")
+
+    def net_return(block: Block, invested: bool) -> dict:
+        entry_open = float(rows.loc[block.entry_position, "open"])
+        exit_open = float(rows.loc[block.exit_position, "open"])
+        gross_return = exit_open / entry_open - 1 if invested else 0.0
+        cost = 2 * cost_bps / 10_000 if invested else 0.0
+        return {
+            "entry_position": block.entry_position,
+            "exit_position": block.exit_position,
+            "entry_open": entry_open,
+            "exit_open": exit_open,
+            "cost_bps_per_side": cost_bps,
+            "net_return": gross_return - cost,
         }
-        for block in blocks
+
+    outcomes = [
+        {
+            "candidate": net_return(block, block.feature_return > 0),
+            "baseline": net_return(block, True),
+        }
+        for block in blocks_by_partition[phase]
     ]
+    if _sha256(contract_path) != contract_sha256:
+        raise ValueError("contract changed during evaluation")
+    if _sha256(database) != database_sha256:
+        raise ValueError("database changed during evaluation")
+    return outcomes
 
 
 def assert_partition_isolation(blocks_by_partition: dict[str, list[Block]]):
@@ -233,29 +250,6 @@ def assert_partition_purge_and_embargo(blocks_by_partition: dict[str, list[Block
         assert_purge(boundary, formations)
 
 
-def require_phase_access(
-    phase: str,
-    sealed_manifest: Path | None = None,
-    expected_sha256: str | None = None,
-    contract_sha256: str | None = None,
-    database_sha256: str | None = None,
-    freeze: dict | None = None,
-):
-    if phase not in {"development", "selection", "final"}:
-        raise ValueError("unknown phase")
-    if phase == "final":
-        if None in (sealed_manifest, expected_sha256, contract_sha256, database_sha256, freeze):
-            raise ValueError("final phase requires complete sealed-manifest bindings")
-        _verify_final_manifest(
-            sealed_manifest,
-            expected_sha256,
-            contract_sha256,
-            database_sha256,
-            freeze,
-        )
-    return _VerifiedPhase(phase, _PHASE_CAPABILITY)
-
-
 def moving_block_interval(differences, seed: int = 42, samples: int = 10_000, block_length: int = 4):
     values = np.asarray(differences, dtype=float)
     if len(values) == 0:
@@ -288,7 +282,7 @@ def main():
     _verify_contract_provenance(contract, args.database, args.database_sha256)
     if args.phase == "final":
         if args.sealed_manifest is None or args.sealed_manifest_sha256 is None:
-            raise ValueError("final phase requires a sealed manifest")
+            raise ValueError("final phase requires complete sealed-manifest bindings")
         _verify_final_manifest(
             args.sealed_manifest,
             args.sealed_manifest_sha256,
@@ -296,17 +290,10 @@ def main():
             args.database_sha256,
             contract["freeze"],
         )
-    require_phase_access(
-        args.phase,
-        args.sealed_manifest,
-        args.sealed_manifest_sha256,
-        args.contract_sha256,
-        args.database_sha256,
-        contract["freeze"],
-    )
     rows = load_spy_rows(args.database, args.database_sha256)
     assert_partition_purge_and_embargo(build_partition_blocks(rows, contract.get("partitions")))
-    print(json.dumps({"phase": args.phase, "spy_rows": len(rows), "integrity_only": True}, indent=2))
+    spy_rows = len(rows)
+    print(json.dumps({"phase": args.phase, "spy_rows": spy_rows, "integrity_only": True}, indent=2))
 
 
 if __name__ == "__main__":
