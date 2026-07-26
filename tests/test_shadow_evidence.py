@@ -11,8 +11,11 @@ from vesper.portfolio.shadow_delta import (
     build_shadow_delta_plan,
 )
 from vesper.portfolio.shadow_evidence import (
+    CurrentSignalObservation,
     CurrentSignalSnapshot,
     build_shadow_evidence,
+    capture_shadow_replay,
+    replay_shadow,
 )
 from vesper.portfolio.shadow_target import build_shadow_portfolio_target
 from vesper.strategy.base import Signal, SignalAction
@@ -210,6 +213,61 @@ def test_signal_snapshot_is_deterministic_and_rejects_mutated_plan_content():
     object.__setattr__(plan.target.forecasts[0], "standardized_score", 99.0)
     with pytest.raises(ValueError, match="plan"):
         build_shadow_evidence(plan, ())
+
+
+def test_capture_and_replay_rebuilds_exact_plan_and_evidence_without_source_aliases():
+    plan = _plan()
+    signals = (_signal("B", SignalAction.BUY), _signal("A", SignalAction.SELL))
+
+    envelope = capture_shadow_replay(plan, signals)
+    assert not hasattr(envelope, "plan")
+    assert not hasattr(envelope, "target")
+    assert not hasattr(envelope, "lines")
+    assert (
+        envelope.research_only,
+        envelope.authority_state,
+        envelope.execution_authority,
+        envelope.broker_authority,
+        envelope.order_submission_authority,
+        envelope.persistence_authority,
+    ) == (True, "shadow", False, False, False, False)
+
+    object.__setattr__(plan.target.forecasts[0], "standardized_score", 99.0)
+    replayed = replay_shadow(envelope)
+    assert replayed.plan is not plan
+    assert replayed.plan.plan_sha256 == envelope.source_plan_sha256
+    assert replayed.evidence.evidence_sha256 == envelope.source_evidence_sha256
+    assert replayed.evidence.signal_snapshot.snapshot_sha256 == envelope.signal_snapshot.snapshot_sha256
+
+
+def test_replay_rejects_mutated_envelope_semantic_input():
+    envelope = capture_shadow_replay(_plan(), ())
+    object.__setattr__(envelope.forecasts[0], "standardized_score", 99.0)
+    with pytest.raises(ValueError, match="replayed plan"):
+        replay_shadow(envelope)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("research_only", False),
+        ("authority_state", "live"),
+        ("execution_authority", True),
+        ("broker_authority", True),
+        ("order_submission_authority", True),
+        ("persistence_authority", True),
+    ),
+)
+def test_replay_rejects_mutated_envelope_authority(field_name, value):
+    envelope = capture_shadow_replay(_plan(), ())
+    object.__setattr__(envelope, field_name, value)
+    with pytest.raises(ValueError):
+        replay_shadow(envelope)
+
+
+def test_current_signal_observation_rejects_out_of_range_strength():
+    with pytest.raises(ValueError, match="strength"):
+        CurrentSignalObservation("A", "BUY", 1.1, "bad", AS_OF)
 
 
 def test_evidence_module_is_pure_and_has_no_execution_wiring(tmp_path, monkeypatch):

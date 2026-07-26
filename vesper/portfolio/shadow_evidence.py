@@ -4,9 +4,17 @@ import math
 from dataclasses import InitVar, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime
 
-from vesper.portfolio.shadow_delta import ShadowDeltaPlan
-from vesper.portfolio.shadow_target import _canonical_sha256
+from vesper.portfolio.shadow_delta import (
+    PendingOrderObservation,
+    PlannerConstraints,
+    PositionObservation,
+    PriceObservation,
+    ShadowDeltaPlan,
+    build_shadow_delta_plan,
+)
+from vesper.portfolio.shadow_target import _canonical_sha256, build_shadow_portfolio_target
 from vesper.strategy.base import Signal, SignalAction
+from vesper.strategy.forecast import ForecastRecord
 
 
 _ACTIONS = {action.value for action in SignalAction}
@@ -50,8 +58,12 @@ class CurrentSignalObservation:
         _require_symbol(self.symbol)
         if type(self.action) is not str or self.action not in _ACTIONS:
             raise ValueError("action must be a declared SignalAction value")
-        if type(self.strength) is not float or not math.isfinite(self.strength):
-            raise ValueError("strength must be a finite float")
+        if (
+            type(self.strength) is not float
+            or not math.isfinite(self.strength)
+            or not 0.0 <= self.strength <= 1.0
+        ):
+            raise ValueError("strength must be a finite float in [0, 1]")
         if type(self.reason) is not str or not self.reason.strip():
             raise ValueError("reason must be a nonblank string")
         _require_datetime("timestamp", self.timestamp)
@@ -273,6 +285,17 @@ class ShadowEvidence:
         )
 
 
+def _build_shadow_evidence_from_snapshot(plan, signal_snapshot):
+    validated_plan = _validated_plan(plan)
+    snapshot = replace(signal_snapshot)
+    return ShadowEvidence(
+        as_of_timestamp=validated_plan.as_of_timestamp,
+        plan=validated_plan,
+        signal_snapshot=snapshot,
+        plan_sha256=validated_plan.plan_sha256,
+    )
+
+
 def build_shadow_evidence(plan, signals):
     """Compare current strategy signals with one validated inert shadow plan."""
     validated_plan = _validated_plan(plan)
@@ -280,9 +303,155 @@ def build_shadow_evidence(plan, signals):
         as_of_timestamp=validated_plan.as_of_timestamp,
         signals=signals,
     )
-    return ShadowEvidence(
-        as_of_timestamp=validated_plan.as_of_timestamp,
-        plan=validated_plan,
-        signal_snapshot=snapshot,
-        plan_sha256=validated_plan.plan_sha256,
+    return _build_shadow_evidence_from_snapshot(validated_plan, snapshot)
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowReplayEnvelope:
+    """Copied builder inputs for deterministic in-memory replay only."""
+
+    forecasts: tuple[ForecastRecord, ...]
+    as_of_timestamp: datetime
+    valid_until_timestamp: datetime
+    current_holdings_weights: tuple[tuple[str, float], ...]
+    portfolio_value: float
+    classification_identity_sha256: str
+    target_generation_version: str
+    top_n: int
+    entry_threshold: float
+    transaction_cost_rate: float | None
+    current_positions: tuple[PositionObservation, ...]
+    prices: tuple[PriceObservation, ...]
+    pending_orders: tuple[PendingOrderObservation, ...]
+    pending_order_completeness: str
+    pending_orders_observed_at: datetime
+    pending_orders_account_identity_sha256: str
+    pending_orders_source_snapshot_identity_sha256: str
+    constraints: PlannerConstraints
+    signal_snapshot: CurrentSignalSnapshot
+    source_plan_sha256: str
+    source_evidence_sha256: str
+    research_only: bool = True
+    authority_state: str = "shadow"
+    execution_authority: bool = False
+    broker_authority: bool = False
+    order_submission_authority: bool = False
+    persistence_authority: bool = False
+
+    def __post_init__(self):
+        if self.research_only is not True or self.authority_state != "shadow":
+            raise ValueError("replay envelope must remain research-only shadow state")
+        for name in (
+            "execution_authority",
+            "broker_authority",
+            "order_submission_authority",
+            "persistence_authority",
+        ):
+            if getattr(self, name) is not False:
+                raise ValueError(f"{name} must be False")
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowReplayResult:
+    forecast_records: tuple[ForecastRecord, ...]
+    plan: ShadowDeltaPlan
+    evidence: ShadowEvidence
+
+
+def _copy_signal_snapshot(snapshot):
+    return CurrentSignalSnapshot(
+        snapshot.as_of_timestamp,
+        tuple(
+            CurrentSignalObservation(
+                item.symbol, item.action, item.strength, item.reason, item.timestamp
+            )
+            for item in snapshot.observations
+        ),
     )
+
+
+def capture_shadow_replay(plan, signals):
+    """Capture only canonical builder inputs; no plan or target object is retained."""
+    validated_plan = _validated_plan(plan)
+    snapshot = CurrentSignalSnapshot.from_signals(
+        as_of_timestamp=validated_plan.as_of_timestamp,
+        signals=signals,
+    )
+    evidence = _build_shadow_evidence_from_snapshot(validated_plan, snapshot)
+    target = validated_plan.target
+    return ShadowReplayEnvelope(
+        forecasts=tuple(replace(item) for item in target.forecasts),
+        as_of_timestamp=target.as_of_timestamp,
+        valid_until_timestamp=target.valid_until_timestamp,
+        current_holdings_weights=tuple(target.current_holdings_weights),
+        portfolio_value=target.portfolio_value,
+        classification_identity_sha256=target.classification_identity_sha256,
+        target_generation_version=target.target_generation_version,
+        top_n=target.top_n,
+        entry_threshold=target.entry_threshold,
+        transaction_cost_rate=target.transaction_cost_rate,
+        current_positions=tuple(replace(item) for item in validated_plan.current_snapshot.positions),
+        prices=tuple(replace(item) for item in validated_plan.price_snapshot.observations),
+        pending_orders=tuple(replace(item) for item in validated_plan.order_snapshot.observations),
+        pending_order_completeness=validated_plan.order_snapshot.completeness,
+        pending_orders_observed_at=validated_plan.order_snapshot.observed_at,
+        pending_orders_account_identity_sha256=(
+            validated_plan.order_snapshot.account_identity_sha256
+        ),
+        pending_orders_source_snapshot_identity_sha256=(
+            validated_plan.order_snapshot.source_snapshot_identity_sha256
+        ),
+        constraints=PlannerConstraints(
+            validated_plan.constraints.stale_price_max_age,
+            validated_plan.constraints.minimum_trade_notional,
+            validated_plan.constraints.lot_size,
+            validated_plan.constraints.planner_version,
+        ),
+        signal_snapshot=_copy_signal_snapshot(snapshot),
+        source_plan_sha256=validated_plan.plan_sha256,
+        source_evidence_sha256=evidence.evidence_sha256,
+    )
+
+
+def replay_shadow(envelope):
+    """Rebuild the semantic chain and require exact captured identities."""
+    if type(envelope) is not ShadowReplayEnvelope:
+        raise ValueError("envelope must be a ShadowReplayEnvelope")
+    envelope = replace(envelope)
+    forecasts = tuple(replace(item) for item in envelope.forecasts)
+    target = build_shadow_portfolio_target(
+        forecasts=forecasts,
+        as_of_timestamp=envelope.as_of_timestamp,
+        valid_until_timestamp=envelope.valid_until_timestamp,
+        current_holdings_weights=envelope.current_holdings_weights,
+        portfolio_value=envelope.portfolio_value,
+        classification_identity_sha256=envelope.classification_identity_sha256,
+        target_generation_version=envelope.target_generation_version,
+        top_n=envelope.top_n,
+        entry_threshold=envelope.entry_threshold,
+        transaction_cost_rate=envelope.transaction_cost_rate,
+    )
+    plan = build_shadow_delta_plan(
+        target=target,
+        as_of_timestamp=envelope.as_of_timestamp,
+        current_positions=tuple(replace(item) for item in envelope.current_positions),
+        prices=tuple(replace(item) for item in envelope.prices),
+        pending_orders=tuple(replace(item) for item in envelope.pending_orders),
+        pending_order_completeness=envelope.pending_order_completeness,
+        pending_orders_observed_at=envelope.pending_orders_observed_at,
+        pending_orders_account_identity_sha256=(
+            envelope.pending_orders_account_identity_sha256
+        ),
+        pending_orders_source_snapshot_identity_sha256=(
+            envelope.pending_orders_source_snapshot_identity_sha256
+        ),
+        constraints=replace(envelope.constraints),
+    )
+    evidence = _build_shadow_evidence_from_snapshot(
+        plan, _copy_signal_snapshot(envelope.signal_snapshot)
+    )
+    if plan.plan_sha256 != envelope.source_plan_sha256:
+        raise ValueError("replayed plan does not match source_plan_sha256")
+    if evidence.evidence_sha256 != envelope.source_evidence_sha256:
+        raise ValueError("replayed evidence does not match source_evidence_sha256")
+    return ShadowReplayResult(forecasts, plan, evidence)
