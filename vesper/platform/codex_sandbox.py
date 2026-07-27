@@ -27,7 +27,8 @@ _READ_ONLY_TOOLS = frozenset({"read", "search"})
 _WORKSPACE_TOOLS = _READ_ONLY_TOOLS | {"write", "test"}
 _DEFAULT_DENY_PROBE = "v20-deny.invalid"
 _OPENAI_NETWORK_HOSTS = frozenset({"api.openai.com", "chatgpt.com", "openai.com"})
-_OPENAI_OAUTH_MODE = "oauth · openai"
+_OPENAI_OAUTH_TOKENS = ("oauth", "openai")
+DOCKER_CODEX_DEFAULT_MODEL = "docker-codex-default"
 _VIRTIOFS_MOUNT = re.compile(r"^\S+ on (?P<path>.+) type virtiofs \((?P<options>[^)]*)\)$")
 
 
@@ -383,13 +384,13 @@ class DockerCodexAdapter:
             [self._executable, "inspect", self.sandbox_name, "--json"],
             "sandbox inspection",
         )
-        auth_mode = str(inspect.get("auth_mode", "")).strip().lower()
+        auth_mode = tuple(re.findall(r"[a-z0-9]+", str(inspect.get("auth_mode", "")).lower()))
         network_policy = inspect.get("network_policy")
         if (
             inspect.get("name") != self.sandbox_name
             or inspect.get("agent") != "codex"
             or inspect.get("state") != "stopped"
-            or auth_mode != _OPENAI_OAUTH_MODE
+            or auth_mode != _OPENAI_OAUTH_TOKENS
             or inspect.get("mcp_gateway") is not False
             or inspect.get("kits") != []
             or inspect.get("sessions") != 0
@@ -572,33 +573,36 @@ class DockerCodexAdapter:
             self.sandbox_name,
             "codex",
             "exec",
-            "--ignore-user-config",
             "--ignore-rules",
             "--ephemeral",
             "--json",
             "--color",
             "never",
-            "--model",
-            model,
-            "--config",
-            "mcp_servers={}",
-            "--config",
-            'web_search="disabled"',
-            "--config",
-            "skills.config=[]",
-            "--disable",
-            "apps",
-            "--disable",
-            "hooks",
-            "--disable",
-            "memories",
-            "--disable",
-            "multi_agent",
-            "--disable",
-            "plugins",
-            "--disable",
-            "skill_mcp_dependency_install",
         ]
+        if model != DOCKER_CODEX_DEFAULT_MODEL:
+            command.extend(("--model", model))
+        command.extend(
+            (
+                "--config",
+                "mcp_servers={}",
+                "--config",
+                'web_search="disabled"',
+                "--config",
+                "skills.config=[]",
+                "--disable",
+                "apps",
+                "--disable",
+                "hooks",
+                "--disable",
+                "memories",
+                "--disable",
+                "multi_agent",
+                "--disable",
+                "plugins",
+                "--disable",
+                "skill_mcp_dependency_install",
+            )
+        )
         if request.permissions.sandbox is SandboxMode.READ_ONLY:
             command.extend(("--sandbox", "read-only"))
         else:

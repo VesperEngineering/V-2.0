@@ -50,10 +50,19 @@ with skills sharing disabled, and the separately owned M2 specialist composition
 must be adapted from the host SDK and reviewed. The operator approved one-shot
 force-removal on 2026-07-27.
 
-The original `v20-codex-canary` was then force-removed. Two attempts to create a
-replacement with `sbx create --no-share-skills` failed before registration with
-HTTP 500 `failed to run sandbox container`; `sbx diagnose` reported all nine checks
-healthy and `sbx ls --json` showed no partial replacement. Codex 0.142.4 inside the
-old disposable image did parse the selected MCP, skill, plugin, hook, memory, app,
-and multi-agent disabling flags without error. Production activation remains
-blocked until Docker can provision the required no-shared-skills one-shot sandbox.
+The original `v20-codex-canary` was then force-removed. Two initial replacement
+attempts failed at Windows Hypervisor Platform VM creation with access denied
+`0x80070005`; daemon logs confirmed the hidden `--no-share-skills` flag itself was
+accepted. After the operator-approved removal of three stopped OpenCode test
+sandboxes and a `sandboxd` restart, secure provisioning succeeded. Mount inspection
+showed only the writable disposable clone plus read-only hosts and resolver mounts,
+with no shared skills or published ports.
+
+The Docker-managed Codex config is required for its ChatGPT OAuth route. V20 keeps
+that config while overriding MCP servers to an empty map and disabling skills,
+plugins, hooks, memory, apps, multi-agent, and web features. The controller-approved
+model token `docker-codex-default` deliberately omits `--model`, selecting Docker's
+managed ChatGPT-backed default rather than falling back to the public Responses API.
+The real hardened adapter canary completed with exactly
+`V20_SECURE_ADAPTER_READY`, emitted a typed receipt, and force-removed its one-shot
+sandbox; `sbx ls --json` was empty afterward.

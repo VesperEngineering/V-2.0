@@ -16,6 +16,7 @@ from vesper.platform.codex import (
     WorkspaceDeniedError,
 )
 from vesper.platform.codex_sandbox import (
+    DOCKER_CODEX_DEFAULT_MODEL,
     DockerCodexAdapter,
     DockerSandboxBoundaryError,
     DockerSandboxPolicyError,
@@ -196,7 +197,6 @@ def test_workspace_write_uses_verified_outer_sandbox_and_parses_json_receipt(tmp
         "v20-codex",
         "codex",
         "exec",
-        "--ignore-user-config",
         "--ignore-rules",
         "--ephemeral",
         "--json",
@@ -259,6 +259,30 @@ def test_read_only_retains_codex_inner_sandbox(tmp_path):
         "Review only.",
     ]
     assert "--dangerously-bypass-approvals-and-sandbox" not in command
+
+
+def test_docker_managed_default_model_omits_explicit_model_override(tmp_path):
+    boundary = FakeBoundary(tmp_path)
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    runtime = DockerCodexAdapter(
+        repository_root=tmp_path,
+        sandbox_name="v20-codex",
+        approved_models=(DOCKER_CODEX_DEFAULT_MODEL,),
+        approved_network_hosts=NETWORK_HOSTS,
+        executable="sbx-test",
+        metadata_runner=boundary.metadata,
+        execution_runner=boundary.execute,
+        revision_reader=lambda _root: "b5263eb",
+        clock=lambda: NOW,
+    )
+
+    runtime.execute(
+        specialist_input(tmp_path, mode=SandboxMode.READ_ONLY),
+        prompt="Review only.",
+        model=DOCKER_CODEX_DEFAULT_MODEL,
+    )
+
+    assert "--model" not in boundary.execution_calls[0][0]
 
 
 def test_option_like_prompt_is_terminated_before_prompt_text(tmp_path):

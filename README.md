@@ -48,13 +48,12 @@ published ports, and the effective network allowlist before every turn. Read-onl
 turns retain Codex's inner sandbox; workspace-write turns rely on the Docker
 microVM because the nested Linux sandbox is incompatible with the Windows mount.
 The adapter force-removes the one-shot sandbox after every outcome and fails
-closed on Git control-plane mutation. The initial canary still had Docker's shared
-host skills mount, so production activation requires a replacement sandbox created
-with skills sharing disabled. Every specialist turn requires a fresh uniquely named
-sandbox; stopped VMs are never reused. The adapter is not wired into `create` until
-one-shot provisioning exists and the separately owned specialist-composition change
-is adapted and reviewed. OpenCode remains fake-tested for later provider support
-and requires a provider API key before real isolated execution.
+closed on Git control-plane mutation. Secure `--no-share-skills` provisioning and
+Docker-managed OAuth have passed a real adapter canary. Every specialist turn
+requires a fresh uniquely named sandbox; stopped VMs are never reused. The adapter
+is not wired into `create` until one-shot provisioning exists and the specialist
+composition is adapted and reviewed. OpenCode remains fake-tested for later
+provider support and requires a provider API key before real isolated execution.
 
 ## Verification
 
