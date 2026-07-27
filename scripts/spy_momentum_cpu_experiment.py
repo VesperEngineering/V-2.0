@@ -14,6 +14,7 @@ import pandas as pd
 
 LOOKBACK_SESSIONS = 20
 HOLDING_SESSIONS = 5
+SELECTION_APPROVAL_ANCHOR_SHA256 = None
 
 
 class Block(NamedTuple):
@@ -48,11 +49,27 @@ def _verify_contract_provenance(contract: dict, database: Path, database_sha256:
     }
     provenance = contract.get("provenance")
     freeze = contract.get("freeze")
+    availability_freeze = _contract_availability_freeze(contract)
     if provenance != expected or freeze != {
         "database_sha256": database_sha256,
         "evaluator_sha256": expected["evaluator"]["sha256"],
+        "availability_freeze": availability_freeze,
     }:
         raise ValueError("contract provenance mismatch")
+
+
+def _contract_availability_freeze(contract: dict) -> str:
+    freeze = contract.get("freeze")
+    value = freeze.get("availability_freeze") if isinstance(freeze, dict) else None
+    timestamp = pd.to_datetime(value, errors="coerce", utc=True) if isinstance(value, str) else pd.NaT
+    if pd.isna(timestamp) or value != timestamp.isoformat():
+        raise ValueError("contract availability freeze required")
+    return value
+
+
+def _verify_selection_approval(contract: dict):
+    if SELECTION_APPROVAL_ANCHOR_SHA256 is None or contract.get("selection_approval_anchor_sha256") != SELECTION_APPROVAL_ANCHOR_SHA256:
+        raise ValueError("selection approval anchor required")
 
 
 def _canonical_sha256(value: dict) -> str:
@@ -73,7 +90,7 @@ def _verify_final_manifest(
         raise ValueError("final manifest binding mismatch")
 
 
-def load_spy_rows(database: Path, expected_sha256: str) -> pd.DataFrame:
+def load_spy_rows(database: Path, expected_sha256: str, availability_freeze: str) -> pd.DataFrame:
     """Load SPY rows from the declared total-return adapter without write access."""
     if _sha256(database) != expected_sha256:
         raise ValueError("database hash mismatch")
@@ -110,6 +127,11 @@ def load_spy_rows(database: Path, expected_sha256: str) -> pd.DataFrame:
         for field in source_fields
     ):
         raise ValueError("source mapping required")
+    source_dates = pd.to_datetime(rows["source_as_of_date"], format="ISO8601", errors="coerce", utc=True)
+    session_dates = pd.to_datetime(rows["timestamp"], unit="s", utc=True).dt.normalize()
+    freeze = pd.to_datetime(availability_freeze, errors="coerce", utc=True)
+    if source_dates.isna().any() or pd.isna(freeze) or (source_dates < session_dates).any() or (source_dates > freeze).any():
+        raise ValueError("source availability required")
     return rows
 
 
@@ -164,6 +186,8 @@ def evaluate_phase_outcomes(
     if contract.get("phase") != phase:
         raise ValueError("contract phase mismatch")
     _verify_contract_provenance(contract, database, database_sha256)
+    if phase == "selection":
+        _verify_selection_approval(contract)
     if phase == "final":
         if sealed_manifest is None or expected_sha256 is None:
             raise ValueError("final phase requires complete sealed-manifest bindings")
@@ -175,8 +199,8 @@ def evaluate_phase_outcomes(
             contract["freeze"],
         )
         raise ValueError("external final approval required for outcome evaluation")
-    rows = load_spy_rows(database, database_sha256)
-    blocks_by_partition = build_partition_blocks(rows, contract.get("partitions"))
+    rows = load_spy_rows(database, database_sha256, _contract_availability_freeze(contract))
+    blocks_by_partition = build_partition_blocks(rows, contract, phase)
     assert_partition_purge_and_embargo(blocks_by_partition)
     if phase not in blocks_by_partition:
         raise ValueError("contract phase blocks required")
@@ -212,7 +236,7 @@ def evaluate_phase_outcomes(
 def assert_partition_isolation(blocks_by_partition: dict[str, list[Block]]):
     intervals = []
     for partition, blocks in blocks_by_partition.items():
-        intervals.extend((block.feature_position, block.exit_position, partition) for block in blocks)
+        intervals.extend((block.entry_position, block.exit_position, partition) for block in blocks)
     for index, (start, end, partition) in enumerate(intervals):
         for other_start, other_end, other_partition in intervals[index + 1:]:
             if start <= other_end and other_start <= end:
@@ -232,12 +256,51 @@ def assert_embargo(boundary_position: int, formation_positions, required_session
     _assert_boundary(boundary_position, formation_positions, required_sessions, "embargo")
 
 
-def build_partition_blocks(rows: pd.DataFrame, partitions: dict) -> dict[str, list[Block]]:
-    if not isinstance(partitions, dict) or not partitions:
-        raise ValueError("contract partitions required")
-    if any(not isinstance(name, str) or not isinstance(positions, list) or not positions for name, positions in partitions.items()):
-        raise ValueError("contract partitions required")
-    return {name: build_blocks(rows, positions) for name, positions in partitions.items()}
+def build_partition_blocks(rows: pd.DataFrame, contract: dict, phase: str) -> dict[str, list[Block]]:
+    partitions = contract.get("partitions")
+    definition = contract.get("partition_definition")
+    required = {
+        "development": {"development"},
+        "selection": {"development", "selection"},
+        "final": {"development", "selection", "final"},
+    }[phase]
+    if (
+        not isinstance(partitions, dict)
+        or set(partitions) != required
+        or not isinstance(definition, dict)
+        or definition.get("formation_cadence_sessions") != HOLDING_SESSIONS
+        or definition.get("label_horizon_sessions") != HOLDING_SESSIONS
+        or definition.get("purge_and_embargo_sessions") != HOLDING_SESSIONS
+        or not isinstance(definition.get("development_through"), str)
+        or not isinstance(definition.get("selection_from"), str)
+        or not isinstance(definition.get("final_from"), str)
+        or any(not isinstance(name, str) or not isinstance(positions, list) or not positions for name, positions in partitions.items())
+    ):
+        raise ValueError("complete chronological partition declaration required")
+    try:
+        development_through = pd.Timestamp(definition["development_through"]).tz_localize("UTC")
+        selection_from = pd.Timestamp(definition["selection_from"]).tz_localize("UTC")
+        final_from = pd.Timestamp(definition["final_from"]).tz_localize("UTC")
+    except (TypeError, ValueError):
+        raise ValueError("complete chronological partition declaration required") from None
+    if not development_through < selection_from < final_from:
+        raise ValueError("complete chronological partition declaration required")
+    blocks_by_partition = {name: build_blocks(rows, positions) for name, positions in partitions.items()}
+    for name, blocks in blocks_by_partition.items():
+        positions = [block.feature_position for block in blocks]
+        if any(later - earlier != HOLDING_SESSIONS for earlier, later in zip(positions, positions[1:])):
+            raise ValueError("formation cadence mismatch")
+        feature_dates = pd.to_datetime(rows.loc[positions, "timestamp"], unit="s", utc=True)
+        exit_dates = pd.to_datetime(
+            rows.loc[[block.exit_position for block in blocks], "timestamp"], unit="s", utc=True
+        )
+        if name == "development" and ((feature_dates > development_through).to_numpy() | (exit_dates >= selection_from).to_numpy()).any():
+            raise ValueError("development partition date mismatch")
+        if name == "selection" and ((feature_dates < selection_from).to_numpy() | (exit_dates >= final_from).to_numpy()).any():
+            raise ValueError("selection partition date mismatch")
+        if name == "final" and (feature_dates < final_from).any():
+            raise ValueError("final partition date mismatch")
+    return blocks_by_partition
 
 
 def assert_partition_purge_and_embargo(blocks_by_partition: dict[str, list[Block]]):
@@ -248,6 +311,22 @@ def assert_partition_purge_and_embargo(blocks_by_partition: dict[str, list[Block
         formations = [block.feature_position for block in later]
         assert_embargo(boundary, formations)
         assert_purge(boundary, formations)
+
+
+def _verify_receipt_input_hashes(
+    contract: Path,
+    contract_sha256: str,
+    database: Path,
+    database_sha256: str,
+    sealed_manifest: Path | None,
+    sealed_manifest_sha256: str | None,
+):
+    if _sha256(contract) != contract_sha256:
+        raise ValueError("contract changed before receipt")
+    if _sha256(database) != database_sha256:
+        raise ValueError("database changed before receipt")
+    if sealed_manifest is not None and _sha256(sealed_manifest) != sealed_manifest_sha256:
+        raise ValueError("sealed manifest changed before receipt")
 
 
 def moving_block_interval(differences, seed: int = 42, samples: int = 10_000, block_length: int = 4):
@@ -280,6 +359,8 @@ def main():
     if contract.get("phase") != args.phase:
         raise ValueError("contract phase mismatch")
     _verify_contract_provenance(contract, args.database, args.database_sha256)
+    if args.phase == "selection":
+        _verify_selection_approval(contract)
     if args.phase == "final":
         if args.sealed_manifest is None or args.sealed_manifest_sha256 is None:
             raise ValueError("final phase requires complete sealed-manifest bindings")
@@ -290,10 +371,27 @@ def main():
             args.database_sha256,
             contract["freeze"],
         )
-    rows = load_spy_rows(args.database, args.database_sha256)
-    assert_partition_purge_and_embargo(build_partition_blocks(rows, contract.get("partitions")))
+    rows = load_spy_rows(args.database, args.database_sha256, _contract_availability_freeze(contract))
+    assert_partition_purge_and_embargo(build_partition_blocks(rows, contract, args.phase))
     spy_rows = len(rows)
-    print(json.dumps({"phase": args.phase, "spy_rows": spy_rows, "integrity_only": True}, indent=2))
+    _verify_receipt_input_hashes(
+        args.contract,
+        args.contract_sha256,
+        args.database,
+        args.database_sha256,
+        args.sealed_manifest,
+        args.sealed_manifest_sha256,
+    )
+    bindings = {
+        "contract_sha256": args.contract_sha256,
+        "database_sha256": args.database_sha256,
+        "evaluator_sha256": _sha256(Path(__file__)),
+        "freeze_sha256": _canonical_sha256(contract["freeze"]),
+        "sealed_manifest_sha256": args.sealed_manifest_sha256,
+    }
+    receipt = {"phase": args.phase, "spy_rows": spy_rows, "integrity_only": True, "bindings": bindings}
+    receipt["output_sha256"] = _canonical_sha256(receipt)
+    print(json.dumps(receipt, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

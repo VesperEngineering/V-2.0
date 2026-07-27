@@ -1,0 +1,98 @@
+{
+  "source": "skills-sh/nousresearch/hermes-agent/arxiv",
+  "source_url": "https://github.com/nousresearch/hermes-agent/tree/23526148d1845391fcd7dbecb1fe80b651635eeb/skills/research/arxiv",
+  "bundle_hash": "sha256:eadc2a6f55650588bb5ef682a4839f20347326c2ecafc2cd72a5eb4f77306923",
+  "scanner_version": "skills-guard-v1",
+  "verdict": "dangerous",
+  "trust_level": "community",
+  "findings": [
+    {
+      "pattern_id": "curl_pipe_python",
+      "severity": "critical",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 40,
+      "match": "curl -s \"https://export.arxiv.org/api/query?search_query=all:GRPO+reinforcement+learning&max_results=5&sortBy=submitt...",
+      "description": "curl piped to Python interpreter"
+    },
+    {
+      "pattern_id": "curl_pipe_python",
+      "severity": "critical",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 120,
+      "match": "curl -s \"https://export.arxiv.org/api/query?id_list=1706.03762\" | python3 -c \"",
+      "description": "curl piped to Python interpreter"
+    },
+    {
+      "pattern_id": "curl_pipe_python",
+      "severity": "critical",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 200,
+      "match": "curl -s \"https://api.semanticscholar.org/graph/v1/paper/arXiv:2402.03300?fields=title,authors,citationCount,reference...",
+      "description": "curl piped to Python interpreter"
+    },
+    {
+      "pattern_id": "curl_pipe_python",
+      "severity": "critical",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 209,
+      "match": "curl -s \"https://api.semanticscholar.org/graph/v1/paper/arXiv:2402.03300/citations?fields=title,authors,year,citation...",
+      "description": "curl piped to Python interpreter"
+    },
+    {
+      "pattern_id": "curl_pipe_python",
+      "severity": "critical",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 215,
+      "match": "curl -s \"https://api.semanticscholar.org/graph/v1/paper/arXiv:2402.03300/references?fields=title,authors,year,citatio...",
+      "description": "curl piped to Python interpreter"
+    },
+    {
+      "pattern_id": "curl_pipe_python",
+      "severity": "critical",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 221,
+      "match": "curl -s \"https://api.semanticscholar.org/graph/v1/paper/search?query=GRPO+reinforcement+learning&limit=5&fields=title...",
+      "description": "curl piped to Python interpreter"
+    },
+    {
+      "pattern_id": "curl_pipe_python",
+      "severity": "critical",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 235,
+      "match": "curl -s \"https://api.semanticscholar.org/graph/v1/author/search?query=Yann+LeCun&fields=name,hIndex,citationCount,pap...",
+      "description": "curl piped to Python interpreter"
+    },
+    {
+      "pattern_id": "remote_fetch",
+      "severity": "medium",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 22,
+      "match": "| Search papers | `curl \"https://export.arxiv.org/api/query?search_query=all:QUERY&max_results=5\"` |",
+      "description": "fetches remote resource at runtime"
+    },
+    {
+      "pattern_id": "remote_fetch",
+      "severity": "medium",
+      "category": "supply_chain",
+      "file": "SKILL.md",
+      "line": 23,
+      "match": "| Get specific paper | `curl \"https://export.arxiv.org/api/query?id_list=2402.03300\"` |",
+      "description": "fetches remote resource at runtime"
+    }
+  ],
+  "rules": [
+    "curl_pipe_python",
+    "remote_fetch"
+  ],
+  "scanned_at": "2026-07-16T15:55:29.341851+00:00",
+  "summary": "arxiv: dangerous \u2014 9 finding(s) in supply_chain",
+  "fresh": true
+}

@@ -29,6 +29,4 @@ IGNORE RUN.txt
 # Protected provider and model-research data (read-only local dependencies)
 vesper/data/massive/
 vesper/data/model_research/
-.kangentic/
 .claude/settings.local.json
-kangentic.local.json

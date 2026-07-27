@@ -13,6 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "spy_momentum_cpu_experiment.py"
+AVAILABILITY_FREEZE = "2020-12-31T00:00:00+00:00"
 
 
 def _load_module():
@@ -29,8 +30,8 @@ def _sha256(path):
 def _write_adapter(tmp_path, closes=None):
     database = tmp_path / "spy.sqlite"
     database.parent.mkdir(parents=True, exist_ok=True)
-    dates = pd.bdate_range("2020-01-01", periods=32, tz="UTC")
-    closes = closes if closes is not None else np.arange(100.0, 132.0)
+    closes = closes if closes is not None else np.arange(100.0, 160.0)
+    dates = pd.bdate_range("2020-01-01", periods=len(closes), tz="UTC")
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE adapter_metadata (key text primary key, value text not null)")
         connection.executemany(
@@ -58,6 +59,7 @@ def _write_adapter(tmp_path, closes=None):
 
 
 def _write_contract(tmp_path, database, phase="development", database_path=None, partitions=None):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     contract = {
         "phase": phase,
         "provenance": {
@@ -68,8 +70,24 @@ def _write_contract(tmp_path, database, phase="development", database_path=None,
             },
             "evaluator": {"path": str(SCRIPT_PATH.resolve()), "sha256": _sha256(SCRIPT_PATH)},
         },
-        "freeze": {"database_sha256": _sha256(database), "evaluator_sha256": _sha256(SCRIPT_PATH)},
-        "partitions": partitions or {phase: [20]},
+        "freeze": {
+            "database_sha256": _sha256(database),
+            "evaluator_sha256": _sha256(SCRIPT_PATH),
+            "availability_freeze": AVAILABILITY_FREEZE,
+        },
+        "partitions": partitions or {
+            "development": {"development": [20]},
+            "selection": {"development": [20], "selection": [31]},
+            "final": {"development": [20], "selection": [31], "final": [42]},
+        }[phase],
+        "partition_definition": {
+            "development_through": "2020-01-29",
+            "formation_cadence_sessions": 5,
+            "label_horizon_sessions": 5,
+            "purge_and_embargo_sessions": 5,
+            "selection_from": "2020-02-13",
+            "final_from": "2020-02-28",
+        },
     }
     path = tmp_path / "contract.json"
     path.write_text(json.dumps(contract, sort_keys=True), encoding="utf-8")
@@ -123,7 +141,7 @@ def _write_final_manifest(tmp_path, contract, database, evaluator_sha256=None):
 def test_feature_return_uses_only_rows_at_or_before_formation(tmp_path):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
-    rows = experiment.load_spy_rows(database, _sha256(database))
+    rows = experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
     before = experiment.feature_return(rows, 20)
     rows.loc[21:, "close"] = 1_000_000
@@ -135,7 +153,7 @@ def test_baseline_label_is_next_open_through_five_sessions_later(tmp_path):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
     contract = _write_contract(tmp_path, database)
-    rows = experiment.load_spy_rows(database, _sha256(database))
+    rows = experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
     result = experiment.evaluate_phase_outcomes(
         "development",
         contract_path=contract,
@@ -155,7 +173,7 @@ def test_future_discontinuity_does_not_remove_a_known_label(tmp_path):
     closes = np.arange(100.0, 132.0)
     closes[25] = 1_000.0
     database = _write_adapter(tmp_path, closes)
-    rows = experiment.load_spy_rows(database, _sha256(database))
+    rows = experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
     assert len(experiment.build_blocks(rows, [20])) == 1
 
@@ -221,8 +239,8 @@ def test_atomic_outcomes_reject_contract_or_database_toctou(tmp_path, monkeypatc
     contract = _write_contract(tmp_path, database)
     original_build = experiment.build_partition_blocks
 
-    def mutate_after_build(rows, partitions):
-        blocks = original_build(rows, partitions)
+    def mutate_after_build(rows, contract_data, phase):
+        blocks = original_build(rows, contract_data, phase)
         if mutated_input == "contract":
             contract.write_text(contract.read_text(encoding="utf-8") + " ", encoding="utf-8")
         else:
@@ -324,7 +342,7 @@ def test_load_rejects_missing_or_nonfinite_ohlc_prices(tmp_path, column, value):
         connection.execute(f"UPDATE ohlcv_data SET {column} = ? WHERE rowid = 1", (value,))
 
     with pytest.raises(ValueError, match="finite positive OHLC"):
-        experiment.load_spy_rows(database, _sha256(database))
+        experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
 
 def test_load_rejects_absent_or_malformed_source_mapping_and_metadata(tmp_path):
@@ -334,7 +352,7 @@ def test_load_rejects_absent_or_malformed_source_mapping_and_metadata(tmp_path):
         connection.execute("DELETE FROM ohlcv_source_map WHERE rowid = 1")
 
     with pytest.raises(ValueError, match="source mapping required"):
-        experiment.load_spy_rows(database, _sha256(database))
+        experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
     database = _write_adapter(tmp_path / "malformed-source-map")
     with sqlite3.connect(database) as connection:
@@ -343,24 +361,27 @@ def test_load_rejects_absent_or_malformed_source_mapping_and_metadata(tmp_path):
         )
 
     with pytest.raises(ValueError, match="source mapping required"):
-        experiment.load_spy_rows(database, _sha256(database))
+        experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
     database = _write_adapter(tmp_path / "malformed-metadata")
     with sqlite3.connect(database) as connection:
         connection.execute("DELETE FROM adapter_metadata WHERE key = 'price_basis'")
 
     with pytest.raises(ValueError, match="total-return price basis required"):
-        experiment.load_spy_rows(database, _sha256(database))
+        experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
 
 def test_cli_runs_interval_purge_and_embargo_checks_from_contract_blocks(tmp_path):
+    experiment = _load_module()
     database = _write_adapter(tmp_path)
-    contract = _write_contract(tmp_path, database, partitions={"development": [20], "selection": [26]})
+    contract = _write_contract(tmp_path, database, phase="selection", partitions={"development": [20], "selection": [26]})
+    contract_data = json.loads(contract.read_text())
+    contract_data["partition_definition"]["selection_from"] = "2020-02-06"
+    contract.write_text(json.dumps(contract_data), encoding="utf-8")
+    rows = experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
-    result = _run_cli(database, contract)
-
-    assert result.returncode != 0
-    assert "embargo boundary leakage" in result.stderr
+    with pytest.raises(ValueError, match="embargo boundary leakage"):
+        experiment.assert_partition_purge_and_embargo(experiment.build_partition_blocks(rows, json.loads(contract.read_text()), "selection"))
 
 
 def test_cli_rejects_phase_and_hash_mismatch(tmp_path):
@@ -414,13 +435,13 @@ def test_load_rejects_non_monotonic_timestamps(tmp_path):
         connection.execute("UPDATE ohlcv_data SET timestamp = 0 WHERE rowid = 32")
 
     with pytest.raises(ValueError, match="unique and monotonic"):
-        experiment.load_spy_rows(database, _sha256(database))
+        experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
 
 def test_partition_blocks_reject_overlapping_label_intervals(tmp_path):
     experiment = _load_module()
     database = _write_adapter(tmp_path)
-    rows = experiment.load_spy_rows(database, _sha256(database))
+    rows = experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
     development, selection = experiment.build_blocks(rows, [20, 22])
 
     with pytest.raises(ValueError, match="overlap"):
@@ -489,7 +510,244 @@ def test_source_database_connection_is_read_only(tmp_path, monkeypatch):
         return original_connect(*args, **kwargs)
 
     monkeypatch.setattr(experiment.sqlite3, "connect", recording_connect)
-    experiment.load_spy_rows(database, _sha256(database))
+    experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
 
     assert "mode=ro" in seen[0][0][0]
     assert seen[0][1]["uri"] is True
+
+
+def test_cli_denies_self_authored_selection_contract_before_data_access(tmp_path):
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database, phase="selection")
+
+    result = _run_cli(database, contract, "selection")
+
+    assert result.returncode != 0
+    assert "selection approval anchor required" in result.stderr
+
+
+def test_cli_rejects_vacuous_partition_declaration(tmp_path):
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database, partitions={"development": [20]})
+    contract_data = json.loads(contract.read_text(encoding="utf-8"))
+    del contract_data["partition_definition"]
+    contract.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    result = _run_cli(database, contract)
+
+    assert result.returncode != 0
+    assert "complete chronological partition declaration required" in result.stderr
+
+
+@pytest.mark.parametrize("source_as_of_date", ["not-a-date", "2019-12-31", "2027-01-01"])
+def test_load_rejects_malformed_or_temporally_invalid_source_availability(tmp_path, source_as_of_date):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE ohlcv_source_map SET source_as_of_date = ?", (source_as_of_date,))
+
+    with pytest.raises(ValueError, match="source availability"):
+        experiment.load_spy_rows(database, _sha256(database), AVAILABILITY_FREEZE)
+
+
+def test_cli_receipt_changes_when_bound_database_changes(tmp_path):
+    first_database = _write_adapter(tmp_path / "first")
+    second_database = _write_adapter(tmp_path / "second", closes=np.arange(200.0, 232.0))
+    first_contract = _write_contract(tmp_path / "first-contract", first_database)
+    second_contract = _write_contract(tmp_path / "second-contract", second_database)
+
+    first = _run_cli(first_database, first_contract)
+    second = _run_cli(second_database, second_contract)
+
+    assert first.returncode == second.returncode == 0
+    assert json.loads(first.stdout)["bindings"]["database_sha256"] != json.loads(second.stdout)["bindings"]["database_sha256"]
+    assert json.loads(first.stdout)["output_sha256"] != json.loads(second.stdout)["output_sha256"]
+
+
+def test_final_cli_rejects_missing_selection_predecessor_and_unordered_boundaries(tmp_path):
+    database = _write_adapter(tmp_path, closes=np.arange(100.0, 160.0))
+    contract = _write_contract(tmp_path, database, phase="final", partitions={"development": [20], "final": [42]})
+    manifest = _write_final_manifest(tmp_path, contract, database)
+
+    result = _run_cli(
+        database,
+        contract,
+        "final",
+        "--sealed-manifest",
+        str(manifest),
+        "--sealed-manifest-sha256",
+        _sha256(manifest),
+    )
+
+    assert result.returncode != 0
+    assert "complete chronological partition declaration required" in result.stderr
+
+
+def test_five_session_cadence_is_accepted_in_cli_and_outcome_paths(tmp_path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database, partitions={"development": [20, 25]})
+    contract_data = json.loads(contract.read_text(encoding="utf-8"))
+    contract_data["partition_definition"]["formation_cadence_sessions"] = 5
+    contract_data["partition_definition"]["development_through"] = "2020-02-05"
+    contract.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    outcomes = experiment.evaluate_phase_outcomes(
+        "development",
+        contract_path=contract,
+        contract_sha256=_sha256(contract),
+        database=database,
+        database_sha256=_sha256(database),
+    )
+    result = _run_cli(database, contract)
+
+    assert [outcome["baseline"]["entry_position"] for outcome in outcomes] == [21, 26]
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize("path", ["cli", "outcome"])
+def test_development_label_crossing_selection_boundary_is_rejected(tmp_path, path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database)
+    contract_data = json.loads(contract.read_text(encoding="utf-8"))
+    contract_data["partition_definition"]["selection_from"] = "2020-01-30"
+    contract_data["partition_definition"]["final_from"] = "2020-02-14"
+    contract.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    if path == "cli":
+        result = _run_cli(database, contract)
+        assert result.returncode != 0
+        assert "development partition date mismatch" in result.stderr
+    else:
+        with pytest.raises(ValueError, match="development partition date mismatch"):
+            experiment.evaluate_phase_outcomes(
+                "development",
+                contract_path=contract,
+                contract_sha256=_sha256(contract),
+                database=database,
+                database_sha256=_sha256(database),
+            )
+
+
+def test_final_cli_rejects_selection_label_crossing_final_boundary(tmp_path):
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(
+        tmp_path,
+        database,
+        phase="final",
+        partitions={"development": [20], "selection": [31], "final": [42]},
+    )
+    contract_data = json.loads(contract.read_text(encoding="utf-8"))
+    contract_data["partition_definition"]["selection_from"] = "2020-02-06"
+    contract_data["partition_definition"]["final_from"] = "2020-02-14"
+    contract.write_text(json.dumps(contract_data), encoding="utf-8")
+    manifest = _write_final_manifest(tmp_path, contract, database)
+
+    result = _run_cli(
+        database,
+        contract,
+        "final",
+        "--sealed-manifest",
+        str(manifest),
+        "--sealed-manifest-sha256",
+        _sha256(manifest),
+    )
+
+    assert result.returncode != 0
+    assert "selection partition date mismatch" in result.stderr
+
+
+@pytest.mark.parametrize("path", ["cli", "outcome"])
+def test_missing_contract_availability_freeze_is_rejected(tmp_path, path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database)
+    contract_data = json.loads(contract.read_text(encoding="utf-8"))
+    del contract_data["freeze"]["availability_freeze"]
+    contract.write_text(json.dumps(contract_data), encoding="utf-8")
+
+    if path == "cli":
+        result = _run_cli(database, contract)
+        assert result.returncode != 0
+        assert "contract availability freeze required" in result.stderr
+    else:
+        with pytest.raises(ValueError, match="contract availability freeze required"):
+            experiment.evaluate_phase_outcomes(
+                "development",
+                contract_path=contract,
+                contract_sha256=_sha256(contract),
+                database=database,
+                database_sha256=_sha256(database),
+            )
+
+
+def test_receipt_integrity_rechecks_admitted_input_bytes_before_emission(tmp_path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database)
+    contract_sha256 = _sha256(contract)
+    contract.write_text(contract.read_text(encoding="utf-8") + " ", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="contract changed before receipt"):
+        experiment._verify_receipt_input_hashes(
+            contract,
+            contract_sha256,
+            database,
+            _sha256(database),
+            None,
+            None,
+        )
+
+
+@pytest.mark.parametrize(
+    "partitions,definition_change,expected_error",
+    [
+        ({"development": [20], "selection": [31], "final": [42]}, ("final_from", "2020-02-13"), "complete chronological partition declaration required"),
+        ({"development": [20], "selection": [31], "final": [41]}, None, "final partition date mismatch"),
+    ],
+)
+def test_final_cli_rejects_overlapping_boundaries_and_out_of_boundary_formations(tmp_path, partitions, definition_change, expected_error):
+    database = _write_adapter(tmp_path)
+    contract = _write_contract(tmp_path, database, phase="final", partitions=partitions)
+    if definition_change is not None:
+        contract_data = json.loads(contract.read_text())
+        contract_data["partition_definition"][definition_change[0]] = definition_change[1]
+        contract.write_text(json.dumps(contract_data), encoding="utf-8")
+    manifest = _write_final_manifest(tmp_path, contract, database)
+
+    result = _run_cli(
+        database,
+        contract,
+        "final",
+        "--sealed-manifest",
+        str(manifest),
+        "--sealed-manifest-sha256",
+        _sha256(manifest),
+    )
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
+@pytest.mark.parametrize("path", ["cli", "outcome"])
+def test_source_availability_after_contract_freeze_is_rejected_in_executable_paths(tmp_path, path):
+    experiment = _load_module()
+    database = _write_adapter(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE ohlcv_source_map SET source_as_of_date = '2021-01-01'")
+    contract = _write_contract(tmp_path, database)
+
+    if path == "cli":
+        result = _run_cli(database, contract)
+        assert result.returncode != 0
+        assert "source availability required" in result.stderr
+    else:
+        with pytest.raises(ValueError, match="source availability required"):
+            experiment.evaluate_phase_outcomes(
+                "development",
+                contract_path=contract,
+                contract_sha256=_sha256(contract),
+                database=database,
+                database_sha256=_sha256(database),
+            )

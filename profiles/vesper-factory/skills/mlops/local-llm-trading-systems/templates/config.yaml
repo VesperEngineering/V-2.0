@@ -1,0 +1,80 @@
+# Swing Scope Configuration Template
+# SEPARATE FROM VESPER. Do not share keys, databases, or configs.
+# Replace placeholder values with your actual credentials.
+
+# ── Massive API (real-time data) ──
+massive:
+  api_key: "YOUR_MASSIVE_API_KEY"
+  ws_url: "wss://socket.massive.com/stocks"
+  rest_url: "https://api.massive.com"
+  # Universe: "sp500" | "watchlist" | "all"
+  universe: "sp500"
+  watchlist: []
+
+# ── Alpaca (paper trading — SEPARATE account from Vesper) ──
+alpaca:
+  api_key: "YOUR_ALPACA_PAPER_KEY"
+  secret_key: "YOUR_ALPACA_PAPER_SECRET"
+  base_url: "https://paper-api.alpaca.markets"
+  data_url: "https://data.alpaca.markets"
+
+# ── Ollama (local LLM, zero token cost) ──
+ollama:
+  host: "http://localhost:11434"
+  model: "qwen2.5:14b"
+  # Confidence threshold (1-10) for trade decisions
+  min_confidence: 6
+  # Max tokens for context analysis
+  max_tokens: 512
+  temperature: 0.3  # low temp = more consistent
+
+# ── Signal Engine ──
+signals:
+  enabled:
+    - gap_reclaim
+    - vwap_cross
+    - volume_spike
+    - rsi_extreme
+    - bollinger_squeeze
+    - opening_range_break
+  min_score: 7
+  vwap_period: 20
+  volume_avg_period: 20
+  rsi_period: 14
+  bollinger_period: 20
+  bollinger_std: 2.0
+  volume_spike_mult: 3.0
+  opening_range_minutes: 15
+
+# ── Risk Management ──
+risk:
+  max_position_size: 500
+  max_open_positions: 3
+  max_daily_loss: 500
+  eod_flat: true
+  eod_time: "15:55"
+  vesper_holdings_check: true
+  vesper_account_id: "YOUR_VESPER_ALPACA_ACCOUNT_ID"
+
+# ── News / Context (free sources for paper trading) ──
+context:
+  sec_edgar_rss: "https://www.sec.gov/cgi-bin/browse?action=getcurrent&type=8-K&output=atom"
+  rss_feeds:
+    - "https://feeds.bloomberg.com/markets/news.rss"
+    - "https://www.investing.com/rss/news_25.rss"
+  sector_lookup: true
+
+# ── Database ──
+database:
+  path: "data/swing_scope.db"
+
+# ── Logging ──
+logging:
+  level: "INFO"
+  dir: "logs"
+
+# ── Schedule ──
+schedule:
+  market_open: "09:30"
+  market_close: "16:00"
+  scan_interval_sec: 60

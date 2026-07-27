@@ -1,0 +1,25 @@
+{
+  "scope": "Second fail-closed repair of the bounded SPY Slice 2 research evaluator only",
+  "before": {
+    "scripts/spy_momentum_cpu_experiment.py": "2d01b7214ae775176132190c72a7dec07544edb8caac6ab84abc189f07b7dd75",
+    "tests/test_spy_momentum_cpu_experiment.py": "f50a1777bc315d3dd1b27bc1b4e0269b3a8682c4d502838b99cbd3e27395749f"
+  },
+  "after": {
+    "scripts/spy_momentum_cpu_experiment.py": "ae3adda3b8e2253a129d70eebdaf67e30d3b487693039b06c37ccbec8c161c09",
+    "tests/test_spy_momentum_cpu_experiment.py": "a623af3c565a583c5a5dfb8e2117db0c9968f8ce7062d38017bc74bbd913e835"
+  },
+  "protected_adapter": {
+    "path": "vesper/data/massive/adapters/total_return_ohlcv_adapter_20260717T153500Z.sqlite",
+    "sha256_before_and_after": "825252f94efb228df37683d58a1199cbc101828bbe7f53079e9d066c28e5a70c"
+  },
+  "verification": {
+    "focused_pytest": "31 passed",
+    "project_venv_pytest": "254 passed",
+    "external_py_compile": "passed"
+  },
+  "exclusions": [
+    "No protected-data write",
+    "No selection or final outcome computation",
+    "No trainer, engine, strategy, config, model, schedule, broker, risk, or execution change"
+  ]
+}
