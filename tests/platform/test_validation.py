@@ -175,3 +175,31 @@ def test_git_diff_check_rejects_noop_and_untracked_trailing_whitespace(tmp_path)
 
     assert noop.passed is False
     assert whitespace.passed is False
+
+
+def test_git_diff_check_does_not_fail_on_nonerror_git_warning(tmp_path, monkeypatch):
+    initialize_repository(tmp_path)
+    workspace = tmp_path / "exercise"
+    workspace.mkdir()
+    (workspace / "M2-CONTROLLED-EXERCISE.md").write_text("valid\n", encoding="utf-8")
+    validator = LocalDeterministicValidator(
+        repository_root=tmp_path,
+        evidence=FilesystemEvidenceStore(tmp_path / ".state" / "evidence"),
+        clock=lambda: NOW,
+    )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="",
+            stderr="warning: LF will be replaced by CRLF",
+        ),
+    )
+
+    result = validator.validate(request(workspace, ("git-diff-check",)), receipt())
+
+    assert result.passed is True
+    assert result.checks[0].exit_code == 0

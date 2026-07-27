@@ -171,11 +171,12 @@ class LocalDeterministicValidator:
                 timeout=self.command_timeout_seconds,
                 check=False,
             )
-            details = [(completed.stdout + completed.stderr).strip()]
+            git_detail = (completed.stdout + completed.stderr).strip()
+            issues = []
             for relative in output.changed_files:
                 path = self._safe_path(workspace, relative)
                 if path is None:
-                    details.append(f"unsafe changed path: {relative}")
+                    issues.append(f"unsafe changed path: {relative}")
                     continue
                 if not path.is_file() or path.is_symlink():
                     continue
@@ -184,21 +185,21 @@ class LocalDeterministicValidator:
                     continue
                 for line_number, line in enumerate(body.splitlines(), start=1):
                     if line.endswith((b" ", b"\t")):
-                        details.append(f"{relative}:{line_number}: trailing whitespace")
+                        issues.append(f"{relative}:{line_number}: trailing whitespace")
                     indentation = line[: len(line) - len(line.lstrip(b" \t"))]
                     if b" \t" in indentation:
-                        details.append(f"{relative}:{line_number}: space before tab in indent")
-            detail = "\n".join(item for item in details if item)
+                        issues.append(f"{relative}:{line_number}: space before tab in indent")
+            detail = "\n".join(item for item in (git_detail, *issues) if item)
             return self._result(
                 request,
                 receipt,
                 index=index,
                 name="git-diff-check",
                 command="git diff HEAD --check -- .",
-                passed=completed.returncode == 0 and not detail,
+                passed=completed.returncode == 0 and not issues,
                 exit_code=completed.returncode
                 if completed.returncode != 0
-                else (1 if detail else 0),
+                else (1 if issues else 0),
                 detail=detail,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
