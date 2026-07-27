@@ -73,3 +73,31 @@ rejects concurrent repository operations, binds profile bytes to the persisted r
 rolls back rejected turns, requires typed specialist output and Risk compliance,
 and binds operator approval to the Risk-checkpoint workspace hash plus all verified
 Product, Development, validation, and Risk evidence.
+
+## Controlled exercise acceptance
+
+Run `16e14c0e-2496-4e28-a04f-803ae008e5a8` executed against revision
+`549f7a36e9f4917aa76e80a43e15fcc1d763788e` in a disposable standalone clone.
+Product routed the bounded task, Development changed only
+`docs/m2-controlled-exercise/RESULT.md`, and all three controller checks passed:
+
+- `git diff HEAD --check -- .`;
+- `path-exists::RESULT.md`; and
+- `file-contains::RESULT.md::m2-controlled-exercise-complete`.
+
+Independent Risk Review returned `approve` with scope, evidence ownership, and
+prohibited-action compliance all `true`. The approval request bound nine Product,
+Development, validation, and Risk artifacts to workspace SHA-256
+`a593657d1f7d3bfbfd813cae5048bc28bd290f20f356106653e842c0226ed7b6`.
+The operator persisted approval for checkpoint
+`1f18a14a-ce3b-64cd-8004-d0dc29a713a4`; explicit resume completed with status
+`accepted`, zero corrections, and no pending nodes. Sandbox inventory was empty
+after every specialist turn and after final acceptance.
+
+The pre-acceptance attempts also failed closed as designed: the first exposed a
+Windows lease-file fingerprint conflict, the second exposed Codex's required
+`--skip-git-repo-check` option for exact non-Git subdirectory mounts, and a later
+exercise stopped at operator intervention when a harmless Git line-ending warning
+was misclassified as validation failure. Each issue was reproduced, covered by a
+regression test, fixed, and retried from a fresh revision and clone; no failed run
+reached Risk Review approval or operator acceptance.

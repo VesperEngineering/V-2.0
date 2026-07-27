@@ -7,6 +7,7 @@ any path outside this directory.
 The controller validates the result independently and stores checkpoints, evidence, and memory in
 the separately designated local platform-state directory outside this Git worktree.
 
-Current status: the credential-safe, pre-start deny-all boundary and native controller wiring are
-verified. The real controlled graph exercise has not started. `RESULT.md` remains the untouched
-controller fixture; it is not evidence of a specialist run.
+Current status: accepted. Run `16e14c0e-2496-4e28-a04f-803ae008e5a8` completed the real controlled
+graph exercise against revision `549f7a36e9f4917aa76e80a43e15fcc1d763788e`. Product,
+Development, deterministic validation, Risk Review, persisted operator approval, and explicit
+resume completed with zero corrections. `RESULT.md` records the accepted bounded output.
