@@ -609,6 +609,7 @@ class DockerCodexAdapter:
             "exec",
             "--ignore-rules",
             "--ephemeral",
+            "--skip-git-repo-check",
             "--json",
             "--color",
             "never",

@@ -205,6 +205,7 @@ def test_workspace_write_uses_verified_outer_sandbox_and_parses_json_receipt(tmp
         "exec",
         "--ignore-rules",
         "--ephemeral",
+        "--skip-git-repo-check",
         "--json",
         "--color",
         "never",
