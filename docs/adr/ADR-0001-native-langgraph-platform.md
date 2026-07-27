@@ -15,7 +15,7 @@ The initial architecture must remain local, resumable, and narrow. It must not r
 
 ## Decision
 
-V20 will replace the target Hermes-oriented runtime with a native platform built around LangGraph, the LangGraph Store abstraction, LangMem-compatible memory consolidation, the local OpenAI Codex SDK authenticated through the operator's ChatGPT account, and SQLite for initial local persistence. No Hermes runtime adapter will be built.
+V20 will replace the target Hermes-oriented runtime with a native platform built around LangGraph, the LangGraph Store abstraction, LangMem-compatible memory consolidation, provider-neutral model-execution adapters, and SQLite for initial local persistence. Docker-isolated Codex is the first runtime; OpenCode remains a later multi-provider adapter. No Hermes runtime adapter will be built.
 
 ### Control graph
 
@@ -48,7 +48,7 @@ The Product supervisor is the graph owner. Development and Risk Review are indep
 - A third failed attempt stops automatic correction and requires operator intervention.
 - Risk approval does not finalize the task; it produces a real human-approval interrupt.
 - Final acceptance occurs only after explicit operator approval.
-- The controller, not a specialist or Codex thread, owns routing, validation, approval state, and acceptance.
+- The controller, not a specialist or model session, owns routing, validation, approval state, and acceptance.
 
 ### Persistence and evidence
 
@@ -63,9 +63,9 @@ Checkpoint state, long-term memory, and authoritative filesystem evidence are se
 
 ### Specialist execution
 
-V20 will expose a narrow adapter around the Python `openai-codex` SDK. The adapter will start and resume specialist threads, select an approved model, bind an explicit repository or worktree directory, enforce read-only or workspace-write sandbox modes, capture available streamed events and the final response, and emit typed receipts for timeout, cancellation, usage limits, permissions, and completion.
+V20 will expose narrow, provider-neutral execution adapters. The first adapter invokes Codex only inside an already-provisioned Docker sandbox bound to the exact disposable standalone repository. It verifies the sandbox identity, OpenAI OAuth mode, disabled MCP gateway, exact model-provider network allowlist, implicit default-deny behavior, and Git control-plane integrity. It captures bounded process metadata and emits typed receipts for timeout, cancellation, usage limits, permissions, and completion. LangGraph remains the only workflow controller; no model runtime owns V20 state, memory, routing, evidence, or approval.
 
-The adapter will use the operator's local ChatGPT-authenticated Codex session. It must not read, print, copy, persist, or place authentication material into prompts, receipts, memory, or source control. SDK authentication availability and exact API compatibility are implementation gates, not assumptions made by this ADR.
+Docker Sandboxes brokers the operator's ChatGPT-authenticated OpenAI access without exposing the underlying token to V20 or the sandbox. Read-only requests retain Codex's inner read-only sandbox. Workspace-write requests use Codex's documented externally-sandboxed mode only after the Docker boundary passes preflight, because nested Bubblewrap cannot remount the Windows-backed workspace reliably. Each sandbox is uniquely provisioned for one specialist turn and force-removed after every outcome; a stopped guest is never reused because its disk state is not authoritative. The adapter must not read, print, copy, persist, or place authentication material into prompts, receipts, memory, or source control. OpenCode remains an approved future route for other providers once a provider API key can be supplied through the same credential boundary.
 
 ### Contracts and authority
 
@@ -111,7 +111,7 @@ Positive consequences:
 Costs and risks:
 
 - V20 assumes responsibility for orchestration, persistence migrations, memory hygiene, receipt integrity, and operator tooling that Hermes previously supplied.
-- LangGraph, LangMem, and Codex SDK APIs and compatible versions must be resolved before implementation.
+- LangGraph, LangMem, Docker Sandboxes, Codex, and OpenCode executable APIs and compatible versions must be resolved before their respective implementation phases.
 - SQLite requires locking, backup, corruption recovery, schema migration, and concurrency tests.
 - ChatGPT-account SDK authentication may be unavailable or may not support the required local boundary; implementation must stop rather than fall back to unapproved credentials.
 - Deterministic validation can be incomplete if its inputs and evidence schemas are underspecified.
@@ -130,10 +130,10 @@ This ADR does not authorize dependency installation or runtime integration. Befo
 
 1. Establish a reproducible `uv`/`pyproject.toml` dependency baseline without removing or downgrading critical packages.
 2. Resolve and record compatible pinned versions, licenses, transitive changes, and security findings.
-3. Verify local Codex SDK authentication without exposing credential material.
+3. Verify the selected local model runtime's authentication without exposing credential material.
 4. Resolve the existing import failure in `scripts.run_paper` and make the Tk dashboard test baseline reproducible.
 5. Approve typed contracts, SQLite schemas and migration policy, filesystem evidence layout, and exact tool permissions.
-6. Implement against fake Codex adapters first and keep real SDK coverage separately marked as a local integration test.
+6. Implement process adapters against deterministic fakes first and keep real provider coverage separately marked as a local integration test.
 
 ## References
 

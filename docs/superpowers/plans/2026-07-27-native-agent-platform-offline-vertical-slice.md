@@ -4,17 +4,28 @@
 > transitive dependency of LangGraph/`langchain-core`. Local SQLite checkpoint/Store persistence,
 > the bounded Product/Development/Validation/Risk graph, persisted human approval, recovery, and
 > graph-backed lifecycle commands are implemented. Tracing and CLI analytics are forced off, and a
-> fresh-process deny-egress test covers the complete local graph path. LangMem remains deliberately
+> fresh-process deny-egress test covers the complete local graph path. The original host Codex SDK
+> gateway is superseded for new runtime work by a fake-tested Docker Sandboxes Codex adapter.
+> Read-only and workspace-write Docker canaries passed in a disposable standalone clone; the latter
+> uses Codex's externally-sandboxed mode. Mount inspection subsequently found Docker's default
+> read-write shared skills store, so the canary is not accepted as a production isolation boundary.
+> The adapter now rejects shared or additional host mounts; activation requires a replacement
+> sandbox created with skills sharing disabled. The operator selected one-shot lifecycle: every
+> specialist turn receives a fresh uniquely named sandbox that is force-removed after its outcome.
+> OpenCode remains deferred until a provider API key is available through the sandbox credential
+> proxy. LangMem remains deliberately
 > deferred because its provider-heavy dependency closure has not been approved. See
 > `docs/receipts/M1-dependency-receipt.md`.
+> Task 4 below records the completed direct-Codex baseline; ADR-0001,
+> `vesper.platform.codex_sandbox`, and `vesper.platform.opencode` govern new model-runtime work.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build V20's first local, resumable Product → Development → deterministic validation → Risk Review → operator approval workflow without invoking a real model, provider, broker, or trading path.
 
-**Architecture:** New code lives in a focused `vesper.platform` package. Pydantic contracts are the serialization boundary, LangGraph owns deterministic routing and interrupts, SQLite owns checkpoints and long-term Store records, and immutable artifacts remain in a content-addressed filesystem evidence store. Codex and memory consolidation are dependency-injected ports tested with deterministic fakes; the real Codex SDK test remains opt-in.
+**Architecture:** New code lives in a focused `vesper.platform` package. Pydantic contracts are the serialization boundary, LangGraph owns deterministic routing and interrupts, SQLite owns checkpoints and long-term Store records, and immutable artifacts remain in a content-addressed filesystem evidence store. Model execution and memory consolidation are dependency-injected ports tested with deterministic fakes; real provider execution remains opt-in.
 
-**Tech Stack:** Python 3.11, Pydantic 2, LangGraph, `langgraph-checkpoint-sqlite`, OpenAI Codex Python SDK, Typer, PyYAML, pytest, Ruff, SQLite.
+**Tech Stack:** Python 3.11, Pydantic 2, LangGraph, `langgraph-checkpoint-sqlite`, Docker Sandboxes with Codex, deferred OpenCode, Typer, PyYAML, pytest, Ruff, SQLite.
 
 ## Global Constraints
 

@@ -41,7 +41,20 @@ no command connects to a provider or trading runtime. See
 boundary. Status, receipts, evidence, pending approvals, approval, rejection,
 resume, and cancellation use local SQLite checkpoints and Store records.
 `create` fails closed until an operator-approved specialist composition is
-configured; deterministic specialist fakes are used only by tests.
+configured. `DockerCodexAdapter` is the first isolated runtime implementation. It
+runs Codex in an already-provisioned Docker sandbox bound to an exact disposable
+standalone clone and verifies OpenAI OAuth, disabled MCP, exact host mounts, no
+published ports, and the effective network allowlist before every turn. Read-only
+turns retain Codex's inner sandbox; workspace-write turns rely on the Docker
+microVM because the nested Linux sandbox is incompatible with the Windows mount.
+The adapter force-removes the one-shot sandbox after every outcome and fails
+closed on Git control-plane mutation. The initial canary still had Docker's shared
+host skills mount, so production activation requires a replacement sandbox created
+with skills sharing disabled. Every specialist turn requires a fresh uniquely named
+sandbox; stopped VMs are never reused. The adapter is not wired into `create` until
+one-shot provisioning exists and the separately owned specialist-composition change
+is adapted and reviewed. OpenCode remains fake-tested for later provider support
+and requires a provider API key before real isolated execution.
 
 ## Verification
 
