@@ -684,6 +684,8 @@ class DockerCodexAdapter:
                 ordered = sorted(entries, key=lambda entry: entry.name)
             for entry in ordered:
                 path = Path(entry.path)
+                if path == git_directory / "v20-controller.lock":
+                    continue
                 if self._is_reparse_point(path):
                     raise DockerSandboxPolicyError(
                         "Git metadata contains a symbolic link or Windows reparse point"

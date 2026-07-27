@@ -458,6 +458,18 @@ def test_git_metadata_mutation_fails_and_removes_disposable_sandbox(tmp_path):
     assert ["sbx-test", "rm", "--force", "v20-codex"] in boundary.metadata_calls
 
 
+def test_controller_lease_file_is_outside_the_guest_git_fingerprint(tmp_path):
+    boundary = FakeBoundary(tmp_path)
+    runtime = adapter(tmp_path, boundary)
+    lease = tmp_path / ".git" / "v20-controller.lock"
+    lease.write_bytes(b"\0")
+
+    before = runtime._git_fingerprint()
+    lease.write_bytes(b"controller-owned-state")
+
+    assert runtime._git_fingerprint() == before
+
+
 def test_timeout_removes_sandbox_and_returns_structured_receipt(tmp_path):
     boundary = FakeBoundary(tmp_path)
 
