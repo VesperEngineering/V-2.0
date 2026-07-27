@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "report_type": "v20_agent_platform_baseline",
+  "captured_at": "2026-07-27T00:05:00-04:00",
+  "repository": {
+    "root": "C:/Users/bgonn/Desktop/v20",
+    "branch": "main",
+    "commit": "9f9df7cf483bd77603dd5bf8c145c80c58aeb0e2",
+    "tracked_changes": [],
+    "protected_uncommitted_paths": [
+      "reports/research/data_evaluation_admission_v2.md",
+      "reports/research/spy_momentum_cpu_slice2_remediation_review_v5.md"
+    ],
+    "ahead_of_origin_main": 1,
+    "worktree_count": 15,
+    "additional_worktrees": [
+      ".worktrees/quant-factory",
+      ".worktrees/split-adjustment-gate-a",
+      ".worktrees/spy-phase-authorization",
+      ".worktrees/spy-slice2-review-fixes",
+      ".worktrees/step3-shadow-target",
+      ".worktrees/step4-shadow-delta",
+      ".worktrees/step5-local-journal",
+      ".worktrees/step5-native-journal",
+      ".worktrees/step5-semantic-envelope",
+      ".worktrees/step5-semantic-replay",
+      ".worktrees/step5-shadow-evidence",
+      ".worktrees/t_662deeff",
+      ".worktrees/xgb-shadow-forecast",
+      "C:/Users/bgonn/Desktop/v20-step3-shadow-target"
+    ]
+  },
+  "toolchain": {
+    "python": "3.11.15",
+    "uv": "0.11.32",
+    "environment": ".venv",
+    "environment_management_observed": "uv-created venv with requirements.txt",
+    "expected_but_absent": [
+      "pyproject.toml",
+      "uv.lock"
+    ]
+  },
+  "dependencies": {
+    "manifests": [
+      "requirements.txt"
+    ],
+    "lockfiles": [],
+    "requirements_are_range_pinned": true,
+    "reproducible_resolution": false
+  },
+  "codegraph": {
+    "status": "up_to_date",
+    "indexed_files": 147,
+    "python_files": 133,
+    "nodes": 2561,
+    "edges": 5859,
+    "backend": "node:sqlite"
+  },
+  "inventory": {
+    "top_level": [
+      {"path": ".codegraph", "kind": "generated_index", "files": 6, "size_bytes": 48639951},
+      {"path": ".pytest_cache", "kind": "generated_cache", "files": 5, "size_bytes": 70344},
+      {"path": ".pytest_tmp", "kind": "generated_test_output", "files": 37, "size_bytes": 390351},
+      {"path": ".venv", "kind": "virtual_environment", "files": 19467, "size_bytes": 644155219},
+      {"path": ".worktrees", "kind": "registered_worktrees", "files": 40535, "size_bytes": 18734916271},
+      {"path": "assets", "kind": "assets", "files": 1, "size_bytes": 2274},
+      {"path": "config", "kind": "configuration", "files": 2, "size_bytes": 3989},
+      {"path": "hermes-local", "kind": "ignored_vendored_runtime_candidate", "files": 4360, "size_bytes": 95398924},
+      {"path": "models", "kind": "protected_model_artifacts", "files": 3, "size_bytes": 41323},
+      {"path": "profiles", "kind": "profiles_and_vendored_skills", "files": 1145, "size_bytes": 61349046},
+      {"path": "reports", "kind": "evidence_receipts_and_logs", "files_before_report": 133, "size_bytes_before_report": 633047},
+      {"path": "scripts", "kind": "entry_points_and_research_scripts", "files": 18, "size_bytes": 175689},
+      {"path": "SKILLS", "kind": "repository_guidance", "files": 2, "size_bytes": 17152},
+      {"path": "tests", "kind": "first_party_tests", "files": 40, "size_bytes": 793835},
+      {"path": "vesper", "kind": "package_and_protected_data", "files": 5995, "size_bytes": 163481557995}
+    ],
+    "first_party_python_packages": [
+      "vesper",
+      "vesper.audit",
+      "vesper.dashboard",
+      "vesper.data",
+      "vesper.execution",
+      "vesper.portfolio",
+      "vesper.risk",
+      "vesper.scheduler",
+      "vesper.strategy"
+    ],
+    "entry_points": [
+      "scripts/build_universe.py",
+      "scripts/dashboard.py",
+      "scripts/intermediate_momentum_research.py",
+      "scripts/low_vol_research.py",
+      "scripts/ranking_diagnostic.py",
+      "scripts/run_backtest.py",
+      "scripts/run_paper.py",
+      "scripts/spy_momentum_cpu_experiment.py",
+      "scripts/train_model.py",
+      "vesper/dashboard/app.py"
+    ],
+    "test_root": "tests",
+    "test_files": 16,
+    "statically_discovered_test_functions": 160,
+    "profile_roots": [
+      "profiles/vesper-factory"
+    ],
+    "profile_souls": [
+      "profiles/vesper-factory/SOUL.md"
+    ],
+    "protected_data_roots": [
+      "vesper/data/massive",
+      "vesper/data/model_research"
+    ],
+    "model_artifacts": [
+      "models/xgb_ranker.compatibility.json",
+      "models/xgb_ranker.json",
+      "models/xgb_ranker.metadata.json"
+    ],
+    "report_extensions": {
+      ".json": 49,
+      ".log": 65,
+      ".md": 18,
+      ".py": 1
+    },
+    "generated_python_cache": {
+      "directories": 11,
+      "files": 65,
+      "size_bytes": 1091375
+    },
+    "build_outputs": []
+  },
+  "verification": {
+    "readme_command": {
+      "scope": "repository root",
+      "exit_code": 2,
+      "result": "collection_failed",
+      "errors": 41,
+      "warning_count": 1,
+      "cause": "unscoped pytest recursed into ignored hermes-local and separate profile skill tests"
+    },
+    "correctly_scoped_v20_suite": {
+      "command": ".venv/Scripts/python.exe -m pytest tests -q --basetemp=<external-temp>/pytest",
+      "exit_code": 0,
+      "passed": 266,
+      "failed": 0,
+      "duration_seconds": 13.96
+    },
+    "tracked_python_compilation": {
+      "method": "in-memory compile with UTF-8 source reads; no bytecode writes",
+      "first_party_files": 61,
+      "vendored_or_profile_files": 72,
+      "total_files": 133,
+      "failures": []
+    },
+    "first_party_imports": {
+      "modules_checked": 45,
+      "passed": 44,
+      "failures": [
+        {
+          "module": "scripts.run_paper",
+          "error": "ImportError: cannot import name 'VesperDashboard' from 'vesper.dashboard.app'"
+        }
+      ]
+    }
+  },
+  "safety": {
+    "credentials_read": false,
+    "external_services_contacted": false,
+    "broker_contacted": false,
+    "orders_placed": false,
+    "schedules_changed": false,
+    "models_promoted": false,
+    "risk_limits_changed": false,
+    "files_deleted_or_quarantined_before_report": false
+  },
+  "baseline_findings": [
+    "The README test command is Windows-safe but not scoped to the V20 tests directory.",
+    "The correctly scoped V20 test suite passes 266 tests.",
+    "scripts.run_paper is not importable because VesperDashboard is absent.",
+    "The requested pyproject.toml and uv.lock dependency workflow does not exist in this checkout.",
+    "Two untracked research reports and all protected data/model/evidence paths must be preserved.",
+    "The ignored hermes-local tree and 14 additional worktrees have unclear active ownership and cannot be removed or quarantined without stronger evidence."
+  ]
+}

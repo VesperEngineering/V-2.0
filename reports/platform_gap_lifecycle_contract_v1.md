@@ -1,5 +1,7 @@
 # V20 platform-gap lifecycle and receipt contract v1
 
+> **Status: Superseded by ADR-0001.** See [ADR-0001: Native LangGraph Agent Platform](../docs/adr/ADR-0001-native-langgraph-platform.md). This file and its JSON companion are preserved as historical design records; ADR-0001 now governs the target runtime architecture.
+
 **Decision owner:** Brennan  
 **Scope:** proposed, platform-neutral contract for G4 deterministic lifecycle control and G8 scheduler/task receipts. This document is a design contract only. It does not alter Hermes, Kanban, schedules, source/configuration, data, models, providers, risk, broker, or execution state.
 

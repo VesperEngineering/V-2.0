@@ -1,5 +1,7 @@
 # V20 platform-gap knowledge and portability contract v1
 
+> **Status: Superseded by ADR-0001.** See [ADR-0001: Native LangGraph Agent Platform](../docs/adr/ADR-0001-native-langgraph-platform.md). This file is preserved as a historical design record; compatible platform-neutral invariants may be carried forward only through the native V20 design.
+
 **Decision owner:** Brennan  
 **Scope:** proposed, platform-neutral design for G3 shared structured project knowledge and G11 portability. This is documentation only. It neither changes Hermes profiles, memory, Kanban, schedules, code, configuration, data, models, providers, broker, risk, execution, nor authority.
 

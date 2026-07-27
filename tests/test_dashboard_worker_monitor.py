@@ -1,6 +1,5 @@
 import threading
 import time
-import tkinter as tk
 
 from vesper.dashboard.app import DashboardApp
 from vesper.dashboard.worker_monitor import (
@@ -56,8 +55,13 @@ def test_worker_rows_show_one_current_state_per_known_worker():
     assert data["state"] == "IDLE"
     assert data["task_id"] is None
     assert [row["label"] for row in rows] == [
-        "Product", "Data Engineer", "Quant Research", "ML Systems",
-        "Portfolio Research", "Risk Review", "Development",
+        "Product",
+        "Data Engineer",
+        "Quant Research",
+        "ML Systems",
+        "Portfolio Research",
+        "Risk Review",
+        "Development",
     ]
 
 
@@ -92,73 +96,86 @@ def test_running_and_complete_workflow_states_have_distinct_visual_styles():
 
 
 def test_running_task_without_a_heartbeat_is_not_shown_as_working():
-    rows = worker_rows([{
-        "id": "task-1", "assignee": "v20-product", "status": "running",
-        "started_at": 100,
-    }], now=200)
+    rows = worker_rows(
+        [
+            {
+                "id": "task-1",
+                "assignee": "v20-product",
+                "status": "running",
+                "started_at": 100,
+            }
+        ],
+        now=200,
+    )
 
     assert rows[0]["state"] == "RUNNING_UNVERIFIED"
     assert state_style(rows[0]["state"])[1] == "○ running · no heartbeat"
 
 
-def test_dashboard_live_team_button_shows_read_only_monitor_in_main_window(monkeypatch):
-    monkeypatch.setattr("vesper.dashboard.worker_monitor.load_worker_snapshot", lambda *_args: _snapshot())
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        app = DashboardApp(root)
-        assert app.live_team_btn.cget("text") == "Live Team"
+def test_dashboard_live_team_button_shows_read_only_monitor_in_main_window(monkeypatch, tk_root):
+    monkeypatch.setattr(
+        "vesper.dashboard.worker_monitor.load_worker_snapshot", lambda *_args: _snapshot()
+    )
+    app = DashboardApp(tk_root)
+    assert app.live_team_btn.cget("text") == "Live Team"
 
-        app.live_team_btn.invoke()
-        root.update_idletasks()
+    app.live_team_btn.invoke()
+    tk_root.update_idletasks()
 
-        assert app._worker_monitor is not None
-        assert app._worker_monitor.window is app._live_team_frame
-        assert app._live_team_frame.winfo_manager() == "pack"
-        assert app._main.winfo_manager() == ""
-        assert app._worker_monitor._workforce_frame.pack_info()["side"] == "left"
-        assert app._worker_monitor._workflow_canvas.winfo_manager() == "pack"
-        assert len(app._worker_monitor._workflow_cards) == len(WORKERS)
-        app._worker_monitor._return_to_dashboard()
-        assert app._worker_monitor is None
-        assert app._main.winfo_manager() == "pack"
-    finally:
-        root.destroy()
+    assert app._worker_monitor is not None
+    assert app._worker_monitor.window is app._live_team_frame
+    assert app._live_team_frame.winfo_manager() == "pack"
+    assert app._main.winfo_manager() == ""
+    assert app._worker_monitor._workforce_frame.pack_info()["side"] == "left"
+    assert app._worker_monitor._workflow_canvas.winfo_manager() == "pack"
+    assert len(app._worker_monitor._workflow_cards) == len(WORKERS)
+    app._worker_monitor._return_to_dashboard()
+    assert app._worker_monitor is None
+    assert app._main.winfo_manager() == "pack"
 
 
-def test_worker_selection_switches_the_read_only_output_target(monkeypatch):
-    monkeypatch.setattr("vesper.dashboard.worker_monitor.load_worker_snapshot", lambda *_args: _snapshot())
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        app = DashboardApp(root)
-        app.live_team_btn.invoke()
-        monitor = app._worker_monitor
-        monitor._in_flight = True
-        snapshot = {
-            "workers": [
-                {"profile": "v20-data-engineer", "label": "Data Engineer", "state": "COMPLETE",
-                 "task_id": "data-task", "title": "Audit", "elapsed": "2m"},
-                {"profile": "v20-quant-research", "label": "Quant Research", "state": "RUNNING",
-                 "task_id": "quant-task", "title": "Research", "elapsed": "1m"},
-            ],
-            "activity": [],
-            "selected_task_id": "quant-task",
-            "output": "quant output",
-            "observed_at": "09:45:00",
-        }
-        monitor._render(snapshot)
+def test_worker_selection_switches_the_read_only_output_target(monkeypatch, tk_root):
+    monkeypatch.setattr(
+        "vesper.dashboard.worker_monitor.load_worker_snapshot", lambda *_args: _snapshot()
+    )
+    app = DashboardApp(tk_root)
+    app.live_team_btn.invoke()
+    monitor = app._worker_monitor
+    monitor._in_flight = True
+    snapshot = {
+        "workers": [
+            {
+                "profile": "v20-data-engineer",
+                "label": "Data Engineer",
+                "state": "COMPLETE",
+                "task_id": "data-task",
+                "title": "Audit",
+                "elapsed": "2m",
+            },
+            {
+                "profile": "v20-quant-research",
+                "label": "Quant Research",
+                "state": "RUNNING",
+                "task_id": "quant-task",
+                "title": "Research",
+                "elapsed": "1m",
+            },
+        ],
+        "activity": [],
+        "selected_task_id": "quant-task",
+        "output": "quant output",
+        "observed_at": "09:45:00",
+    }
+    monitor._render(snapshot)
 
-        monitor._select_worker("v20-data-engineer")
-        monitor._render(snapshot)
+    monitor._select_worker("v20-data-engineer")
+    monitor._render(snapshot)
 
-        assert monitor._selected_task_id == "data-task"
-        monitor.close()
-    finally:
-        root.destroy()
+    assert monitor._selected_task_id == "data-task"
+    monitor.close()
 
 
-def test_close_cancels_and_joins_an_in_flight_snapshot_loader(monkeypatch):
+def test_close_cancels_and_joins_an_in_flight_snapshot_loader(monkeypatch, tk_root):
     started = threading.Event()
 
     def blocking_snapshot(_selected_task_id, cancelled):
@@ -167,16 +184,11 @@ def test_close_cancels_and_joins_an_in_flight_snapshot_loader(monkeypatch):
         return _snapshot()
 
     monkeypatch.setattr("vesper.dashboard.worker_monitor.load_worker_snapshot", blocking_snapshot)
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        app = DashboardApp(root)
-        app.live_team_btn.invoke()
-        monitor = app._worker_monitor
-        assert started.wait(1)
+    app = DashboardApp(tk_root)
+    app.live_team_btn.invoke()
+    monitor = app._worker_monitor
+    assert started.wait(1)
 
-        monitor.close()
+    monitor.close()
 
-        assert not monitor._load_thread.is_alive()
-    finally:
-        root.destroy()
+    assert not monitor._load_thread.is_alive()

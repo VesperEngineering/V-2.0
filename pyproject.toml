@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vesper"
+version = "2.0.0"
+description = "Market-hours trading system for US equities with a local Tkinter dashboard."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "alpaca-py>=0.30.0,<1",
+    "langgraph==1.2.9",
+    "langgraph-checkpoint-sqlite==3.1.0",
+    "numpy>=1.26.0,<3",
+    "openai-codex==0.144.4",
+    "pandas>=2.2.0,<4",
+    "pydantic>=2.13.4,<3",
+    "pyyaml>=6.0.1,<7",
+    "scikit-learn>=1.4.0,<2",
+    "typer>=0.27.0,<1",
+    "xgboost>=2.0.0,<4",
+    "yfinance>=0.2.40,<2",
+]
+
+[project.scripts]
+vesper-agent = "vesper.platform.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0,<10",
+    "ruff>=0.12.0,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "local_codex: opt-in integration tests that invoke the locally authenticated Codex SDK",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    ".worktrees",
+    "hermes-local",
+    "profiles",
+    "reports/model_iteration_baseline",
+    "vesper/data/massive",
+    "vesper/data/model_research",
+]
+
+[tool.ruff.lint]
+# Keep M0's repository-wide gate focused on errors that can make Python fail
+# to parse or execute. Broader style cleanup is intentionally deferred because
+# the historical tree is not yet Ruff-formatted.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.setuptools.packages.find]
+include = ["vesper*"]

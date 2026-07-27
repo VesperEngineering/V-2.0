@@ -1,5 +1,7 @@
 # VESPER 2.0 Agent Platform Strategy and Capability Register
 
+> **Status: Superseded by ADR-0001.** See [ADR-0001: Native LangGraph Agent Platform](../docs/adr/ADR-0001-native-langgraph-platform.md). This file is preserved as a historical design record; its Hermes-oriented recommendation is no longer the current V20 architecture.
+
 **Recorded:** 2026-07-23 17:21 EDT  
 **Scope:** Consolidated recommendations from the Hermes/OpenClaw/autonomous-worker discussion.  
 **Decision owner:** Brennan  

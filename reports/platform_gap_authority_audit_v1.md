@@ -1,5 +1,7 @@
 # V20 Platform Gap Authority Audit v1
 
+> **Status: Superseded by ADR-0001 for platform architecture.** See [ADR-0001: Native LangGraph Agent Platform](../docs/adr/ADR-0001-native-langgraph-platform.md). The audit findings remain historical evidence and are not rewritten as current runtime policy.
+
 **Audit time:** 2026-07-24T00:09:13-04:00  
 **Task:** `t_185f09d6`  
 **Scope:** Read-only audit of G1 worker isolation, G2 rollback evidence, G9 least-privilege tool exposure, and G12 security/prompt-injection resistance.  
