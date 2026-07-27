@@ -164,10 +164,16 @@ class FakeBoundary:
         return f"/{path.drive[0].lower()}{path.as_posix()[2:]}"
 
 
-def adapter(tmp_path, boundary: FakeBoundary) -> DockerCodexAdapter:
+def adapter(
+    tmp_path,
+    boundary: FakeBoundary,
+    *,
+    sandbox_workspace: Path | None = None,
+) -> DockerCodexAdapter:
     (tmp_path / ".git").mkdir(exist_ok=True)
     return DockerCodexAdapter(
         repository_root=tmp_path,
+        sandbox_workspace=sandbox_workspace,
         sandbox_name="v20-codex",
         approved_models=("gpt-approved",),
         approved_network_hosts=NETWORK_HOSTS,
@@ -312,6 +318,20 @@ def test_preflight_rejects_unexpected_network_allow_before_codex_runs(tmp_path):
     assert boundary.execution_calls == []
 
 
+@pytest.mark.parametrize("policy_directory", (".codex", ".agents"))
+def test_preflight_rejects_project_configuration_and_skills(tmp_path, policy_directory):
+    boundary = FakeBoundary(tmp_path)
+    nested = tmp_path / "task" / policy_directory
+    nested.mkdir(parents=True)
+
+    with pytest.raises(DockerSandboxPolicyError, match="configuration or skills"):
+        adapter(tmp_path, boundary).execute(
+            specialist_input(tmp_path), prompt="No.", model="gpt-approved"
+        )
+
+    assert boundary.execution_calls == []
+
+
 def test_preflight_rejects_sandbox_bound_to_another_workspace(tmp_path):
     boundary = FakeBoundary(tmp_path)
     boundary.inspect_workspace = str(tmp_path / "other")
@@ -382,17 +402,42 @@ def test_effective_permissions_must_match_declared_permissions_and_resume_is_rej
     assert boundary.metadata_calls == []
 
 
-def test_subdirectory_workspace_is_rejected_because_outer_mount_is_repository_wide(tmp_path):
+def test_subdirectory_workspace_is_the_exact_sandbox_mount(tmp_path):
     boundary = FakeBoundary(tmp_path)
     child = tmp_path / "task"
     child.mkdir()
+    boundary.inspect_workspace = str(child)
+    boundary.workspaces = [str(child)]
+    boundary.mounts = boundary.mounts.replace(
+        boundary._sandbox_path(tmp_path.resolve()),
+        boundary._sandbox_path(child.resolve()),
+    )
 
-    with pytest.raises(WorkspaceDeniedError, match="exact sandbox-bound repository"):
-        adapter(tmp_path, boundary).execute(
-            specialist_input(child), prompt="No.", model="gpt-approved"
-        )
+    adapter(tmp_path, boundary, sandbox_workspace=child).execute(
+        specialist_input(child), prompt="Run.", model="gpt-approved"
+    )
 
-    assert boundary.metadata_calls == []
+    command = boundary.execution_calls[0][0]
+    assert "--cd" not in command
+
+
+def test_reasoning_effort_and_output_schema_are_transient_controller_inputs(tmp_path):
+    boundary = FakeBoundary(tmp_path)
+
+    adapter(tmp_path, boundary).execute(
+        specialist_input(tmp_path),
+        prompt="Return JSON.",
+        model="gpt-approved",
+        reasoning_effort="high",
+        output_schema={"type": "object", "properties": {"ready": {"type": "boolean"}}},
+        execution_id="schema-execution",
+    )
+
+    command = boundary.execution_calls[0][0]
+    assert 'model_reasoning_effort="high"' in command
+    schema_argument = command[command.index("--output-schema") + 1]
+    assert schema_argument.endswith(".json")
+    assert not tuple(tmp_path.glob(".v20-schema-*.json"))
 
 
 def test_git_metadata_mutation_fails_and_removes_disposable_sandbox(tmp_path):

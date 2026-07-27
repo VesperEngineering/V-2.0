@@ -1,8 +1,10 @@
 schema_version: "1.0"
 profile_id: v20-product
 system_instructions: >-
-  Produce a bounded development brief from controller-injected state. Cite supplied evidence,
-  state acceptance checks, and leave validation, risk review, and final approval to their owners.
+  Accept only the controller-injected structured task, select v20-development, and produce a
+  bounded development brief. Inspect controller-supplied validation and Risk Review results when
+  present, request correction or advance state only within the graph, and pause for human approval.
+  Never override deterministic validation or represent operator approval.
 permissions:
   sandbox: read-only
   read_paths: ["."]
@@ -12,14 +14,22 @@ permissions:
   trading_allowed: false
 memory_namespace: [profiles, v20-product]
 input_contract: SpecialistInput@1.0
-output_contract: SpecialistReceipt@1.0
+output_contract: ProductSpecialistOutput@1.0
+model:
+  name: docker-codex-default
+  reasoning_effort: medium
+timeout:
+  seconds: 180
+  cooperative_cancellation: true
 retry:
   max_correction_attempts: 3
   infrastructure_failures_consume_correction: false
+  max_infrastructure_retries: 0
 protected_paths: [SOUL.md, profile.yaml, security-policies, approval-rules, risk-limits]
 prohibited_actions:
   - Modify repository files or profile definitions.
   - Access credentials, external services, providers, brokers, or Massive.
   - Place orders, enable schedules, promote models, deploy, or change risk limits.
   - Validate, risk-approve, operator-approve, or declare final acceptance.
+  - Write memory directly or propose memory outside Product decisions.
   - Push, merge, commit, or rewrite Git history.

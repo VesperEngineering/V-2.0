@@ -12,8 +12,8 @@ from vesper.platform.cli import CliConfig, build_app
 class FakeService:
     calls: list[tuple] = field(default_factory=list)
 
-    def create_run(self, objective, workspace, repository_revision):
-        self.calls.append(("create", objective, workspace, repository_revision))
+    def create_run(self, objective, workspace, repository_revision, acceptance_checks=None):
+        self.calls.append(("create", objective, workspace, repository_revision, acceptance_checks))
         return {"run_id": "run-001", "status": "awaiting-approval"}
 
     def inspect_run(self, run_id):
@@ -73,8 +73,10 @@ def cli():
                 ".",
                 "--repository-revision",
                 "abc123",
+                "--acceptance-check",
+                "git-diff-check",
             ],
-            ("create", "Build offline slice", ".", "abc123"),
+            ("create", "Build offline slice", ".", "abc123", ("git-diff-check",)),
         ),
         (["status", "run-001"], ("status", "run-001")),
         (["resume", "run-001"], ("resume", "run-001")),
@@ -134,6 +136,50 @@ def test_read_only_help_does_not_construct_service(cli):
     assert "cancel" in result.output
     assert service.calls == []
     assert configs == []
+
+
+def test_cli_does_not_expose_host_mcp_configuration_flags(cli):
+    runner, app, service, configs = cli
+
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "configured-mcp" not in result.output
+    assert "confirm-no-mcp" not in result.output
+    assert service.calls == []
+    assert configs == []
+
+
+def test_default_state_and_evidence_paths_are_outside_the_current_repository(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    service = FakeService()
+    configs = []
+
+    def factory(config):
+        configs.append(config)
+        return service
+
+    runner = CliRunner()
+    app = build_app(service_factory=factory)
+
+    result = runner.invoke(
+        app,
+        [
+            "create",
+            "--objective",
+            "Bounded task",
+            "--workspace",
+            ".",
+            "--repository-revision",
+            "abc123",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert service.calls
+    assert configs[0].state_db.is_relative_to(local_app_data)
+    assert configs[0].evidence_root.is_relative_to(local_app_data)
 
 
 @pytest.mark.parametrize("command", ("approve", "reject"))

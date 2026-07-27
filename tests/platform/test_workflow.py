@@ -10,10 +10,13 @@ from langgraph.types import Command
 
 from vesper.platform.contracts import (
     ApprovalDecision,
+    DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
     ExecutionStatus,
     HumanApprovalDecision,
+    ProductSpecialistOutput,
     RiskDecision,
+    RiskReviewExecution,
     RiskReviewDecision,
     RunStatus,
     SpecialistReceipt,
@@ -23,7 +26,12 @@ from vesper.platform.contracts import (
     ValidationResult,
 )
 from vesper.platform.persistence import PlatformPaths, open_persistence
-from vesper.platform.workflow import PendingApprovalError, WorkflowController, build_workflow
+from vesper.platform.workflow import (
+    PendingApprovalError,
+    WorkflowController,
+    _workspace_sha256,
+    build_workflow,
+)
 
 
 NOW = datetime(2026, 7, 27, 16, 0, tzinfo=timezone.utc)
@@ -56,12 +64,31 @@ def artifact(name: str = "result") -> EvidenceArtifactRef:
 
 
 def receipt(role: SpecialistRole, attempt: int = 1) -> SpecialistReceipt:
+    output = None
+    if role is SpecialistRole.PRODUCT:
+        output = ProductSpecialistOutput(
+            **COMMON,
+            role=role,
+            attempt=attempt,
+            route=SpecialistRole.DEVELOPMENT,
+            summary="Bounded task.",
+            development_instructions="Implement only the bounded task.",
+            acceptance_checks=("offline-test",),
+        )
+    elif role is SpecialistRole.DEVELOPMENT:
+        output = DevelopmentSpecialistOutput(
+            **COMMON,
+            role=role,
+            attempt=attempt,
+            summary="Implemented bounded task.",
+        )
     return SpecialistReceipt(
         **COMMON,
         receipt_id=f"{role.value}-{attempt}",
         role=role,
         attempt=attempt,
         status=ExecutionStatus.COMPLETED,
+        output=output,
         evidence=(artifact(f"{role.value}-{attempt}"),),
     )
 
@@ -113,10 +140,20 @@ class QueuedRiskReviewer:
             decision=decision,
             rationale=f"Risk decision: {decision.value}.",
             evidence=(artifact(f"risk-{development_receipt.attempt}"),),
+            scope_compliant=True,
+            evidence_owned=True,
+            prohibited_actions_compliant=True,
         )
 
 
-def controller(persistence, *, validations=(True,), risks=(RiskDecision.APPROVE,)):
+def controller(
+    persistence,
+    *,
+    validations=(True,),
+    risks=(RiskDecision.APPROVE,),
+    workspace_hasher=lambda _workspace: "b" * 64,
+    evidence_reader=None,
+):
     specialists = QueuedSpecialists()
     validator = QueuedValidator(validations)
     reviewer = QueuedRiskReviewer(risks)
@@ -126,12 +163,16 @@ def controller(persistence, *, validations=(True,), risks=(RiskDecision.APPROVE,
         specialists=specialists,
         validator=validator,
         risk_reviewer=reviewer,
+        workspace_hasher=workspace_hasher,
+        evidence_reader=evidence_reader,
         clock=lambda: NOW,
     )
     return (
         WorkflowController(
             graph=graph,
             store=persistence.store,
+            workspace_hasher=workspace_hasher,
+            evidence_reader=evidence_reader,
             clock=lambda: NOW,
             id_factory=lambda: "approval-request-001",
         ),
@@ -155,6 +196,12 @@ def test_product_routes_to_development_then_validation_and_risk(tmp_path):
     assert len(validator.calls) == 1
     assert len(reviewer.calls) == 1
     assert view.pending_approval is not None
+    assert {item.artifact_id for item in view.pending_approval.evidence} == {
+        "v20-product-1",
+        "v20-development-1",
+        "validation-1",
+        "risk-1",
+    }
     assert view.state.approval is None
 
 
@@ -274,6 +321,61 @@ def test_resume_without_persisted_approval_fails_closed(tmp_path):
             workflow.resume("run-001")
 
 
+def test_approval_cannot_accept_workspace_bytes_changed_after_decision(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "RESULT.md").write_text("reviewed\n", encoding="utf-8")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, _, _, _ = controller(
+            persistence,
+            workspace_hasher=_workspace_sha256,
+        )
+        pending = workflow.start(task(workspace))
+        decision = HumanApprovalDecision(
+            **COMMON,
+            approval_id="approval-001",
+            request_id=pending.pending_approval.request_id,
+            checkpoint_id=pending.checkpoint_id,
+            operator_id="operator",
+            decision=ApprovalDecision.APPROVE,
+            reason="Reviewed exact workspace bytes.",
+            decided_at=NOW,
+        )
+        workflow.record_decision("run-001", decision)
+        (workspace / "RESULT.md").write_text("changed-after-review\n", encoding="utf-8")
+
+        with pytest.raises(PendingApprovalError, match="workspace changed"):
+            workflow.resume("run-001")
+
+
+def test_approval_cannot_accept_corrupt_evidence(tmp_path):
+    corrupt = False
+
+    def read_evidence(_artifact):
+        if corrupt:
+            raise ValueError("corrupt evidence")
+        return b"verified"
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, _, _, _ = controller(persistence, evidence_reader=read_evidence)
+        pending = workflow.start(task(tmp_path))
+        decision = HumanApprovalDecision(
+            **COMMON,
+            approval_id="approval-001",
+            request_id=pending.pending_approval.request_id,
+            checkpoint_id=pending.checkpoint_id,
+            operator_id="operator",
+            decision=ApprovalDecision.APPROVE,
+            reason="Reviewed evidence.",
+            decided_at=NOW,
+        )
+        workflow.record_decision("run-001", decision)
+        corrupt = True
+
+        with pytest.raises(PendingApprovalError, match="evidence"):
+            workflow.resume("run-001")
+
+
 def test_direct_graph_resume_without_persisted_approval_fails_closed(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         workflow, _, _, _ = controller(persistence)
@@ -349,6 +451,78 @@ def test_usage_limit_stops_without_consuming_correction_budget(tmp_path):
 
     assert view.state.status is RunStatus.USAGE_LIMITED
     assert view.state.correction_count == 0
+    assert view.pending_approval is None
+
+
+def test_completed_product_without_typed_output_fails_closed(tmp_path):
+    class MissingOutputSpecialists(QueuedSpecialists):
+        def execute(self, request):
+            self.calls.append(request)
+            return receipt(request.role, request.attempt).model_copy(update={"output": None})
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        graph = build_workflow(
+            checkpointer=persistence.checkpointer,
+            store=persistence.langgraph_store,
+            specialists=MissingOutputSpecialists(),
+            validator=QueuedValidator((True,)),
+            risk_reviewer=QueuedRiskReviewer((RiskDecision.APPROVE,)),
+            clock=lambda: NOW,
+        )
+        view = WorkflowController(
+            graph=graph,
+            store=persistence.store,
+            clock=lambda: NOW,
+        ).start(task(tmp_path))
+
+    assert view.state.status is RunStatus.FAILED
+    assert "typed output" in view.state.terminal_reason
+
+
+@pytest.mark.parametrize(
+    "execution_status,expected_status,error_code",
+    [
+        (ExecutionStatus.USAGE_LIMITED, RunStatus.USAGE_LIMITED, "usage_limit"),
+        (ExecutionStatus.TIMEOUT, RunStatus.INTERRUPTED, "timeout"),
+    ],
+)
+def test_risk_infrastructure_failure_persists_receipt_and_stops(
+    tmp_path,
+    execution_status,
+    expected_status,
+    error_code,
+):
+    class InfrastructureReviewer:
+        def review(self, request, development_receipt, validation):
+            return RiskReviewExecution(
+                receipt=SpecialistReceipt(
+                    **COMMON,
+                    receipt_id=f"risk-{error_code}",
+                    role=SpecialistRole.RISK_REVIEW,
+                    attempt=development_receipt.attempt,
+                    status=execution_status,
+                    error_code=error_code,
+                )
+            )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        graph = build_workflow(
+            checkpointer=persistence.checkpointer,
+            store=persistence.langgraph_store,
+            specialists=QueuedSpecialists(),
+            validator=QueuedValidator((True,)),
+            risk_reviewer=InfrastructureReviewer(),
+            clock=lambda: NOW,
+        )
+        view = WorkflowController(
+            graph=graph,
+            store=persistence.store,
+            clock=lambda: NOW,
+        ).start(task(tmp_path))
+
+    assert view.state.status is expected_status
+    assert view.state.receipts[-1].role is SpecialistRole.RISK_REVIEW
+    assert view.state.receipts[-1].status is execution_status
     assert view.pending_approval is None
 
 
@@ -500,3 +674,157 @@ def test_langgraph_execution_makes_no_langsmith_network_calls(tmp_path, monkeypa
 
     assert view.state.status is RunStatus.AWAITING_APPROVAL
     assert dict(attempted) == {}
+
+
+def test_product_typed_brief_is_injected_into_development(tmp_path):
+    class BriefingSpecialists(QueuedSpecialists):
+        def execute(self, request):
+            self.calls.append(request)
+            item = receipt(request.role, request.attempt)
+            if request.role is SpecialistRole.PRODUCT:
+                output = ProductSpecialistOutput(
+                    **COMMON,
+                    role=SpecialistRole.PRODUCT,
+                    attempt=1,
+                    route=SpecialistRole.DEVELOPMENT,
+                    summary="Bounded documentation change.",
+                    development_instructions="Create only M2-CONTROLLED-EXERCISE.md.",
+                    acceptance_checks=("git-diff-check",),
+                )
+                return item.model_copy(update={"output": output})
+            return item
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        specialists = BriefingSpecialists()
+        graph = build_workflow(
+            checkpointer=persistence.checkpointer,
+            store=persistence.langgraph_store,
+            specialists=specialists,
+            validator=QueuedValidator((True,)),
+            risk_reviewer=QueuedRiskReviewer((RiskDecision.APPROVE,)),
+            workspace_hasher=lambda _workspace: "b" * 64,
+            clock=lambda: NOW,
+        )
+        view = WorkflowController(
+            graph=graph,
+            store=persistence.store,
+            workspace_hasher=lambda _workspace: "b" * 64,
+            clock=lambda: NOW,
+        ).start(task(tmp_path))
+
+    assert view.state.status is RunStatus.AWAITING_APPROVAL
+    assert "Create only M2-CONTROLLED-EXERCISE.md." in specialists.calls[1].instructions
+
+
+def test_risk_execution_receipt_is_persisted_in_graph_state(tmp_path):
+    class ReceiptReviewer(QueuedRiskReviewer):
+        def review(self, request, development_receipt, validation):
+            decision = super().review(request, development_receipt, validation)
+            return RiskReviewExecution(
+                receipt=receipt(SpecialistRole.RISK_REVIEW, development_receipt.attempt),
+                decision=decision.model_copy(
+                    update={
+                        "scope_compliant": True,
+                        "evidence_owned": True,
+                        "prohibited_actions_compliant": True,
+                    }
+                ),
+            )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        graph = build_workflow(
+            checkpointer=persistence.checkpointer,
+            store=persistence.langgraph_store,
+            specialists=QueuedSpecialists(),
+            validator=QueuedValidator((True,)),
+            risk_reviewer=ReceiptReviewer((RiskDecision.APPROVE,)),
+            workspace_hasher=lambda _workspace: "b" * 64,
+            clock=lambda: NOW,
+        )
+        view = WorkflowController(
+            graph=graph,
+            store=persistence.store,
+            workspace_hasher=lambda _workspace: "b" * 64,
+            clock=lambda: NOW,
+        ).start(task(tmp_path))
+
+    assert view.state.status is RunStatus.AWAITING_APPROVAL
+    assert [item.role for item in view.state.receipts] == [
+        SpecialistRole.PRODUCT,
+        SpecialistRole.DEVELOPMENT,
+        SpecialistRole.RISK_REVIEW,
+    ]
+
+
+@pytest.mark.parametrize(
+    "decision,compliance",
+    [
+        (RiskDecision.HOLD, True),
+        (RiskDecision.APPROVE, False),
+    ],
+)
+def test_risk_hold_or_failed_compliance_requires_operator_intervention(
+    tmp_path,
+    decision,
+    compliance,
+):
+    class FailClosedReviewer(QueuedRiskReviewer):
+        def review(self, request, development_receipt, validation):
+            result = super().review(request, development_receipt, validation)
+            return result.model_copy(
+                update={
+                    "decision": decision,
+                    "scope_compliant": compliance,
+                    "evidence_owned": compliance,
+                    "prohibited_actions_compliant": compliance,
+                }
+            )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        graph = build_workflow(
+            checkpointer=persistence.checkpointer,
+            store=persistence.langgraph_store,
+            specialists=QueuedSpecialists(),
+            validator=QueuedValidator((True,)),
+            risk_reviewer=FailClosedReviewer((decision,)),
+            clock=lambda: NOW,
+        )
+        view = WorkflowController(
+            graph=graph,
+            store=persistence.store,
+            clock=lambda: NOW,
+        ).start(task(tmp_path))
+
+    assert view.state.status is RunStatus.OPERATOR_INTERVENTION
+    assert view.pending_approval is None
+
+
+def test_legacy_risk_approval_without_compliance_gates_cannot_reach_approval(tmp_path):
+    class LegacyReviewer(QueuedRiskReviewer):
+        def review(self, request, development_receipt, validation):
+            result = super().review(request, development_receipt, validation)
+            return result.model_copy(
+                update={
+                    "scope_compliant": None,
+                    "evidence_owned": None,
+                    "prohibited_actions_compliant": None,
+                }
+            )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        graph = build_workflow(
+            checkpointer=persistence.checkpointer,
+            store=persistence.langgraph_store,
+            specialists=QueuedSpecialists(),
+            validator=QueuedValidator((True,)),
+            risk_reviewer=LegacyReviewer((RiskDecision.APPROVE,)),
+            clock=lambda: NOW,
+        )
+        view = WorkflowController(
+            graph=graph,
+            store=persistence.store,
+            clock=lambda: NOW,
+        ).start(task(tmp_path))
+
+    assert view.state.status is RunStatus.OPERATOR_INTERVENTION
+    assert view.pending_approval is None

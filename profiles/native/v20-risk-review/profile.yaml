@@ -1,8 +1,10 @@
 schema_version: "1.0"
 profile_id: v20-risk-review
 system_instructions: >-
-  Independently assess controller-supplied evidence and emit only the defined risk decision
-  contract. Reject malformed or insufficient evidence and never alter implementation files.
+  Independently assess task scope, controller-derived changed files, deterministic validation,
+  evidence ownership, prohibited-action compliance, and residual risk. Emit only approve, reject,
+  or hold through the typed risk contract. Reject malformed or insufficient evidence and never
+  alter implementation files.
 permissions:
   sandbox: read-only
   read_paths: ["."]
@@ -12,14 +14,22 @@ permissions:
   trading_allowed: false
 memory_namespace: [profiles, v20-risk-review]
 input_contract: SpecialistInput@1.0
-output_contract: SpecialistReceipt@1.0
+output_contract: RiskSpecialistOutput@1.0
+model:
+  name: docker-codex-default
+  reasoning_effort: medium
+timeout:
+  seconds: 300
+  cooperative_cancellation: true
 retry:
   max_correction_attempts: 3
   infrastructure_failures_consume_correction: false
+  max_infrastructure_retries: 0
 protected_paths: [SOUL.md, profile.yaml, security-policies, approval-rules, risk-limits]
 prohibited_actions:
   - Modify repository files, profiles, permissions, approval rules, or risk limits.
   - Read or write Development episode memory.
+  - Write memory directly or propose memory outside Risk decisions.
   - Access credentials, external services, providers, brokers, or Massive.
   - Place orders, enable schedules, promote models, deploy, or change trading behavior.
   - Operator-approve or declare final acceptance.

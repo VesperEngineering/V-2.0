@@ -41,13 +41,16 @@ def main() -> None:
 
     from vesper.platform.contracts import (
         ApprovalDecision,
+        DevelopmentSpecialistOutput,
         EvidenceArtifactRef,
         ExecutionStatus,
         HumanApprovalDecision,
+        ProductSpecialistOutput,
         RiskDecision,
         RiskReviewDecision,
         RunStatus,
         SpecialistReceipt,
+        SpecialistRole,
         TaskRequest,
         ValidationCheck,
         ValidationResult,
@@ -77,6 +80,30 @@ def main() -> None:
 
     class Specialists:
         def execute(self, request):
+            output = None
+            if request.role is SpecialistRole.PRODUCT:
+                output = ProductSpecialistOutput(
+                    run_id=request.run_id,
+                    task_id=request.task_id,
+                    repository_revision=request.repository_revision,
+                    created_at=request.created_at,
+                    role=request.role,
+                    attempt=request.attempt,
+                    route=SpecialistRole.DEVELOPMENT,
+                    summary="Offline bounded task.",
+                    development_instructions="Run only the offline probe.",
+                    acceptance_checks=("deny-egress probe",),
+                )
+            elif request.role is SpecialistRole.DEVELOPMENT:
+                output = DevelopmentSpecialistOutput(
+                    run_id=request.run_id,
+                    task_id=request.task_id,
+                    repository_revision=request.repository_revision,
+                    created_at=request.created_at,
+                    role=request.role,
+                    attempt=request.attempt,
+                    summary="Offline probe completed.",
+                )
             return SpecialistReceipt(
                 run_id=request.run_id,
                 task_id=request.task_id,
@@ -86,6 +113,7 @@ def main() -> None:
                 role=request.role,
                 attempt=request.attempt,
                 status=ExecutionStatus.COMPLETED,
+                output=output,
                 evidence=(evidence(request, request.role.value),),
             )
 
@@ -120,6 +148,9 @@ def main() -> None:
                 decision=RiskDecision.APPROVE,
                 rationale="Offline fake approved.",
                 evidence=(evidence(request, "risk"),),
+                scope_compliant=True,
+                evidence_owned=True,
+                prohibited_actions_compliant=True,
             )
 
     task = TaskRequest(
@@ -139,9 +170,15 @@ def main() -> None:
             specialists=Specialists(),
             validator=Validator(),
             risk_reviewer=Reviewer(),
+            workspace_hasher=lambda _workspace: "b" * 64,
             clock=lambda: now,
         )
-        workflow = WorkflowController(graph=graph, store=persistence.store, clock=lambda: now)
+        workflow = WorkflowController(
+            graph=graph,
+            store=persistence.store,
+            workspace_hasher=lambda _workspace: "b" * 64,
+            clock=lambda: now,
+        )
         pending = workflow.start(task)
         persistence.store.put(("probe",), "item", {"offline": True})
         assert persistence.store.get(("probe",), "item") == {"offline": True}

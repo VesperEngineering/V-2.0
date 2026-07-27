@@ -16,6 +16,7 @@ venv/
 *.sqlite3
 .pytest_cache/
 .pytest_tmp/
+.pytest-tmp-*/
 
 # Fusion and local developer tooling state
 .fusion/

@@ -3,22 +3,29 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import stat
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Mapping, Protocol, TypedDict
 
 from .contracts import (
     ApprovalDecision,
     CorrectionAttempt,
+    DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
     ExecutionStatus,
     GraphState,
     HumanApprovalDecision,
     HumanApprovalRequest,
     PermissionSet,
+    ProductSpecialistOutput,
     RiskDecision,
     RiskReviewDecision,
+    RiskReviewExecution,
     RunStatus,
     SandboxMode,
     SpecialistInput,
@@ -27,6 +34,7 @@ from .contracts import (
     TaskRequest,
     ValidationResult,
 )
+from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .runtime_env import enforce_offline_runtime_environment
 
 enforce_offline_runtime_environment()
@@ -68,7 +76,7 @@ class RiskReviewer(Protocol):
         request: TaskRequest,
         development_receipt: SpecialistReceipt,
         validation: ValidationResult,
-    ) -> RiskReviewDecision: ...
+    ) -> RiskReviewDecision | RiskReviewExecution: ...
 
 
 class StorePort(Protocol):
@@ -81,9 +89,11 @@ class WorkflowRuntimeState(TypedDict, total=False):
     task: dict[str, object]
     status: str
     current_role: str | None
+    product_output: dict[str, object] | None
     correction_attempts: list[dict[str, object]]
     validation: dict[str, object] | None
     risk_review: dict[str, object] | None
+    reviewed_workspace_sha256: str | None
     approval: dict[str, object] | None
     receipts: list[dict[str, object]]
     feedback: str | None
@@ -150,6 +160,54 @@ def _evidence_authority_matches(
     )
 
 
+def _workspace_sha256(workspace: Path) -> str:
+    root = workspace.resolve()
+    if not root.is_dir():
+        raise PendingApprovalError("approval workspace is unavailable")
+    digest = hashlib.sha256()
+    for current, directories, files in os.walk(root, followlinks=False):
+        directory = Path(current)
+        directories.sort()
+        files.sort()
+        for name in (*directories, *files):
+            path = directory / name
+            metadata = path.lstat()
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            if stat.S_ISLNK(metadata.st_mode) or bool(
+                getattr(metadata, "st_file_attributes", 0) & reparse
+            ):
+                raise PendingApprovalError("approval workspace contains a link or junction")
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            if path.is_dir():
+                digest.update(b"directory\0")
+            elif path.is_file():
+                body = path.read_bytes()
+                digest.update(b"file\0")
+                digest.update(len(body).to_bytes(8, "big"))
+                digest.update(body)
+            else:
+                raise PendingApprovalError("approval workspace contains an unsupported path")
+    return digest.hexdigest()
+
+
+def _approval_evidence(state: Mapping[str, object]) -> tuple[EvidenceArtifactRef, ...]:
+    artifacts = []
+    for raw in state.get("receipts", []):
+        artifacts.extend(_parse(SpecialistReceipt, raw).evidence)
+    raw_validation = state.get("validation")
+    if raw_validation is not None:
+        validation = _parse(ValidationResult, raw_validation)
+        artifacts.extend(item for check in validation.checks for item in check.evidence)
+    raw_risk = state.get("risk_review")
+    if raw_risk is not None:
+        artifacts.extend(_parse(RiskReviewDecision, raw_risk).evidence)
+    return tuple(
+        {(artifact.relative_path, artifact.sha256): artifact for artifact in artifacts}.values()
+    )
+
+
 def build_workflow(
     *,
     checkpointer,
@@ -157,6 +215,10 @@ def build_workflow(
     specialists: SpecialistExecutor,
     validator: DeterministicValidator,
     risk_reviewer: RiskReviewer,
+    memory_service: MemoryService | None = None,
+    memory_validator: DeterministicMemoryCandidateValidator | None = None,
+    workspace_hasher: Callable[[Path], str] = _workspace_sha256,
+    evidence_reader: Callable[[EvidenceArtifactRef], bytes] | None = None,
     clock: Callable[[], datetime] = _utc_now,
 ):
     """Compile the first bounded native workflow against local persistence."""
@@ -199,17 +261,37 @@ def build_workflow(
                 "receipts": receipts,
                 "terminal_reason": reason,
             }
+        if not isinstance(receipt.output, ProductSpecialistOutput):
+            return {
+                "status": RunStatus.FAILED.value,
+                "current_role": None,
+                "receipts": receipts,
+                "terminal_reason": "completed Product execution omitted typed output",
+            }
+        _commit_receipt_memories(memory_service, memory_validator, receipt)
+        product_output = receipt.output
         return {
             "status": RunStatus.DEVELOPMENT.value,
             "current_role": SpecialistRole.DEVELOPMENT.value,
             "receipts": receipts,
+            "product_output": None if product_output is None else _dump(product_output),
         }
 
     def development_node(state: WorkflowRuntimeState) -> dict[str, object]:
         request = _parse(TaskRequest, state["task"])
         attempt = len(state.get("correction_attempts", [])) + 1
         feedback = state.get("feedback")
-        instructions = f"Implement the bounded objective: {request.objective}"
+        raw_product_output = state.get("product_output")
+        product_output = (
+            None
+            if raw_product_output is None
+            else _parse(ProductSpecialistOutput, raw_product_output)
+        )
+        instructions = (
+            f"Implement the bounded objective: {request.objective}"
+            if product_output is None
+            else product_output.development_instructions
+        )
         if feedback:
             instructions += f"\nCorrect this authoritative feedback: {feedback}"
         specialist_input = SpecialistInput(
@@ -249,6 +331,13 @@ def build_workflow(
                 "receipts": receipts,
                 "terminal_reason": reason,
             }
+        if not isinstance(receipt.output, DevelopmentSpecialistOutput):
+            return {
+                "status": RunStatus.FAILED.value,
+                "current_role": None,
+                "receipts": receipts,
+                "terminal_reason": "completed Development execution omitted typed output",
+            }
         return {
             "status": RunStatus.VALIDATION.value,
             "current_role": None,
@@ -267,6 +356,12 @@ def build_workflow(
                 "terminal_reason": "validation authority mismatch",
             }
         if result.passed:
+            _commit_receipt_memories(
+                memory_service,
+                memory_validator,
+                development_receipt,
+                validation=result,
+            )
             return {
                 "status": RunStatus.RISK_REVIEW.value,
                 "current_role": SpecialistRole.RISK_REVIEW.value,
@@ -304,18 +399,84 @@ def build_workflow(
         request = _parse(TaskRequest, state["task"])
         development_receipt = _latest_development_receipt(state)
         validation = _parse(ValidationResult, state["validation"])
-        decision = risk_reviewer.review(request, development_receipt, validation)
+        review = risk_reviewer.review(request, development_receipt, validation)
+        if isinstance(review, RiskReviewExecution):
+            risk_receipt = review.receipt
+            if (
+                not _authority_matches(
+                    request,
+                    risk_receipt,
+                    attempt=development_receipt.attempt,
+                )
+                or risk_receipt.role is not SpecialistRole.RISK_REVIEW
+            ):
+                return {
+                    "status": RunStatus.FAILED.value,
+                    "current_role": None,
+                    "terminal_reason": "Risk Review receipt authority mismatch",
+                }
+            receipts = [*state.get("receipts", []), _dump(risk_receipt)]
+            if risk_receipt.status is not ExecutionStatus.COMPLETED:
+                status, reason = _infrastructure_status(risk_receipt)
+                return {
+                    "status": status.value,
+                    "current_role": None,
+                    "receipts": receipts,
+                    "terminal_reason": reason,
+                }
+            decision = review.decision
+            if decision is None:
+                return {
+                    "status": RunStatus.FAILED.value,
+                    "current_role": None,
+                    "receipts": receipts,
+                    "terminal_reason": "completed Risk Review execution omitted its decision",
+                }
+        else:
+            receipts = state.get("receipts", [])
+            decision = review
         if not _authority_matches(request, decision, attempt=development_receipt.attempt):
             return {
                 "status": RunStatus.FAILED.value,
                 "current_role": None,
+                "receipts": receipts,
                 "terminal_reason": "Risk Review authority mismatch",
             }
+        if isinstance(review, RiskReviewExecution):
+            _commit_receipt_memories(
+                memory_service,
+                memory_validator,
+                review.receipt,
+                risk_decision=decision,
+            )
+        if decision.decision is RiskDecision.HOLD:
+            return {
+                "status": RunStatus.OPERATOR_INTERVENTION.value,
+                "current_role": None,
+                "receipts": receipts,
+                "risk_review": _dump(decision),
+                "terminal_reason": f"Risk Review hold: {decision.rationale}",
+            }
         if decision.decision is RiskDecision.APPROVE:
+            compliance = (
+                decision.scope_compliant,
+                decision.evidence_owned,
+                decision.prohibited_actions_compliant,
+            )
+            if not all(item is True for item in compliance):
+                return {
+                    "status": RunStatus.OPERATOR_INTERVENTION.value,
+                    "current_role": None,
+                    "receipts": receipts,
+                    "risk_review": _dump(decision),
+                    "terminal_reason": "Risk Review approval failed mandatory compliance checks",
+                }
             return {
                 "status": RunStatus.AWAITING_APPROVAL.value,
                 "current_role": None,
+                "receipts": receipts,
                 "risk_review": _dump(decision),
+                "reviewed_workspace_sha256": workspace_hasher(Path(request.repository_root)),
                 "feedback": None,
             }
         correction = CorrectionAttempt(
@@ -340,6 +501,7 @@ def build_workflow(
         return {
             "status": RunStatus.DEVELOPMENT.value,
             "current_role": SpecialistRole.DEVELOPMENT.value,
+            "receipts": receipts,
             "risk_review": _dump(decision),
             "correction_attempts": corrections,
             "feedback": correction.reason,
@@ -358,6 +520,16 @@ def build_workflow(
             }
         )
         decision = _parse(HumanApprovalDecision, response)
+        persisted_request_item = store.get(APPROVAL_REQUEST_NAMESPACE, request.run_id)
+        if persisted_request_item is None:
+            raise PendingApprovalError("no persisted approval request exists")
+        approval_request = _parse(HumanApprovalRequest, persisted_request_item.value)
+        if decision.decision is ApprovalDecision.APPROVE:
+            if workspace_hasher(Path(request.repository_root)) != approval_request.workspace_sha256:
+                raise PendingApprovalError("approval workspace changed after Risk Review")
+            if evidence_reader is not None:
+                for artifact in approval_request.evidence:
+                    evidence_reader(artifact)
         persisted_item = store.get(APPROVAL_DECISION_NAMESPACE, request.run_id)
         if persisted_item is None:
             raise PendingApprovalError("no persisted operator decision exists")
@@ -428,17 +600,41 @@ def _latest_development_receipt(state: WorkflowRuntimeState) -> SpecialistReceip
     raise WorkflowError("workflow has no Development receipt")
 
 
+def _commit_receipt_memories(
+    memory_service: MemoryService | None,
+    memory_validator: DeterministicMemoryCandidateValidator | None,
+    receipt: SpecialistReceipt,
+    *,
+    validation: ValidationResult | None = None,
+    risk_decision: RiskReviewDecision | None = None,
+) -> None:
+    if memory_service is None or memory_validator is None:
+        return
+    for candidate in receipt.memory_candidates:
+        if memory_validator.accepts(
+            receipt,
+            candidate,
+            validation=validation,
+            risk_decision=risk_decision,
+        ):
+            memory_service.commit(receipt.role, candidate, validated=True)
+
+
 class WorkflowController:
     def __init__(
         self,
         *,
         graph,
         store: StorePort,
+        workspace_hasher: Callable[[Path], str] = _workspace_sha256,
+        evidence_reader: Callable[[EvidenceArtifactRef], bytes] | None = None,
         clock: Callable[[], datetime] = _utc_now,
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
     ) -> None:
         self.graph = graph
         self.store = store
+        self.workspace_hasher = workspace_hasher
+        self.evidence_reader = evidence_reader
         self.clock = clock
         self.id_factory = id_factory
 
@@ -447,9 +643,11 @@ class WorkflowController:
             "task": _dump(task),
             "status": RunStatus.PRODUCT.value,
             "current_role": SpecialistRole.PRODUCT.value,
+            "product_output": None,
             "correction_attempts": [],
             "validation": None,
             "risk_review": None,
+            "reviewed_workspace_sha256": None,
             "approval": None,
             "receipts": [],
             "feedback": None,
@@ -485,6 +683,8 @@ class WorkflowController:
         request = view.pending_approval
         if request is None or view.state.status is not RunStatus.AWAITING_APPROVAL:
             raise PendingApprovalError("run is not awaiting operator approval")
+        if decision.decision is ApprovalDecision.APPROVE:
+            self._verify_approval_integrity(view.state.task, request)
         if (
             decision.run_id != run_id
             or decision.task_id != request.task_id
@@ -498,12 +698,28 @@ class WorkflowController:
 
     def resume(self, run_id: str) -> WorkflowView:
         view = self.inspect(run_id)
-        if view.state.status is not RunStatus.AWAITING_APPROVAL or view.pending_approval is None:
-            raise PendingApprovalError("run is not awaiting operator approval")
+        if view.state.status is not RunStatus.AWAITING_APPROVAL:
+            if (
+                view.state.status
+                not in {
+                    RunStatus.PRODUCT,
+                    RunStatus.DEVELOPMENT,
+                    RunStatus.VALIDATION,
+                    RunStatus.RISK_REVIEW,
+                }
+                or not view.next_nodes
+            ):
+                raise PendingApprovalError("run has no resumable checkpoint")
+            self.graph.invoke(None, self._config(run_id))
+            return self.inspect(run_id)
+        if view.pending_approval is None:
+            raise PendingApprovalError("run is missing its approval checkpoint")
         raw = self.store.get(APPROVAL_DECISION_NAMESPACE, run_id)
         if raw is None:
             raise PendingApprovalError("no persisted operator decision exists")
         decision = _parse(HumanApprovalDecision, raw)
+        if decision.decision is ApprovalDecision.APPROVE:
+            self._verify_approval_integrity(view.state.task, view.pending_approval)
         if (
             decision.request_id != view.pending_approval.request_id
             or decision.checkpoint_id != view.checkpoint_id
@@ -518,6 +734,9 @@ class WorkflowController:
             RunStatus.ACCEPTED,
             RunStatus.REJECTED,
             RunStatus.CANCELLED,
+            RunStatus.FAILED,
+            RunStatus.INTERRUPTED,
+            RunStatus.USAGE_LIMITED,
             RunStatus.OPERATOR_INTERVENTION,
         }:
             return view
@@ -536,15 +755,22 @@ class WorkflowController:
         ):
             return None
         raw = self.store.get(APPROVAL_REQUEST_NAMESPACE, snapshot.values["task"]["run_id"])
+        request = _parse(TaskRequest, snapshot.values["task"])
+        evidence = _approval_evidence(snapshot.values)
+        reviewed_workspace_sha256 = snapshot.values.get("reviewed_workspace_sha256")
+        if not isinstance(reviewed_workspace_sha256, str):
+            raise PendingApprovalError("Risk Review omitted the reviewed workspace hash")
         if raw is not None:
             persisted = _parse(HumanApprovalRequest, raw)
             if persisted.checkpoint_id != checkpoint_id:
                 raise PendingApprovalError("persisted approval request is stale")
+            if persisted.evidence != evidence:
+                raise PendingApprovalError("persisted approval evidence differs from graph state")
             return persisted
         interrupts = snapshot.tasks[0].interrupts
         payload = interrupts[0].value
-        request = _parse(TaskRequest, snapshot.values["task"])
-        risk_review = _parse(RiskReviewDecision, snapshot.values["risk_review"])
+        if not evidence:
+            raise PendingApprovalError("approval requires controller-owned evidence")
         approval_request = HumanApprovalRequest(
             run_id=request.run_id,
             task_id=request.task_id,
@@ -552,11 +778,36 @@ class WorkflowController:
             created_at=self.clock(),
             request_id=str(payload["request_id"]),
             checkpoint_id=checkpoint_id,
+            workspace_sha256=reviewed_workspace_sha256,
             summary=str(payload["summary"]),
-            evidence=risk_review.evidence,
+            evidence=evidence,
         )
+        self._verify_approval_integrity(request, approval_request)
         self.store.put(APPROVAL_REQUEST_NAMESPACE, request.run_id, _dump(approval_request))
         return approval_request
+
+    def _verify_approval_integrity(
+        self,
+        task: TaskRequest | None,
+        request: HumanApprovalRequest,
+    ) -> None:
+        if task is None:
+            raise PendingApprovalError("approval task is unavailable")
+        try:
+            workspace_sha256 = self.workspace_hasher(Path(task.repository_root))
+        except PendingApprovalError:
+            raise
+        except Exception as exc:
+            raise PendingApprovalError("approval workspace could not be verified") from exc
+        if workspace_sha256 != request.workspace_sha256:
+            raise PendingApprovalError("approval workspace changed after Risk Review")
+        if self.evidence_reader is None:
+            return
+        try:
+            for artifact in request.evidence:
+                self.evidence_reader(artifact)
+        except Exception as exc:
+            raise PendingApprovalError("approval evidence failed integrity verification") from exc
 
     @staticmethod
     def _config(run_id: str) -> dict[str, dict[str, str]]:
@@ -577,6 +828,7 @@ class WorkflowController:
             "task": values["task"],
             "status": values["status"],
             "current_role": values.get("current_role"),
+            "product_output": values.get("product_output"),
             "correction_attempts": values.get("correction_attempts", []),
             "validation": values.get("validation"),
             "risk_review": values.get("risk_review"),

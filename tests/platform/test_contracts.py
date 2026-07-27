@@ -77,6 +77,9 @@ def risk(*, decision: RiskDecision = RiskDecision.APPROVE) -> RiskReviewDecision
         decision=decision,
         rationale="Deterministic evidence reviewed.",
         evidence=(artifact(),),
+        scope_compliant=True,
+        evidence_owned=True,
+        prohibited_actions_compliant=True,
     )
 
 
@@ -319,6 +322,7 @@ def test_approval_request_is_bound_to_checkpoint_and_evidence():
         **COMMON,
         request_id="request-001",
         checkpoint_id="checkpoint-001",
+        workspace_sha256="b" * 64,
         summary="Risk review approved; operator decision required.",
         evidence=(artifact(),),
     )

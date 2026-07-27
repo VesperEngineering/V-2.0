@@ -1,8 +1,9 @@
 schema_version: "1.0"
 profile_id: v20-development
 system_instructions: >-
-  Implement only the controller-injected task in explicitly granted paths. Run bounded checks,
-  preserve unrelated work, and return a receipt with evidence; never claim task acceptance.
+  Implement only the controller-injected task inside the exact disposable-worktree directory
+  granted as the working directory. Run only allowlisted local checks, preserve unrelated work,
+  and return a typed evidence-backed receipt; never claim task acceptance.
 permissions:
   sandbox: workspace-write
   read_paths: ["."]
@@ -12,14 +13,22 @@ permissions:
   trading_allowed: false
 memory_namespace: [profiles, v20-development]
 input_contract: SpecialistInput@1.0
-output_contract: SpecialistReceipt@1.0
+output_contract: DevelopmentSpecialistOutput@1.0
+model:
+  name: docker-codex-default
+  reasoning_effort: medium
+timeout:
+  seconds: 600
+  cooperative_cancellation: true
 retry:
   max_correction_attempts: 3
   infrastructure_failures_consume_correction: false
+  max_infrastructure_retries: 0
 protected_paths: [SOUL.md, profile.yaml, security-policies, approval-rules, risk-limits]
 prohibited_actions:
   - Modify profiles, permissions, approval rules, security policy, or risk limits.
   - Read or write Risk Review decision memory.
+  - Write memory directly or propose memory outside Development episodes and failed attempts.
   - Access credentials, external services, providers, brokers, or Massive.
   - Place orders, enable schedules, promote models, deploy, or alter trading behavior.
   - Validate, risk-approve, operator-approve, or declare final acceptance.

@@ -9,10 +9,16 @@ from enum import StrEnum
 from typing import Callable, Mapping, Protocol
 
 from .contracts import (
+    DevelopmentSpecialistOutput,
     MemoryCandidate,
     MemoryRecord,
     MemoryType,
+    ProductSpecialistOutput,
+    RiskReviewDecision,
+    RiskSpecialistOutput,
+    SpecialistReceipt,
     SpecialistRole,
+    ValidationResult,
     VerificationState,
 )
 
@@ -190,6 +196,66 @@ class MemoryService:
                 f"memory type has no authorized namespace: {memory_type.value}"
             )
         return ("profiles", owner.value, f"{memory_type.value}s")
+
+
+class DeterministicMemoryCandidateValidator:
+    """Accept only claims that exactly restate authoritative typed controller facts."""
+
+    def accepts(
+        self,
+        receipt: SpecialistReceipt,
+        candidate: MemoryCandidate,
+        *,
+        validation: ValidationResult | None = None,
+        risk_decision: RiskReviewDecision | None = None,
+    ) -> bool:
+        if (
+            candidate not in receipt.memory_candidates
+            or candidate.source_artifact not in receipt.evidence
+            or candidate.run_id != receipt.run_id
+            or candidate.task_id != receipt.task_id
+            or candidate.repository_revision != receipt.repository_revision
+        ):
+            return False
+        output = receipt.output
+        if receipt.role is SpecialistRole.PRODUCT and isinstance(output, ProductSpecialistOutput):
+            return (
+                candidate.memory_type is MemoryType.PRODUCT_DECISION
+                and candidate.content == f"Product routed task to {output.route.value}."
+            )
+        if receipt.role is SpecialistRole.DEVELOPMENT and isinstance(
+            output, DevelopmentSpecialistOutput
+        ):
+            if (
+                validation is None
+                or not validation.passed
+                or validation.run_id != receipt.run_id
+                or validation.task_id != receipt.task_id
+                or validation.repository_revision != receipt.repository_revision
+                or validation.attempt != receipt.attempt
+            ):
+                return False
+            changed = ",".join(output.changed_files) or "none"
+            return (
+                candidate.memory_type is MemoryType.DEVELOPMENT_EPISODE
+                and candidate.content
+                == f"Validated Development attempt {receipt.attempt}; changed_files={changed}"
+            )
+        if receipt.role is SpecialistRole.RISK_REVIEW and isinstance(output, RiskSpecialistOutput):
+            if (
+                risk_decision is None
+                or risk_decision.run_id != receipt.run_id
+                or risk_decision.task_id != receipt.task_id
+                or risk_decision.repository_revision != receipt.repository_revision
+                or risk_decision.attempt != receipt.attempt
+                or risk_decision.decision is not output.decision
+            ):
+                return False
+            return candidate.memory_type is MemoryType.RISK_DECISION and candidate.content == (
+                f"Risk Review decision={risk_decision.decision.value}; "
+                f"attempt={risk_decision.attempt}"
+            )
+        return False
 
 
 class MemoryConsolidationNode:

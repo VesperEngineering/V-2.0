@@ -62,6 +62,7 @@ class RunStatus(StrEnum):
 class RiskDecision(StrEnum):
     APPROVE = "approve"
     REJECT = "reject"
+    HOLD = "hold"
 
 
 class ApprovalDecision(StrEnum):
@@ -157,6 +158,55 @@ class SpecialistInput(RunContract):
     thread_id: NonEmptyStr | None = None
 
 
+class MemoryProposal(ContractModel):
+    """A non-authoritative claim emitted before controller provenance is attached."""
+
+    memory_type: MemoryType
+    content: NonEmptyStr
+    confidence: Annotated[float, Field(ge=0, le=1)]
+    contradicts: NonEmptyStr | None = None
+    expiration_policy: NonEmptyStr = "review-required"
+
+
+class ProductSpecialistOutput(RunContract):
+    role: Literal[SpecialistRole.PRODUCT]
+    attempt: Annotated[int, Field(ge=1, le=MAX_CORRECTION_ATTEMPTS)]
+    route: Literal[SpecialistRole.DEVELOPMENT]
+    summary: NonEmptyStr
+    development_instructions: NonEmptyStr
+    acceptance_checks: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
+
+
+class DevelopmentSpecialistOutput(RunContract):
+    role: Literal[SpecialistRole.DEVELOPMENT]
+    attempt: Annotated[int, Field(ge=1, le=MAX_CORRECTION_ATTEMPTS)]
+    summary: NonEmptyStr
+    changed_files: tuple[RelativePath, ...] = ()
+    verification_commands: tuple[NonEmptyStr, ...] = ()
+    residual_risks: tuple[NonEmptyStr, ...] = ()
+    memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
+
+
+class RiskSpecialistOutput(RunContract):
+    role: Literal[SpecialistRole.RISK_REVIEW]
+    attempt: Annotated[int, Field(ge=1, le=MAX_CORRECTION_ATTEMPTS)]
+    decision: RiskDecision
+    rationale: NonEmptyStr
+    reviewed_changed_files: tuple[RelativePath, ...] = ()
+    scope_compliant: bool
+    evidence_owned: bool
+    prohibited_actions_compliant: bool
+    residual_risks: tuple[NonEmptyStr, ...] = ()
+    memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
+
+
+SpecialistOutput = Annotated[
+    ProductSpecialistOutput | DevelopmentSpecialistOutput | RiskSpecialistOutput,
+    Field(discriminator="role"),
+]
+
+
 class SpecialistReceipt(RunContract):
     receipt_id: NonEmptyStr
     role: SpecialistRole
@@ -164,12 +214,29 @@ class SpecialistReceipt(RunContract):
     status: ExecutionStatus
     thread_id: NonEmptyStr | None = None
     final_response: str | None = None
+    output: SpecialistOutput | None = None
     evidence: tuple[EvidenceArtifactRef, ...] = ()
+    memory_candidates: tuple[MemoryCandidate, ...] = ()
     error_code: NonEmptyStr | None = None
 
     @model_validator(mode="after")
     def evidence_is_authoritative(self) -> SpecialistReceipt:
         _evidence_matches_authority(self, self.evidence)
+        if self.output is not None and (
+            self.output.run_id != self.run_id
+            or self.output.task_id != self.task_id
+            or self.output.repository_revision != self.repository_revision
+            or self.output.role is not self.role
+            or self.output.attempt != self.attempt
+        ):
+            raise ValueError("specialist output authority must match its receipt")
+        for candidate in self.memory_candidates:
+            if (
+                candidate.run_id != self.run_id
+                or candidate.task_id != self.task_id
+                or candidate.repository_revision != self.repository_revision
+            ):
+                raise ValueError("memory candidate authority must match its receipt")
         return self
 
 
@@ -202,10 +269,41 @@ class RiskReviewDecision(RunContract):
     decision: RiskDecision
     rationale: NonEmptyStr
     evidence: tuple[EvidenceArtifactRef, ...] = ()
+    reviewed_changed_files: tuple[RelativePath, ...] = ()
+    scope_compliant: bool | None = None
+    evidence_owned: bool | None = None
+    prohibited_actions_compliant: bool | None = None
+    residual_risks: tuple[NonEmptyStr, ...] = ()
 
     @model_validator(mode="after")
     def evidence_is_authoritative(self) -> RiskReviewDecision:
         _evidence_matches_authority(self, self.evidence)
+        return self
+
+
+class RiskReviewExecution(ContractModel):
+    receipt: SpecialistReceipt
+    decision: RiskReviewDecision | None = None
+
+    @model_validator(mode="after")
+    def authorities_match(self) -> RiskReviewExecution:
+        receipt = self.receipt
+        decision = self.decision
+        if receipt.role is not SpecialistRole.RISK_REVIEW:
+            raise ValueError("Risk Review execution requires a Risk Review receipt")
+        if receipt.status is ExecutionStatus.COMPLETED and decision is None:
+            raise ValueError("completed Risk Review execution requires a decision")
+        if receipt.status is not ExecutionStatus.COMPLETED and decision is not None:
+            raise ValueError("non-completed Risk Review execution cannot carry a decision")
+        if decision is None:
+            return self
+        if (
+            receipt.run_id != decision.run_id
+            or receipt.task_id != decision.task_id
+            or receipt.repository_revision != decision.repository_revision
+            or receipt.attempt != decision.attempt
+        ):
+            raise ValueError("Risk Review receipt and decision authority must match")
         return self
 
 
@@ -219,6 +317,7 @@ class CorrectionAttempt(RunContract):
 class HumanApprovalRequest(RunContract):
     request_id: NonEmptyStr
     checkpoint_id: NonEmptyStr
+    workspace_sha256: Sha256
     summary: NonEmptyStr
     evidence: Annotated[tuple[EvidenceArtifactRef, ...], Field(min_length=1)]
 
@@ -244,6 +343,11 @@ class CodexExecutionReceipt(RunContract):
     attempt: Annotated[int, Field(ge=1, le=MAX_CORRECTION_ATTEMPTS)]
     status: ExecutionStatus
     sandbox: SandboxMode
+    model: NonEmptyStr | None = None
+    workspace: RelativePath | None = None
+    approval_mode: Literal["deny-all"] | None = None
+    authentication_type: Literal["chatgpt"] | None = None
+    permission_profile: NonEmptyStr | None = None
     started_at: AwareDatetime
     finished_at: AwareDatetime
     thread_id: NonEmptyStr | None = None
@@ -273,6 +377,11 @@ class MemoryCandidate(RunContract):
     contradicts: NonEmptyStr | None = None
     expiration_policy: NonEmptyStr = "review-required"
 
+    @model_validator(mode="after")
+    def source_matches_authority(self) -> MemoryCandidate:
+        _evidence_matches_authority(self, (self.source_artifact,))
+        return self
+
 
 class MemoryRecord(RunContract):
     memory_id: NonEmptyStr
@@ -292,6 +401,11 @@ class MemoryRecord(RunContract):
     @classmethod
     def require_review_utc(cls, value: datetime | None) -> datetime | None:
         return None if value is None else RunContract.require_utc(value)
+
+    @model_validator(mode="after")
+    def source_matches_authority(self) -> MemoryRecord:
+        _evidence_matches_authority(self, (self.source_artifact,))
+        return self
 
 
 class ResumableRunMetadata(RunContract):
@@ -317,6 +431,7 @@ class GraphState(RunContract):
     task: TaskRequest | None = None
     status: RunStatus
     current_role: SpecialistRole | None = None
+    product_output: ProductSpecialistOutput | None = None
     correction_attempts: tuple[CorrectionAttempt, ...] = ()
     validation: ValidationResult | None = None
     risk_review: RiskReviewDecision | None = None
@@ -338,6 +453,19 @@ class GraphState(RunContract):
                 raise ValueError("acceptance requires deterministic validation")
             if self.risk_review is None or self.risk_review.decision is not RiskDecision.APPROVE:
                 raise ValueError("acceptance requires Risk Review approval")
+            if not all(
+                item is True
+                for item in (
+                    self.risk_review.scope_compliant,
+                    self.risk_review.evidence_owned,
+                    self.risk_review.prohibited_actions_compliant,
+                )
+            ):
+                raise ValueError("acceptance requires all Risk Review compliance gates")
             if self.approval is None or self.approval.decision is not ApprovalDecision.APPROVE:
                 raise ValueError("acceptance requires explicit operator approval")
         return self
+
+
+SpecialistReceipt.model_rebuild()
+RiskReviewExecution.model_rebuild()

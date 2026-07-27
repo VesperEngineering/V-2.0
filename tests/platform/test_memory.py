@@ -6,12 +6,22 @@ import pytest
 from pydantic import ValidationError
 
 from vesper.platform.contracts import (
+    DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
+    ExecutionStatus,
     MemoryCandidate,
     MemoryType,
+    ProductSpecialistOutput,
+    RiskDecision,
+    RiskReviewDecision,
+    RiskSpecialistOutput,
+    SpecialistReceipt,
     SpecialistRole,
+    ValidationCheck,
+    ValidationResult,
 )
 from vesper.platform.memory import (
+    DeterministicMemoryCandidateValidator,
     ControllerActor,
     MemoryAccessDenied,
     MemoryConsolidationNode,
@@ -274,3 +284,139 @@ def test_corrupted_local_store_memory_record_is_rejected(tmp_path):
 
         with pytest.raises(ValidationError):
             memory.history(SpecialistRole.DEVELOPMENT, MemoryType.DEVELOPMENT_EPISODE)
+
+
+def test_memory_candidate_rejects_foreign_source_artifact():
+    foreign = artifact().model_copy(update={"run_id": "foreign-run"})
+
+    with pytest.raises(ValidationError):
+        MemoryCandidate(
+            **COMMON,
+            candidate_id="candidate-foreign",
+            namespace=("profiles", "v20-development", "development-episodes"),
+            memory_type=MemoryType.DEVELOPMENT_EPISODE,
+            content="Foreign evidence must not become memory.",
+            source_artifact=foreign,
+            confidence=0.9,
+        )
+
+
+def test_generated_memory_requires_exact_authoritative_claim_and_validation():
+    validator = DeterministicMemoryCandidateValidator()
+    output = DevelopmentSpecialistOutput(
+        **COMMON,
+        role=SpecialistRole.DEVELOPMENT,
+        attempt=1,
+        summary="Created the controlled marker.",
+        changed_files=("RESULT.md",),
+    )
+    exact = candidate(
+        MemoryType.DEVELOPMENT_EPISODE,
+        ("profiles", "v20-development", "development-episodes"),
+        content="Validated Development attempt 1; changed_files=RESULT.md",
+    )
+    unverified = exact.model_copy(
+        update={"candidate_id": "candidate-unverified", "content": "Everything is safe."}
+    )
+    receipt = SpecialistReceipt(
+        **COMMON,
+        receipt_id="development-001",
+        role=SpecialistRole.DEVELOPMENT,
+        attempt=1,
+        status=ExecutionStatus.COMPLETED,
+        output=output,
+        evidence=(artifact(),),
+        memory_candidates=(exact, unverified),
+    )
+    passed = ValidationResult(
+        **COMMON,
+        attempt=1,
+        passed=True,
+        checks=(
+            ValidationCheck(
+                name="git-diff-check",
+                passed=True,
+                command="git diff --check",
+                exit_code=0,
+            ),
+        ),
+    )
+
+    assert validator.accepts(receipt, exact, validation=passed) is True
+    assert validator.accepts(receipt, unverified, validation=passed) is False
+    assert (
+        validator.accepts(
+            receipt,
+            exact,
+            validation=passed.model_copy(update={"passed": False}),
+        )
+        is False
+    )
+
+
+def test_product_and_risk_memory_claims_are_bound_to_typed_outputs():
+    validator = DeterministicMemoryCandidateValidator()
+    product_output = ProductSpecialistOutput(
+        **COMMON,
+        role=SpecialistRole.PRODUCT,
+        attempt=1,
+        route=SpecialistRole.DEVELOPMENT,
+        summary="Route task.",
+        development_instructions="Create RESULT.md.",
+        acceptance_checks=("git-diff-check",),
+    )
+    product_candidate = candidate(
+        MemoryType.PRODUCT_DECISION,
+        ("profiles", "v20-product", "product-decisions"),
+        content="Product routed task to v20-development.",
+    )
+    product_receipt = SpecialistReceipt(
+        **COMMON,
+        receipt_id="product-001",
+        role=SpecialistRole.PRODUCT,
+        attempt=1,
+        status=ExecutionStatus.COMPLETED,
+        output=product_output,
+        evidence=(artifact(),),
+        memory_candidates=(product_candidate,),
+    )
+    assert validator.accepts(product_receipt, product_candidate) is True
+
+    risk_output = RiskSpecialistOutput(
+        **COMMON,
+        role=SpecialistRole.RISK_REVIEW,
+        attempt=1,
+        decision=RiskDecision.APPROVE,
+        rationale="Evidence passed.",
+        reviewed_changed_files=("RESULT.md",),
+        scope_compliant=True,
+        evidence_owned=True,
+        prohibited_actions_compliant=True,
+    )
+    risk_candidate = candidate(
+        MemoryType.RISK_DECISION,
+        ("profiles", "v20-risk-review", "risk-decisions"),
+        content="Risk Review decision=approve; attempt=1",
+    )
+    risk_receipt = SpecialistReceipt(
+        **COMMON,
+        receipt_id="risk-001",
+        role=SpecialistRole.RISK_REVIEW,
+        attempt=1,
+        status=ExecutionStatus.COMPLETED,
+        output=risk_output,
+        evidence=(artifact(),),
+        memory_candidates=(risk_candidate,),
+    )
+    decision = RiskReviewDecision(
+        **COMMON,
+        attempt=1,
+        decision=RiskDecision.APPROVE,
+        rationale="Evidence passed.",
+        reviewed_changed_files=("RESULT.md",),
+        scope_compliant=True,
+        evidence_owned=True,
+        prohibited_actions_compliant=True,
+    )
+    assert validator.accepts(risk_receipt, risk_candidate, risk_decision=decision) is True
+    assert validator.accepts(risk_receipt, risk_candidate) is False

@@ -8,13 +8,14 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from .codex import (
     ModelNotApprovedError,
@@ -187,6 +188,7 @@ class DockerCodexAdapter:
         self,
         *,
         repository_root: Path,
+        sandbox_workspace: Path | None = None,
         sandbox_name: str,
         approved_models: tuple[str, ...],
         approved_network_hosts: tuple[str, ...],
@@ -199,6 +201,13 @@ class DockerCodexAdapter:
         max_output_bytes: int = 1_000_000,
     ) -> None:
         self.repository_root = repository_root.resolve()
+        self.sandbox_workspace = (
+            self.repository_root if sandbox_workspace is None else sandbox_workspace.resolve()
+        )
+        if not self.sandbox_workspace.is_dir() or not self.sandbox_workspace.is_relative_to(
+            self.repository_root
+        ):
+            raise ValueError("sandbox workspace must be inside the repository")
         self.sandbox_name = sandbox_name
         self.approved_models = frozenset(approved_models)
         self.approved_network_hosts = frozenset(approved_network_hosts)
@@ -224,6 +233,8 @@ class DockerCodexAdapter:
         timeout_seconds: float = 300,
         cancellation: threading.Event | None = None,
         execution_id: str | None = None,
+        reasoning_effort: str | None = None,
+        output_schema: Mapping[str, object] | None = None,
     ) -> CodexExecutionReceipt:
         if model not in self.approved_models:
             raise ModelNotApprovedError(f"model is not controller-approved: {model}")
@@ -235,6 +246,8 @@ class DockerCodexAdapter:
         self._validate_permissions(request, workspace)
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if reasoning_effort not in {None, "low", "medium", "high", "xhigh"}:
+            raise ValueError("unsupported reasoning_effort")
 
         identifier = execution_id or str(uuid.uuid4())
         started_at = self._clock()
@@ -249,10 +262,19 @@ class DockerCodexAdapter:
             self._active[identifier] = internal_cancel
 
         cancelled = lambda: external_cancel.is_set() or internal_cancel.is_set()
-        command = self._command(request, workspace, prompt, model)
+        schema_path = None
         git_before = None
         outcome = _Outcome(ExecutionStatus.FAILED, error_code="execution-not-started")
         try:
+            schema_path = self._write_output_schema(identifier, output_schema)
+            command = self._command(
+                request,
+                workspace,
+                prompt,
+                model,
+                reasoning_effort=reasoning_effort,
+                schema_path=schema_path,
+            )
             if cancelled():
                 outcome = _Outcome(ExecutionStatus.CANCELLED, error_code="cancelled")
             else:
@@ -302,15 +324,19 @@ class DockerCodexAdapter:
             try:
                 self._remove_sandbox()
             finally:
-                with self._active_lock:
-                    self._active.pop(identifier, None)
-                self._execution_lock.release()
+                try:
+                    if schema_path is not None:
+                        schema_path.unlink(missing_ok=True)
+                finally:
+                    with self._active_lock:
+                        self._active.pop(identifier, None)
+                    self._execution_lock.release()
         if git_before is not None and self._git_fingerprint() != git_before:
             outcome = _Outcome(
                 ExecutionStatus.PERMISSION_DENIED,
                 error_code="git-metadata-mutated",
             )
-        return self._receipt(request, identifier, started_at, outcome)
+        return self._receipt(request, identifier, started_at, outcome, model=model)
 
     def cancel(self, execution_id: str) -> bool:
         with self._active_lock:
@@ -325,11 +351,11 @@ class DockerCodexAdapter:
         if not path.is_absolute():
             path = self.repository_root / path
         resolved = path.resolve()
-        if not resolved.is_dir() or resolved != self.repository_root:
+        if not resolved.is_dir() or resolved != self.sandbox_workspace:
             raise WorkspaceDeniedError(
-                "workspace must be the exact sandbox-bound repository: " + requested
+                "workspace must exactly match the sandbox-mounted directory: " + requested
             )
-        git_directory = resolved / ".git"
+        git_directory = self.repository_root / ".git"
         if self._is_reparse_point(git_directory) or not git_directory.is_dir():
             raise WorkspaceDeniedError("workspace must be a standalone Git repository")
         return resolved
@@ -373,10 +399,15 @@ class DockerCodexAdapter:
             raise DockerSandboxPolicyError(
                 "request revision does not match the sandbox-bound repository"
             )
-        project_config = self.repository_root / ".codex"
-        if project_config.exists() or self._is_reparse_point(project_config):
+        project_policy = tuple(
+            path
+            for name in (".codex", ".agents")
+            for path in self.sandbox_workspace.rglob(name)
+            if path.exists() or self._is_reparse_point(path)
+        )
+        if project_policy:
             raise DockerSandboxPolicyError(
-                "project-local Codex configuration is not allowed in the isolated workspace"
+                "project-local Codex configuration or skills are not allowed in the isolated workspace"
             )
 
     def _verify_sandbox(self) -> None:
@@ -402,7 +433,7 @@ class DockerCodexAdapter:
             )
         inspected_workspace = inspect.get("workspace")
         if not isinstance(inspected_workspace, str) or (
-            Path(inspected_workspace).resolve() != self.repository_root
+            Path(inspected_workspace).resolve() != self.sandbox_workspace
         ):
             raise DockerSandboxPolicyError(
                 "sandbox workspace does not match the authorized repository"
@@ -424,7 +455,7 @@ class DockerCodexAdapter:
         if (
             len(matching) != 1
             or matching[0].get("agent") != "codex"
-            or matching[0].get("workspaces") != [str(self.repository_root)]
+            or matching[0].get("workspaces") != [str(self.sandbox_workspace)]
         ):
             raise DockerSandboxPolicyError(
                 "sandbox workspace mounts differ from the exact authorized repository"
@@ -543,7 +574,7 @@ class DockerCodexAdapter:
             if match is not None:
                 mounts[match.group("path")] = set(match.group("options").split(","))
         expected = {
-            self._sandbox_path(self.repository_root): "rw",
+            self._sandbox_path(self.sandbox_workspace): "rw",
             "/etc/resolv.conf": "ro",
             "/etc/hosts": "ro",
         }
@@ -566,6 +597,9 @@ class DockerCodexAdapter:
         workspace: Path,
         prompt: str,
         model: str,
+        *,
+        reasoning_effort: str | None,
+        schema_path: Path | None,
     ) -> list[str]:
         command = [
             self._executable,
@@ -581,6 +615,10 @@ class DockerCodexAdapter:
         ]
         if model != DOCKER_CODEX_DEFAULT_MODEL:
             command.extend(("--model", model))
+        if reasoning_effort is not None:
+            command.extend(("--config", f'model_reasoning_effort="{reasoning_effort}"'))
+        if schema_path is not None:
+            command.extend(("--output-schema", self._sandbox_path(schema_path)))
         command.extend(
             (
                 "--config",
@@ -609,6 +647,33 @@ class DockerCodexAdapter:
             command.append("--dangerously-bypass-approvals-and-sandbox")
         command.extend(("--", prompt))
         return command
+
+    def _write_output_schema(
+        self,
+        execution_id: str,
+        output_schema: Mapping[str, object] | None,
+    ) -> Path | None:
+        if output_schema is None:
+            return None
+        body = json.dumps(dict(output_schema), sort_keys=True).encode("utf-8") + b"\n"
+        if len(body) > self._max_output_bytes:
+            raise ValueError("output schema exceeds the configured output limit")
+        prefix = f".v20-schema-{hashlib.sha256(execution_id.encode('utf-8')).hexdigest()[:16]}-"
+        descriptor, name = tempfile.mkstemp(
+            prefix=prefix,
+            suffix=".json",
+            dir=self.sandbox_workspace,
+        )
+        path = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return path
 
     def _git_fingerprint(self) -> str:
         digest = hashlib.sha256()
@@ -639,7 +704,7 @@ class DockerCodexAdapter:
         return digest.hexdigest()
 
     def _verify_workspace_links(self) -> None:
-        stack = [self.repository_root]
+        stack = [self.sandbox_workspace]
         while stack:
             directory = stack.pop()
             with os.scandir(directory) as entries:
@@ -774,6 +839,8 @@ class DockerCodexAdapter:
         execution_id: str,
         started_at: datetime,
         outcome: _Outcome,
+        *,
+        model: str,
     ) -> CodexExecutionReceipt:
         return CodexExecutionReceipt(
             run_id=request.run_id,
@@ -785,6 +852,11 @@ class DockerCodexAdapter:
             attempt=request.attempt,
             status=outcome.status,
             sandbox=request.permissions.sandbox,
+            model=model,
+            workspace=request.workspace,
+            approval_mode="deny-all",
+            authentication_type="chatgpt",
+            permission_profile="docker-one-shot",
             started_at=started_at,
             finished_at=self._clock(),
             thread_id=outcome.thread_id,

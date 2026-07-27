@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -18,7 +20,13 @@ class CliConfig:
 
 
 class PlatformService(Protocol):
-    def create_run(self, objective: str, workspace: str, repository_revision: str): ...
+    def create_run(
+        self,
+        objective: str,
+        workspace: str,
+        repository_revision: str,
+        acceptance_checks: tuple[str, ...] | None = None,
+    ): ...
 
     def inspect_run(self, run_id: str): ...
 
@@ -41,6 +49,13 @@ class PlatformRuntimeUnavailable(RuntimeError):
     """A requested platform capability has no configured local runtime."""
 
 
+def _default_platform_root() -> Path:
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        base = tempfile.gettempdir()
+    return Path(base) / "V20" / "agent-platform"
+
+
 @dataclass(frozen=True, slots=True)
 class _Context:
     config: CliConfig
@@ -59,7 +74,7 @@ def _default_service_factory(config: CliConfig) -> PlatformService:
         store_db=state_db.parent / "store.sqlite3",
         evidence_root=config.evidence_root.resolve(),
     )
-    return LocalPlatformService(paths)
+    return LocalPlatformService(paths, profiles_root=config.profiles_root)
 
 
 def _emit(value: object, *, json_output: bool) -> None:
@@ -105,12 +120,12 @@ def build_app(
     def configure(
         context: typer.Context,
         state_db: Path = typer.Option(
-            Path(".v20-platform/checkpoints.sqlite3"),
+            _default_platform_root() / "checkpoints.sqlite3",
             "--state-db",
             help="Local SQLite checkpoint database; opened only by a command.",
         ),
         evidence_root: Path = typer.Option(
-            Path(".v20-platform/evidence"),
+            _default_platform_root() / "evidence",
             "--evidence-root",
             help="Local evidence root; opened only by a command.",
         ),
@@ -131,13 +146,21 @@ def build_app(
     def create_run(
         context: typer.Context,
         objective: str = typer.Option(..., "--objective", help="Bounded task objective."),
-        workspace: str = typer.Option(..., "--workspace", help="Authorized repository/worktree."),
+        workspace: str = typer.Option(
+            ..., "--workspace", help="Authorized subdirectory in a disposable standalone clone."
+        ),
         repository_revision: str = typer.Option(
             ..., "--repository-revision", help="Revision the request is bound to."
         ),
+        acceptance_check: list[str] | None = typer.Option(
+            None,
+            "--acceptance-check",
+            help="Allowlisted deterministic check; repeat for multiple checks.",
+        ),
     ) -> None:
         """Create a run and execute until a durable stop or interrupt."""
-        _call(context, "create_run", objective, workspace, repository_revision)
+        checks = None if not acceptance_check else tuple(acceptance_check)
+        _call(context, "create_run", objective, workspace, repository_revision, checks)
 
     @app.command("status")
     def inspect_run(context: typer.Context, run_id: str) -> None:

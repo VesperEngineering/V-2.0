@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -40,13 +41,29 @@ def test_profiles_define_permissions_contracts_and_retry_policy(profile_id, sand
     assert profile.permissions.sandbox is sandbox
     assert profile.memory_namespace == namespace
     assert profile.input_contract == "SpecialistInput@1.0"
-    assert profile.output_contract == "SpecialistReceipt@1.0"
+    expected_output = {
+        SpecialistRole.PRODUCT: "ProductSpecialistOutput@1.0",
+        SpecialistRole.DEVELOPMENT: "DevelopmentSpecialistOutput@1.0",
+        SpecialistRole.RISK_REVIEW: "RiskSpecialistOutput@1.0",
+    }[profile_id]
+    assert profile.output_contract == expected_output
+    assert profile.model.name == "docker-codex-default"
+    assert profile.model.reasoning_effort == "medium"
+    assert profile.timeout.seconds > 0
+    assert profile.timeout.cooperative_cancellation is True
     assert profile.retry.max_correction_attempts == 3
     assert profile.retry.infrastructure_failures_consume_correction is False
+    assert profile.retry.max_infrastructure_retries == 0
     assert profile.system_instructions.strip()
     assert profile.prohibited_actions
     assert "SOUL.md" in profile.protected_paths
     assert "profile.yaml" in profile.protected_paths
+    if profile_id is SpecialistRole.DEVELOPMENT:
+        assert profile.permissions.allowed_tools == ("read", "search", "write", "test")
+        assert profile.permissions.read_paths == (".",)
+    else:
+        assert profile.permissions.allowed_tools == ("read", "search")
+        assert profile.permissions.read_paths == (".",)
 
 
 def test_profiles_contain_no_dynamic_repository_state():
@@ -71,6 +88,36 @@ def test_profile_directory_and_declared_id_must_match(tmp_path):
     (profile_dir / "SOUL.md").write_text("Stable role identity.\n", encoding="utf-8")
     (profile_dir / "profile.yaml").write_text(
         "schema_version: '1.0'\nprofile_id: v20-development\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProfileIntegrityError):
+        ProfileCatalog(tmp_path).load(SpecialistRole.PRODUCT)
+
+
+def test_profile_loader_rejects_symlinked_policy_files(tmp_path):
+    source = PROFILES_ROOT / "v20-product"
+    profile_dir = tmp_path / "v20-product"
+    profile_dir.mkdir()
+    try:
+        (profile_dir / "profile.yaml").symlink_to(source / "profile.yaml")
+        (profile_dir / "SOUL.md").symlink_to(source / "SOUL.md")
+    except OSError:
+        pytest.skip("symlink creation is unavailable for this Windows account")
+
+    with pytest.raises(ProfileIntegrityError):
+        ProfileCatalog(tmp_path).load(SpecialistRole.PRODUCT)
+
+
+def test_profile_schema_rejects_tool_authority_for_reasoning_only_roles(tmp_path):
+    profile_dir = tmp_path / "v20-product"
+    shutil.copytree(PROFILES_ROOT / "v20-product", profile_dir)
+    profile_path = profile_dir / "profile.yaml"
+    profile_path.write_text(
+        profile_path.read_text(encoding="utf-8").replace(
+            "  allowed_tools: [read, search]",
+            "  allowed_tools: [read]",
+        ),
         encoding="utf-8",
     )
 
