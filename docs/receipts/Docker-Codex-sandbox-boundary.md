@@ -101,3 +101,30 @@ exercise stopped at operator intervention when a harmless Git line-ending warnin
 was misclassified as validation failure. Each issue was reproduced, covered by a
 regression test, fixed, and retried from a fresh revision and clone; no failed run
 reached Risk Review approval or operator acceptance.
+
+## Post-acceptance lifecycle hardening
+
+Subsequent lifecycle work removed automatic at-least-once specialist replay and
+in-process-only cancellation:
+
+- each `(run, role, attempt)` is journaled in the local SQLite Store before dispatch;
+- a completed turn replays its original typed receipt without another model call;
+- a started turn without a committed receipt becomes a terminal typed `interrupted`
+  result and is never automatically dispatched a second time;
+- memory candidate commits retain one durable memory ID, repair incomplete index
+  writes after process death, and never replace a newer active candidate during an
+  older replay;
+- platform-state control records expose the run ID and active sandbox through
+  `vesper-agent active` while `create` is still running;
+- `vesper-agent cancel` writes a cross-process cancellation signal before waiting
+  for the repository lease, allowing the active adapter to terminate promptly;
+- active records are cleared only after sandbox removal is confirmed; and
+- resume or cancellation validates the run, role, execution ID, and deterministic
+  sandbox name before reconciling a sandbox left by a terminated controller.
+
+Fault-injection tests use real child-process termination to verify durable turn and
+memory recovery. A separate child process also verifies cancellation visibility
+across the process boundary. Ambiguous external execution is deliberately resolved
+with at-most-once, fail-closed semantics because Docker Codex does not provide a
+transactional idempotency key; the controller does not conceal that uncertainty by
+silently repeating the model call.

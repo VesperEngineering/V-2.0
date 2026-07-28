@@ -484,6 +484,7 @@ def test_completed_product_without_typed_output_fails_closed(tmp_path):
     [
         (ExecutionStatus.USAGE_LIMITED, RunStatus.USAGE_LIMITED, "usage_limit"),
         (ExecutionStatus.TIMEOUT, RunStatus.INTERRUPTED, "timeout"),
+        (ExecutionStatus.INTERRUPTED, RunStatus.INTERRUPTED, "ambiguous-prior-execution"),
     ],
 )
 def test_risk_infrastructure_failure_persists_receipt_and_stops(

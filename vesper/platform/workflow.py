@@ -127,6 +127,8 @@ def _infrastructure_status(receipt: SpecialistReceipt) -> tuple[RunStatus, str]:
         return RunStatus.CANCELLED, "specialist execution cancelled"
     if receipt.status is ExecutionStatus.TIMEOUT:
         return RunStatus.INTERRUPTED, "specialist execution timed out"
+    if receipt.status is ExecutionStatus.INTERRUPTED:
+        return RunStatus.INTERRUPTED, "specialist execution outcome is ambiguous after interruption"
     return RunStatus.FAILED, f"specialist execution ended with {receipt.status.value}"
 
 

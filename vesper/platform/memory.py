@@ -101,12 +101,58 @@ class MemoryService:
                     "contradicted memory does not exist in the authorized namespace"
                 )
 
+        commit_namespace = ("_commits", *expected)
+        committed = self._store.get(commit_namespace, candidate.candidate_id)
+        activate = True
+        if committed is not None:
+            memory_id = str(committed["memory_id"])
+            previous_memory_id = committed.get("previous_memory_id")
+            index_namespace = ("_index", *expected)
+            index_key = f"active:{candidate.memory_type.value}"
+            active = self._store.get(index_namespace, index_key)
+            active_memory_id = None if active is None else active.get("memory_id")
+            activate = active_memory_id in {None, previous_memory_id, memory_id}
+            existing = self._load_record(expected, memory_id)
+            if existing is not None:
+                if (
+                    existing.run_id != candidate.run_id
+                    or existing.task_id != candidate.task_id
+                    or existing.repository_revision != candidate.repository_revision
+                    or existing.memory_type is not candidate.memory_type
+                    or existing.content != candidate.content
+                    or existing.source_artifact != candidate.source_artifact
+                ):
+                    raise MemoryAccessDenied(
+                        "candidate ID is already committed to different memory content"
+                    )
+                if activate:
+                    self._store.put(
+                        index_namespace,
+                        index_key,
+                        {"memory_id": existing.memory_id},
+                    )
+                return existing
+        else:
+            memory_id = self._id_factory()
+            active = self._store.get(
+                ("_index", *expected),
+                f"active:{candidate.memory_type.value}",
+            )
+            self._store.put(
+                commit_namespace,
+                candidate.candidate_id,
+                {
+                    "memory_id": memory_id,
+                    "previous_memory_id": None if active is None else active.get("memory_id"),
+                },
+            )
+
         record = MemoryRecord(
             run_id=candidate.run_id,
             task_id=candidate.task_id,
             repository_revision=candidate.repository_revision,
             created_at=self._clock(),
-            memory_id=self._id_factory(),
+            memory_id=memory_id,
             namespace=expected,
             memory_type=candidate.memory_type,
             content=candidate.content,
@@ -118,11 +164,12 @@ class MemoryService:
             expiration_policy=candidate.expiration_policy,
         )
         self._store.put(expected, record.memory_id, record.model_dump(mode="json"))
-        self._store.put(
-            ("_index", *expected),
-            f"active:{candidate.memory_type.value}",
-            {"memory_id": record.memory_id},
-        )
+        if activate:
+            self._store.put(
+                ("_index", *expected),
+                f"active:{candidate.memory_type.value}",
+                {"memory_id": record.memory_id},
+            )
         return record
 
     def search(

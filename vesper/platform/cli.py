@@ -38,6 +38,8 @@ class PlatformService(Protocol):
 
     def list_pending_approvals(self): ...
 
+    def list_active_runs(self): ...
+
     def approve_run(self, run_id: str, checkpoint_id: str, operator_id: str, reason: str): ...
 
     def reject_run(self, run_id: str, checkpoint_id: str, operator_id: str, reason: str): ...
@@ -186,6 +188,11 @@ def build_app(
     def list_approvals(context: typer.Context) -> None:
         """List runs awaiting explicit operator approval."""
         _call(context, "list_pending_approvals")
+
+    @app.command("active")
+    def list_active_runs(context: typer.Context) -> None:
+        """List running or crash-interrupted runs and active sandbox metadata."""
+        _call(context, "list_active_runs")
 
     @app.command("approve")
     def approve_run(

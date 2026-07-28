@@ -19,6 +19,7 @@ from .codex_sandbox import (
     DockerSandboxTerminationError,
 )
 from .contracts import CodexExecutionReceipt, ExecutionStatus, SpecialistInput
+from .control import RuntimeControl
 
 OPENAI_NETWORK_HOSTS = ("api.openai.com", "chatgpt.com", "openai.com")
 
@@ -81,6 +82,7 @@ class DockerCodexRuntime:
         executable: str | None = None,
         runner: ProcessRunner = _run_process,
         adapter_factory: AdapterFactory | None = None,
+        control: RuntimeControl | None = None,
         clock: Callable[[], datetime] = _utc_now,
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
     ) -> None:
@@ -89,6 +91,7 @@ class DockerCodexRuntime:
         self.executable = executable or default_sbx_executable()
         self._runner = runner
         self._adapter_factory = adapter_factory
+        self._control = control
         self._clock = clock
         self._id_factory = id_factory
 
@@ -117,20 +120,63 @@ class DockerCodexRuntime:
         identifier = execution_id or self._id_factory()
         started_at = self._clock()
         sandbox_name = self._sandbox_name(request, identifier)
-        created = False
+        effective_cancellation = (
+            cancellation
+            if self._control is None
+            else self._control.cancellation_signal(request.run_id, cancellation)
+        )
+        if effective_cancellation is not None and effective_cancellation.is_set():
+            return self._receipt(
+                request,
+                identifier,
+                started_at,
+                model,
+                ExecutionStatus.CANCELLED,
+                "cancelled",
+            )
+        if self._control is not None:
+            self._control.mark_active(
+                run_id=request.run_id,
+                execution_id=identifier,
+                sandbox_name=sandbox_name,
+                role=request.role.value,
+                attempt=request.attempt,
+            )
+        creation_may_exist = False
         delegated = False
         try:
-            completed = self._run(
-                [
-                    self.executable,
-                    "create",
-                    "--no-share-skills",
-                    "--name",
-                    sandbox_name,
-                    "codex",
-                    str(workspace),
-                ]
-            )
+            try:
+                completed = self._run(
+                    [
+                        self.executable,
+                        "create",
+                        "--no-share-skills",
+                        "--name",
+                        sandbox_name,
+                        "codex",
+                        str(workspace),
+                    ]
+                )
+            except FileNotFoundError:
+                return self._receipt(
+                    request,
+                    identifier,
+                    started_at,
+                    model,
+                    ExecutionStatus.FAILED,
+                    "sandbox-provisioner-unavailable",
+                )
+            except subprocess.TimeoutExpired:
+                creation_may_exist = True
+                return self._receipt(
+                    request,
+                    identifier,
+                    started_at,
+                    model,
+                    ExecutionStatus.FAILED,
+                    "sandbox-provisioner-unavailable",
+                )
+            creation_may_exist = True
             if completed.returncode != 0:
                 return self._receipt(
                     request,
@@ -140,7 +186,6 @@ class DockerCodexRuntime:
                     ExecutionStatus.FAILED,
                     "sandbox-create-failed",
                 )
-            created = True
             completed = self._run(
                 [
                     self.executable,
@@ -178,7 +223,7 @@ class DockerCodexRuntime:
                 prompt=prompt,
                 model=model,
                 timeout_seconds=timeout_seconds,
-                cancellation=cancellation,
+                cancellation=effective_cancellation,
                 execution_id=identifier,
                 reasoning_effort=reasoning_effort,
                 output_schema=output_schema,
@@ -204,8 +249,10 @@ class DockerCodexRuntime:
                 type(exc).__name__.lower(),
             )
         finally:
-            if created and not delegated:
+            if creation_may_exist and not delegated:
                 self._cleanup(sandbox_name)
+            if self._control is not None:
+                self._control.clear_active(request.run_id, identifier)
 
     def _adapter(self, sandbox_name: str, workspace: Path) -> SpecialistTurnAdapter:
         if self._adapter_factory is not None:
@@ -245,11 +292,18 @@ class DockerCodexRuntime:
         ):
             raise DockerSandboxTerminationError("sandbox removal could not be confirmed")
 
+    def reconcile_sandbox(self, sandbox_name: str) -> None:
+        """Force-remove a sandbox left by a terminated controller and confirm absence."""
+        self._cleanup(sandbox_name)
+
     @staticmethod
     def _sandbox_name(request: SpecialistInput, execution_id: str) -> str:
+        return DockerCodexRuntime.expected_sandbox_name(request.role.value, execution_id)
+
+    @staticmethod
+    def expected_sandbox_name(role: str, execution_id: str) -> str:
         digest = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()[:16]
-        role = request.role.value.removeprefix("v20-")
-        return f"v20-{role}-{digest}"
+        return f"v20-{role.removeprefix('v20-')}-{digest}"
 
     def _receipt(
         self,

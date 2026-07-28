@@ -65,9 +65,16 @@ class SpecialistTurnAdapter(Protocol):
         prompt: str,
         model: str,
         timeout_seconds: float,
+        execution_id: str | None,
         reasoning_effort: str | None,
         output_schema: Mapping[str, object] | None,
     ) -> CodexExecutionReceipt: ...
+
+
+class TurnJournalStore(Protocol):
+    def put(self, namespace: tuple[str, ...], key: str, value: Mapping[str, object]) -> None: ...
+
+    def get(self, namespace: tuple[str, ...], key: str) -> Mapping[str, object] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +147,7 @@ class NativeSpecialistComposition:
         profiles: ProfileCatalog,
         adapter: SpecialistTurnAdapter,
         evidence: FilesystemEvidenceStore,
+        turn_store: TurnJournalStore | None = None,
         protected_paths: tuple[Path, ...] = (),
         clock: Callable[[], datetime] = _utc_now,
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
@@ -148,6 +156,7 @@ class NativeSpecialistComposition:
         self.profiles = profiles
         self.adapter = adapter
         self.evidence = evidence
+        self.turn_store = turn_store
         implicit_protected = (profiles.root, Path(__file__).resolve().parent)
         self.protected_paths = tuple(
             path.resolve()
@@ -163,6 +172,9 @@ class NativeSpecialistComposition:
             raise CompositionError("Risk Review requires review_task with validation evidence")
         profile = self.profiles.load(request.role)
         workspace = self._validate_request(profile, request)
+        cached, execution_id = self._prepare_turn(request)
+        if cached is not None:
+            return cached
         before = self._snapshot_repository()
         try:
             execution = self.adapter.execute(
@@ -170,6 +182,7 @@ class NativeSpecialistComposition:
                 prompt=self._specialist_prompt(profile, request),
                 model=profile.model.name,
                 timeout_seconds=profile.timeout.seconds,
+                execution_id=execution_id,
                 reasoning_effort=profile.model.reasoning_effort,
                 output_schema=_codex_output_schema(_ROLE_OUTPUTS[request.role]),
             )
@@ -181,12 +194,14 @@ class NativeSpecialistComposition:
             workspace=workspace,
             before=before,
         )
-        return self._build_receipt(
+        receipt = self._build_receipt(
             request,
             execution,
             changed_files=changed,
             expected_model=profile.model.name,
         )
+        self._complete_turn(request, receipt)
+        return receipt
 
     def review(
         self,
@@ -250,27 +265,34 @@ class NativeSpecialistComposition:
             )
         profile = self.profiles.load(SpecialistRole.RISK_REVIEW)
         workspace = self._validate_request(profile, item)
-        before = self._snapshot_repository()
-        try:
-            execution = self.adapter.execute(
+        cached, execution_id = self._prepare_turn(item)
+        execution = None
+        if cached is not None:
+            receipt = cached
+        else:
+            before = self._snapshot_repository()
+            try:
+                execution = self.adapter.execute(
+                    item,
+                    prompt=self._specialist_prompt(profile, item),
+                    model=profile.model.name,
+                    timeout_seconds=profile.timeout.seconds,
+                    execution_id=execution_id,
+                    reasoning_effort=profile.model.reasoning_effort,
+                    output_schema=_codex_output_schema(RiskSpecialistOutput),
+                )
+            except Exception:
+                self._rollback_turn(before)
+                raise
+            self._enforce_mutation_boundary(request=item, workspace=workspace, before=before)
+            receipt = self._build_receipt(
                 item,
-                prompt=self._specialist_prompt(profile, item),
-                model=profile.model.name,
-                timeout_seconds=profile.timeout.seconds,
-                reasoning_effort=profile.model.reasoning_effort,
-                output_schema=_codex_output_schema(RiskSpecialistOutput),
+                execution,
+                changed_files=(),
+                expected_model=profile.model.name,
             )
-        except Exception:
-            self._rollback_turn(before)
-            raise
-        self._enforce_mutation_boundary(request=item, workspace=workspace, before=before)
-        receipt = self._build_receipt(
-            item,
-            execution,
-            changed_files=(),
-            expected_model=profile.model.name,
-        )
         if receipt.status is not ExecutionStatus.COMPLETED:
+            self._complete_turn(item, receipt)
             return RiskReviewExecution(receipt=receipt)
         if not isinstance(receipt.output, RiskSpecialistOutput):
             raise SpecialistOutputError("Risk Review did not produce a completed typed output")
@@ -278,14 +300,18 @@ class NativeSpecialistComposition:
         if isinstance(development.output, DevelopmentSpecialistOutput) and set(
             output.reviewed_changed_files
         ) != set(development.output.changed_files):
-            return RiskReviewExecution(
-                receipt=self._invalid_output_receipt(
-                    item,
-                    execution,
-                    receipt.evidence,
-                    error_code="risk-changed-files-mismatch",
+            if execution is None:
+                raise SpecialistOutputError(
+                    "cached Risk Review receipt has mismatched changed files"
                 )
+            invalid = self._invalid_output_receipt(
+                item,
+                execution,
+                receipt.evidence,
+                error_code="risk-changed-files-mismatch",
             )
+            self._complete_turn(item, invalid)
+            return RiskReviewExecution(receipt=invalid)
         decision = RiskReviewDecision(
             run_id=output.run_id,
             task_id=output.task_id,
@@ -301,7 +327,69 @@ class NativeSpecialistComposition:
             prohibited_actions_compliant=output.prohibited_actions_compliant,
             residual_risks=output.residual_risks,
         )
+        self._complete_turn(item, receipt)
         return RiskReviewExecution(receipt=receipt, decision=decision)
+
+    def _prepare_turn(
+        self, request: SpecialistInput
+    ) -> tuple[SpecialistReceipt | None, str | None]:
+        if self.turn_store is None:
+            return None, None
+        digest = hashlib.sha256(request.model_dump_json().encode("utf-8")).hexdigest()
+        namespace = ("system", "specialist-turns", request.run_id)
+        key = f"{request.role.value}:{request.attempt}"
+        existing = self.turn_store.get(namespace, key)
+        if existing is not None:
+            if existing.get("request_sha256") != digest:
+                raise CompositionError("persisted specialist turn differs from the replay request")
+            if existing.get("status") == "completed":
+                raw_receipt = existing.get("receipt")
+                if not isinstance(raw_receipt, Mapping):
+                    raise CompositionError("completed specialist turn omitted its receipt")
+                return SpecialistReceipt.model_validate_json(json.dumps(raw_receipt)), None
+            if existing.get("status") == "started":
+                return (
+                    SpecialistReceipt(
+                        run_id=request.run_id,
+                        task_id=request.task_id,
+                        repository_revision=request.repository_revision,
+                        created_at=request.created_at,
+                        receipt_id=f"interrupted-{request.role.value}-{request.attempt}",
+                        role=request.role,
+                        attempt=request.attempt,
+                        status=ExecutionStatus.INTERRUPTED,
+                        error_code="ambiguous-prior-execution",
+                    ),
+                    None,
+                )
+            raise CompositionError("persisted specialist turn has an invalid status")
+        execution_id = f"turn-{digest[:24]}"
+        self.turn_store.put(
+            namespace,
+            key,
+            {
+                "status": "started",
+                "request_sha256": digest,
+                "execution_id": execution_id,
+                "created_at": self.clock().isoformat(),
+            },
+        )
+        return None, execution_id
+
+    def _complete_turn(self, request: SpecialistInput, receipt: SpecialistReceipt) -> None:
+        if self.turn_store is None:
+            return
+        digest = hashlib.sha256(request.model_dump_json().encode("utf-8")).hexdigest()
+        self.turn_store.put(
+            ("system", "specialist-turns", request.run_id),
+            f"{request.role.value}:{request.attempt}",
+            {
+                "status": "completed",
+                "request_sha256": digest,
+                "receipt": receipt.model_dump(mode="json"),
+                "completed_at": self.clock().isoformat(),
+            },
+        )
 
     def _build_receipt(
         self,

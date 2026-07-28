@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -112,6 +115,163 @@ def test_only_validated_candidates_can_be_committed():
     record = memory.commit(SpecialistRole.DEVELOPMENT, item, validated=True)
     assert record.memory_id == "memory-001"
     assert record.source_artifact == artifact()
+
+
+def test_replayed_candidate_commit_is_idempotent():
+    store = DictStore()
+    memory = service(store)
+    item = candidate(
+        MemoryType.DEVELOPMENT_EPISODE,
+        ("profiles", "v20-development", "development-episodes"),
+    )
+
+    first = memory.commit(SpecialistRole.DEVELOPMENT, item, validated=True)
+    replayed = memory.commit(SpecialistRole.DEVELOPMENT, item, validated=True)
+
+    assert replayed == first
+    assert memory.history(SpecialistRole.DEVELOPMENT, MemoryType.DEVELOPMENT_EPISODE) == (first,)
+
+
+def test_replayed_candidate_repairs_missing_active_index():
+    class IndexCrashStore(DictStore):
+        fail_index = True
+
+        def put(self, namespace, key, value):
+            if self.fail_index and tuple(namespace)[:1] == ("_index",):
+                self.fail_index = False
+                raise RuntimeError("crash before active index")
+            super().put(namespace, key, value)
+
+    store = IndexCrashStore()
+    memory = service(store)
+    item = candidate(
+        MemoryType.DEVELOPMENT_EPISODE,
+        ("profiles", "v20-development", "development-episodes"),
+    )
+
+    with pytest.raises(RuntimeError, match="active index"):
+        memory.commit(SpecialistRole.DEVELOPMENT, item, validated=True)
+    repaired = memory.commit(SpecialistRole.DEVELOPMENT, item, validated=True)
+
+    assert memory.search(SpecialistRole.DEVELOPMENT, MemoryType.DEVELOPMENT_EPISODE) == (repaired,)
+
+
+def test_old_candidate_replay_does_not_replace_newer_active_memory():
+    class FirstIndexCrashStore(DictStore):
+        fail_index = True
+
+        def put(self, namespace, key, value):
+            if self.fail_index and tuple(namespace)[:1] == ("_index",):
+                self.fail_index = False
+                raise RuntimeError("first candidate index crash")
+            super().put(namespace, key, value)
+
+    store = FirstIndexCrashStore()
+    memory = service(store)
+    first = candidate(
+        MemoryType.PRODUCT_DECISION,
+        ("profiles", "v20-product", "product-decisions"),
+        content="First decision.",
+    )
+    second = candidate(
+        MemoryType.PRODUCT_DECISION,
+        ("profiles", "v20-product", "product-decisions"),
+        candidate_id="candidate-002",
+        content="Newer decision.",
+    )
+
+    with pytest.raises(RuntimeError, match="first candidate"):
+        memory.commit(SpecialistRole.PRODUCT, first, validated=True)
+    newer = memory.commit(SpecialistRole.PRODUCT, second, validated=True)
+    memory.commit(SpecialistRole.PRODUCT, first, validated=True)
+
+    assert memory.search(SpecialistRole.PRODUCT, MemoryType.PRODUCT_DECISION) == (newer,)
+
+
+def test_marker_only_replay_does_not_replace_newer_active_memory():
+    class FirstRecordCrashStore(DictStore):
+        fail_record = True
+
+        def put(self, namespace, key, value):
+            if self.fail_record and tuple(namespace) == (
+                "profiles",
+                "v20-product",
+                "product-decisions",
+            ):
+                self.fail_record = False
+                raise RuntimeError("first candidate record crash")
+            super().put(namespace, key, value)
+
+    store = FirstRecordCrashStore()
+    memory = service(store)
+    first = candidate(
+        MemoryType.PRODUCT_DECISION,
+        ("profiles", "v20-product", "product-decisions"),
+        content="First decision.",
+    )
+    second = candidate(
+        MemoryType.PRODUCT_DECISION,
+        ("profiles", "v20-product", "product-decisions"),
+        candidate_id="candidate-002",
+        content="Newer decision.",
+    )
+
+    with pytest.raises(RuntimeError, match="record crash"):
+        memory.commit(SpecialistRole.PRODUCT, first, validated=True)
+    newer = memory.commit(SpecialistRole.PRODUCT, second, validated=True)
+    memory.commit(SpecialistRole.PRODUCT, first, validated=True)
+
+    assert memory.search(SpecialistRole.PRODUCT, MemoryType.PRODUCT_DECISION) == (newer,)
+
+
+def test_hard_process_exit_between_memory_record_and_index_repairs_on_replay(tmp_path):
+    state = tmp_path / "state"
+    item = candidate(
+        MemoryType.DEVELOPMENT_EPISODE,
+        ("profiles", "v20-development", "development-episodes"),
+    )
+    script = f"""
+import os
+from pathlib import Path
+from vesper.platform.contracts import MemoryCandidate, SpecialistRole
+from vesper.platform.memory import MemoryService
+from vesper.platform.persistence import PlatformPaths, open_persistence
+
+class CrashAfterRecord:
+    def __init__(self, store):
+        self.store = store
+    def get(self, namespace, key):
+        return self.store.get(namespace, key)
+    def search(self, namespace):
+        return self.store.search(namespace)
+    def put(self, namespace, key, value):
+        self.store.put(namespace, key, value)
+        if tuple(namespace)[:1] == ("profiles",):
+            os._exit(29)
+
+item = MemoryCandidate.model_validate_json({item.model_dump_json()!r})
+with open_persistence(PlatformPaths.below(Path({str(state)!r}))) as persistence:
+    MemoryService(
+        CrashAfterRecord(persistence.store),
+        id_factory=lambda: "memory-001",
+    ).commit(SpecialistRole.DEVELOPMENT, item, validated=True)
+"""
+    completed = subprocess.run([sys.executable, "-c", script], check=False)
+    assert completed.returncode == 29
+
+    with open_persistence(PlatformPaths.below(Path(state))) as persistence:
+        memory = MemoryService(
+            persistence.store,
+            id_factory=lambda: "must-not-be-used",
+            clock=lambda: NOW,
+        )
+        repaired = memory.commit(SpecialistRole.DEVELOPMENT, item, validated=True)
+
+        assert repaired.memory_id == "memory-001"
+        assert memory.search(
+            SpecialistRole.DEVELOPMENT,
+            MemoryType.DEVELOPMENT_EPISODE,
+        ) == (repaired,)
 
 
 def test_profile_namespaces_are_isolated():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from vesper.platform.contracts import (
 )
 from vesper.platform.evidence import FilesystemEvidenceStore
 from vesper.platform.profiles import ProfileCatalog
+from vesper.platform.persistence import PlatformPaths, open_persistence
 
 
 NOW = datetime(2026, 7, 27, 16, 0, tzinfo=timezone.utc)
@@ -104,6 +106,17 @@ class FakeCodexAdapter:
         return codex_receipt(item, json.dumps(next(self.outputs)))
 
 
+class DictStore:
+    def __init__(self):
+        self.values = {}
+
+    def put(self, namespace, key, value):
+        self.values[(tuple(namespace), key)] = dict(value)
+
+    def get(self, namespace, key):
+        return self.values.get((tuple(namespace), key))
+
+
 def assert_codex_strict_objects(value):
     if isinstance(value, dict):
         assert "default" not in value
@@ -141,12 +154,13 @@ def test_strict_schema_conversion_preserves_fields_named_like_schema_keywords():
     assert schema["properties"]["default"] == {"type": "string"}
 
 
-def composition(tmp_path, adapter, *, protected_paths=()):
+def composition(tmp_path, adapter, *, protected_paths=(), turn_store=None):
     return NativeSpecialistComposition(
         repository_root=tmp_path,
         profiles=ProfileCatalog(PROFILES_ROOT),
         adapter=adapter,
         evidence=FilesystemEvidenceStore(tmp_path / ".state" / "evidence"),
+        turn_store=turn_store,
         protected_paths=protected_paths,
         clock=lambda: NOW,
         id_factory=lambda: "candidate-001",
@@ -188,6 +202,115 @@ def test_product_loads_approved_profile_and_emits_typed_receipt(tmp_path):
     assert_codex_strict_objects(options["output_schema"])
     assert 'memory_type="product-decision"' in options["prompt"]
     assert 'content="Product routed task to v20-development."' in options["prompt"]
+
+
+def test_completed_specialist_turn_replays_persisted_receipt_without_redispatch(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    store = DictStore()
+    adapter = FakeCodexAdapter(
+        [
+            {
+                "schema_version": "1.0",
+                "run_id": "run-001",
+                "task_id": "task-001",
+                "repository_revision": "b5263eb",
+                "created_at": "2026-07-27T16:00:00Z",
+                "role": "v20-product",
+                "attempt": 1,
+                "route": "v20-development",
+                "summary": "Bounded.",
+                "development_instructions": "Change only the workspace.",
+                "acceptance_checks": ["git-diff-check"],
+                "memory": [],
+            }
+        ]
+    )
+    runtime = composition(tmp_path, adapter, turn_store=store)
+    item = request(workspace, SpecialistRole.PRODUCT)
+
+    first = runtime.execute(item)
+    replayed = runtime.execute(item)
+
+    assert replayed == first
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0][1]["execution_id"].startswith("turn-")
+
+
+def test_started_uncommitted_turn_is_never_dispatched_twice(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    store = DictStore()
+
+    class CrashingAdapter:
+        calls = 0
+
+        def execute(self, _item, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("controller lost after dispatch")
+
+    adapter = CrashingAdapter()
+    runtime = composition(tmp_path, adapter, turn_store=store)
+    item = request(workspace, SpecialistRole.PRODUCT)
+
+    with pytest.raises(RuntimeError, match="lost after dispatch"):
+        runtime.execute(item)
+    replayed = runtime.execute(item)
+
+    assert replayed.status is ExecutionStatus.INTERRUPTED
+    assert replayed.error_code == "ambiguous-prior-execution"
+    assert adapter.calls == 1
+
+
+def test_hard_process_exit_persists_started_turn_and_prevents_redispatch(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    workspace = repository / "task"
+    workspace.mkdir()
+    state = tmp_path / "state"
+    item = request(workspace, SpecialistRole.PRODUCT)
+    script = f"""
+import os
+from pathlib import Path
+from vesper.platform.composition import NativeSpecialistComposition
+from vesper.platform.contracts import SpecialistInput
+from vesper.platform.persistence import PlatformPaths, open_persistence
+from vesper.platform.profiles import ProfileCatalog
+
+class CrashAdapter:
+    def execute(self, _item, **_kwargs):
+        os._exit(23)
+
+item = SpecialistInput.model_validate_json({item.model_dump_json()!r})
+with open_persistence(PlatformPaths.below(Path({str(state)!r}))) as persistence:
+    NativeSpecialistComposition(
+        repository_root=Path({str(repository)!r}),
+        profiles=ProfileCatalog(Path({str(PROFILES_ROOT)!r})),
+        adapter=CrashAdapter(),
+        evidence=persistence.evidence,
+        turn_store=persistence.store,
+    ).execute(item)
+"""
+
+    completed = subprocess.run([sys.executable, "-c", script], check=False)
+    assert completed.returncode == 23
+
+    class NeverAdapter:
+        def execute(self, _item, **_kwargs):
+            raise AssertionError("ambiguous turn was dispatched twice")
+
+    with open_persistence(PlatformPaths.below(state)) as persistence:
+        replayed = NativeSpecialistComposition(
+            repository_root=repository,
+            profiles=ProfileCatalog(PROFILES_ROOT),
+            adapter=NeverAdapter(),
+            evidence=persistence.evidence,
+            turn_store=persistence.store,
+            clock=lambda: NOW,
+        ).execute(item)
+
+    assert replayed.status is ExecutionStatus.INTERRUPTED
+    assert replayed.error_code == "ambiguous-prior-execution"
 
 
 @pytest.mark.parametrize(

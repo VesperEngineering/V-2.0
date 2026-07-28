@@ -36,6 +36,10 @@ class FakeService:
         self.calls.append(("approvals",))
         return {"pending": [{"run_id": "run-001", "status": "awaiting-approval"}]}
 
+    def list_active_runs(self):
+        self.calls.append(("active",))
+        return {"active": [{"run_id": "run-001", "status": "running"}]}
+
     def approve_run(self, run_id, checkpoint_id, operator_id, reason):
         self.calls.append(("approve", run_id, checkpoint_id, operator_id, reason))
         return {"run_id": run_id, "status": "awaiting-resume"}
@@ -83,6 +87,7 @@ def cli():
         (["receipts", "run-001"], ("receipts", "run-001")),
         (["evidence", "run-001"], ("evidence", "run-001")),
         (["approvals"], ("approvals",)),
+        (["active"], ("active",)),
         (
             [
                 "approve",
@@ -123,7 +128,12 @@ def test_cli_routes_explicit_commands_to_injected_service(cli, arguments, expect
     assert result.exit_code == 0, result.output
     assert service.calls == [expected_call]
     assert len(configs) == 1
-    assert '"status"' in result.output or arguments[0] in {"receipts", "evidence", "approvals"}
+    assert '"status"' in result.output or arguments[0] in {
+        "receipts",
+        "evidence",
+        "approvals",
+        "active",
+    }
 
 
 def test_read_only_help_does_not_construct_service(cli):
@@ -134,6 +144,7 @@ def test_read_only_help_does_not_construct_service(cli):
     assert "create" in result.output
     assert "approve" in result.output
     assert "cancel" in result.output
+    assert "active" in result.output
     assert service.calls == []
     assert configs == []
 

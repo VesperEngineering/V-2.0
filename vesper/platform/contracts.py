@@ -37,6 +37,7 @@ class SandboxMode(StrEnum):
 class ExecutionStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
     USAGE_LIMITED = "usage-limited"

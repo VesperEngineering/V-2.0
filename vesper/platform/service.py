@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -18,8 +19,10 @@ from .contracts import (
     HumanApprovalRequest,
     RunStatus,
     SpecialistReceipt,
+    SpecialistRole,
     TaskRequest,
 )
+from .control import RuntimeControl
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .profiles import ProfileCatalog
@@ -46,7 +49,7 @@ def _utc_now() -> datetime:
 
 
 @contextmanager
-def _repository_lease(repository_root: Path):
+def _repository_lease(repository_root: Path, *, wait_seconds: float = 0):
     lock_path = repository_root / ".git" / "v20-controller.lock"
     try:
         handle = lock_path.open("a+b")
@@ -58,19 +61,25 @@ def _repository_lease(repository_root: Path):
             handle.write(b"\0")
             handle.flush()
         handle.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
 
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise SpecialistRuntimeUnavailable(
-                "another controller operation owns the repository lease"
-            ) from exc
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise SpecialistRuntimeUnavailable(
+                        "another controller operation owns the repository lease"
+                    ) from exc
+                time.sleep(0.05)
+                handle.seek(0)
         locked = True
         yield
     finally:
@@ -121,8 +130,10 @@ class LocalPlatformService:
         approved_workspace_relative_paths: tuple[Path, ...] = (M2_APPROVED_WORKSPACE,),
         clock: Callable[[], datetime] = _utc_now,
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
+        cancellation_wait_seconds: float = 360,
     ) -> None:
         self.paths = paths
+        self.control = RuntimeControl(paths.root / "control")
         self._controller_factory = controller_factory
         self._profiles_root = (
             Path("profiles/native").resolve() if profiles_root is None else profiles_root.resolve()
@@ -134,6 +145,7 @@ class LocalPlatformService:
         self._approved_workspace_relative_paths = approved_workspace_relative_paths
         self._clock = clock
         self._id_factory = id_factory
+        self._cancellation_wait_seconds = cancellation_wait_seconds
 
     def create_run(
         self,
@@ -202,20 +214,35 @@ class LocalPlatformService:
             repository_root=str(workspace_path),
             acceptance_checks=checks,
         )
-        with open_persistence(self.paths) as persistence:
-            if repository_root is not None:
-                persistence.store.put(
-                    RUN_RUNTIME_NAMESPACE,
-                    task.run_id,
-                    {
-                        "repository_root": str(repository_root),
-                        "workspace": str(workspace_path),
-                        "repository_revision": repository_revision,
-                        "profiles_root": str(self._profiles_root),
-                        "profile_fingerprints": profile_fingerprints,
-                    },
-                )
-            view = self._controller(persistence, repository_root=repository_root).start(task)
+        self.control.register_run(
+            {
+                "run_id": task.run_id,
+                "task_id": task.task_id,
+                "repository_revision": repository_revision,
+                "workspace": str(workspace_path),
+                "repository_root": None if repository_root is None else str(repository_root),
+                "created_at": task.created_at.isoformat(),
+            }
+        )
+        try:
+            with open_persistence(self.paths) as persistence:
+                if repository_root is not None:
+                    persistence.store.put(
+                        RUN_RUNTIME_NAMESPACE,
+                        task.run_id,
+                        {
+                            "repository_root": str(repository_root),
+                            "workspace": str(workspace_path),
+                            "repository_revision": repository_revision,
+                            "profiles_root": str(self._profiles_root),
+                            "profile_fingerprints": profile_fingerprints,
+                        },
+                    )
+                view = self._controller(persistence, repository_root=repository_root).start(task)
+        except Exception:
+            self.control.set_run_status(task.run_id, "interrupted")
+            raise
+        self.control.set_run_status(task.run_id, view.state.status.value)
         return self._view_payload(view)
 
     def inspect_run(self, run_id: str) -> dict[str, object]:
@@ -227,7 +254,36 @@ class LocalPlatformService:
         with open_persistence(self.paths) as persistence:
             with self._lease_for_run(persistence, run_id):
                 view = self._controller_for_run(persistence, run_id).resume(run_id)
+                self.control.set_run_status(run_id, view.state.status.value)
         return self._view_payload(view)
+
+    def list_active_runs(self) -> dict[str, object]:
+        active = []
+        with open_persistence(self.paths) as persistence:
+            for raw in self.control.list_active_runs():
+                item = dict(raw)
+                if item.get("active_execution") is None:
+                    run_id = str(item["run_id"])
+                    try:
+                        view = self._controller(persistence).inspect(run_id)
+                    except RuntimeError:
+                        item["status"] = RunStatus.INTERRUPTED.value
+                    else:
+                        item["status"] = view.state.status.value
+                if (
+                    item.get("status")
+                    in {
+                        "running",
+                        RunStatus.INTERRUPTED.value,
+                        RunStatus.PRODUCT.value,
+                        RunStatus.DEVELOPMENT.value,
+                        RunStatus.VALIDATION.value,
+                        RunStatus.RISK_REVIEW.value,
+                    }
+                    or item.get("active_execution") is not None
+                ):
+                    active.append(item)
+        return {"active": active}
 
     def list_receipts(self, run_id: str) -> dict[str, object]:
         with open_persistence(self.paths) as persistence:
@@ -293,6 +349,7 @@ class LocalPlatformService:
                 )
                 controller.record_decision(run_id, decision)
                 payload = self._view_payload(controller.inspect(run_id))
+                self.control.set_run_status(run_id, str(payload["status"]))
         payload["resume_required"] = True
         return payload
 
@@ -316,12 +373,19 @@ class LocalPlatformService:
                 )
                 controller.record_decision(run_id, decision)
                 rejected = controller.resume(run_id)
+                self.control.set_run_status(run_id, rejected.state.status.value)
         return self._view_payload(rejected)
 
     def cancel_run(self, run_id: str, reason: str) -> dict[str, object]:
+        self.control.request_cancel(run_id, reason)
         with open_persistence(self.paths) as persistence:
-            with self._lease_for_run(persistence, run_id):
+            with self._lease_for_run(
+                persistence,
+                run_id,
+                wait_seconds=self._cancellation_wait_seconds,
+            ):
                 view = self._controller_for_run(persistence, run_id).cancel(run_id, reason)
+                self.control.set_run_status(run_id, view.state.status.value)
         return self._view_payload(view)
 
     def _controller(
@@ -346,6 +410,7 @@ class LocalPlatformService:
                 else DockerCodexRuntime(
                     repository_root=repository_root,
                     approved_models=models,
+                    control=self.control,
                     clock=self._clock,
                 )
             )
@@ -354,6 +419,7 @@ class LocalPlatformService:
                 profiles=profiles,
                 adapter=adapter,
                 evidence=persistence.evidence,
+                turn_store=persistence.store,
                 protected_paths=tuple(
                     repository_root / relative / "README.md"
                     for relative in self._approved_workspace_relative_paths
@@ -439,7 +505,13 @@ class LocalPlatformService:
         return self._controller(persistence, repository_root=repository_root)
 
     @contextmanager
-    def _lease_for_run(self, persistence: PlatformPersistence, run_id: str):
+    def _lease_for_run(
+        self,
+        persistence: PlatformPersistence,
+        run_id: str,
+        *,
+        wait_seconds: float = 0,
+    ):
         if self._controller_factory is not None:
             yield
             return
@@ -453,7 +525,33 @@ class LocalPlatformService:
             raise SpecialistRuntimeUnavailable(
                 "persisted run runtime metadata is malformed"
             ) from exc
-        with _repository_lease(repository_root):
+        with _repository_lease(repository_root, wait_seconds=wait_seconds):
+            active = self.control.active_execution(run_id)
+            if active is not None:
+                execution_id = str(active.get("execution_id", ""))
+                sandbox_name = str(active.get("sandbox_name", ""))
+                if not execution_id or not sandbox_name:
+                    raise SpecialistRuntimeUnavailable(
+                        "persisted active execution metadata is malformed"
+                    )
+                role = str(active.get("role", ""))
+                if (
+                    active.get("run_id") != run_id
+                    or role not in {item.value for item in SpecialistRole}
+                    or sandbox_name != DockerCodexRuntime.expected_sandbox_name(role, execution_id)
+                ):
+                    raise SpecialistRuntimeUnavailable(
+                        "persisted active execution sandbox identity is invalid"
+                    )
+                if self._adapter_factory is not None:
+                    raise SpecialistRuntimeUnavailable(
+                        "custom runtime must reconcile its active sandbox before resume"
+                    )
+                DockerCodexRuntime(
+                    repository_root=repository_root,
+                    control=self.control,
+                ).reconcile_sandbox(sandbox_name)
+                self.control.clear_active(run_id, execution_id)
             yield
 
     def _validate_production_boundaries(

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +26,7 @@ from vesper.platform.contracts import (
     ValidationResult,
 )
 from vesper.platform.persistence import PlatformPaths, open_persistence
+from vesper.platform.sandbox_runtime import DockerCodexRuntime
 from vesper.platform.cli import build_app
 from vesper.platform.service import (
     LocalPlatformService,
@@ -238,6 +242,32 @@ def test_service_reopens_status_receipts_evidence_and_pending_approvals(tmp_path
         "risk",
     }
     assert approvals["pending"][0]["run_id"] == "run-001"
+
+
+def test_active_listing_is_read_only_when_graph_has_terminal_status(tmp_path):
+    platform = service(tmp_path, ("run-001", "task-001"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    platform.create_run("Build slice", str(workspace), "abc123")
+    platform.control.set_run_status("run-001", "running")
+
+    active = platform.list_active_runs()
+
+    assert active == {"active": []}
+    assert platform.control.run_record("run-001")["status"] == "running"
+
+
+def test_inspection_does_not_overwrite_live_control_status(tmp_path):
+    platform = service(tmp_path, ("run-001", "task-001"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    platform.create_run("Build slice", str(workspace), "abc123")
+    platform.control.set_run_status("run-001", "running")
+
+    inspected = platform.inspect_run("run-001")
+
+    assert inspected["status"] == RunStatus.AWAITING_APPROVAL.value
+    assert platform.control.run_record("run-001")["status"] == "running"
 
 
 def test_service_cancel_is_explicit_and_persisted(tmp_path):
@@ -507,6 +537,181 @@ def test_repository_lease_rejects_concurrent_controller_operation(tmp_path):
         with pytest.raises(SpecialistRuntimeUnavailable, match="owns the repository lease"):
             with _repository_lease(repository):
                 pass
+
+
+@pytest.mark.parametrize("custom_runtime", (False, True))
+def test_stale_active_record_is_preserved_when_reconciliation_is_unsafe(
+    tmp_path,
+    custom_runtime,
+):
+    repository = tmp_path / "repo"
+    (repository / ".git").mkdir(parents=True)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        adapter_factory=(lambda _root, _models: object()) if custom_runtime else None,
+    )
+    execution_id = "execution-001"
+    sandbox_name = DockerCodexRuntime.expected_sandbox_name(
+        SpecialistRole.DEVELOPMENT.value,
+        execution_id,
+    )
+    if not custom_runtime:
+        sandbox_name = "v20-unrelated-sandbox"
+    platform.control.mark_active(
+        run_id="run-001",
+        execution_id=execution_id,
+        sandbox_name=sandbox_name,
+        role=SpecialistRole.DEVELOPMENT.value,
+        attempt=1,
+    )
+
+    persistence = SimpleNamespace(
+        store=SimpleNamespace(get=lambda _namespace, _key: {"repository_root": str(repository)})
+    )
+    expected = "custom runtime" if custom_runtime else "sandbox identity"
+    with pytest.raises(SpecialistRuntimeUnavailable, match=expected):
+        with platform._lease_for_run(persistence, "run-001"):
+            pass
+
+    assert platform.control.active_execution("run-001") is not None
+
+
+def test_active_record_must_match_requested_run_id(tmp_path):
+    repository = tmp_path / "repo"
+    (repository / ".git").mkdir(parents=True)
+    platform = LocalPlatformService(PlatformPaths.below(tmp_path / "state"))
+    execution_id = "execution-001"
+    role = SpecialistRole.PRODUCT.value
+    platform.control.mark_active(
+        run_id="run-001",
+        execution_id=execution_id,
+        sandbox_name=DockerCodexRuntime.expected_sandbox_name(role, execution_id),
+        role=role,
+        attempt=1,
+    )
+    active_path = platform.control.root / "run-001" / "active.json"
+    payload = json.loads(active_path.read_text(encoding="utf-8"))
+    payload["run_id"] = "different-run"
+    active_path.write_text(json.dumps(payload), encoding="utf-8")
+    persistence = SimpleNamespace(
+        store=SimpleNamespace(get=lambda _namespace, _key: {"repository_root": str(repository)})
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="sandbox identity"):
+        with platform._lease_for_run(persistence, "run-001"):
+            pass
+
+    assert platform.control.active_execution("run-001") is not None
+
+
+def test_cancel_run_signals_active_sandbox_from_another_controller_thread(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    profiles = repository / "profiles" / "native"
+    shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    workspace = repository / "exercise"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("bounded\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=V20 Test",
+            "-c",
+            "user.email=v20-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    started = threading.Event()
+
+    class BlockingAdapter:
+        def execute(self, item, **kwargs):
+            started.set()
+            cancellation = kwargs["cancellation"]
+            while not cancellation.is_set():
+                time.sleep(0.001)
+            return CodexExecutionReceipt(
+                run_id=item.run_id,
+                task_id=item.task_id,
+                repository_revision=item.repository_revision,
+                created_at=item.created_at,
+                execution_id=kwargs["execution_id"],
+                role=item.role,
+                attempt=item.attempt,
+                status=ExecutionStatus.CANCELLED,
+                sandbox=item.permissions.sandbox,
+                model=kwargs["model"],
+                workspace=item.workspace,
+                approval_mode="deny-all",
+                authentication_type="chatgpt",
+                permission_profile="docker-one-shot",
+                started_at=NOW,
+                finished_at=NOW,
+                error_code="cancelled",
+            )
+
+    def runner(command, _workspace, _timeout):
+        marker = command[1] if len(command) > 1 else None
+        stdout = '{"sandboxes":[]}' if marker == "ls" else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    identifiers = iter(("run-001", "task-001"))
+    platform = None
+
+    def adapter_factory(repository_root, models):
+        return DockerCodexRuntime(
+            repository_root=repository_root,
+            approved_models=models,
+            executable="sbx-test",
+            runner=runner,
+            adapter_factory=lambda _name: BlockingAdapter(),
+            control=platform.control,
+            clock=lambda: NOW,
+        )
+
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        profiles_root=profiles,
+        adapter_factory=adapter_factory,
+        require_disposable_worktree=False,
+        approved_workspace_relative_paths=(Path("exercise"),),
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    create_result = {}
+    worker = threading.Thread(
+        target=lambda: create_result.setdefault(
+            "payload",
+            platform.create_run("Wait for cancellation.", str(workspace), revision),
+        )
+    )
+    worker.start()
+    assert started.wait(timeout=5)
+
+    active = platform.list_active_runs()["active"]
+    cancelled = platform.cancel_run("run-001", "operator cancelled active turn")
+    worker.join(timeout=5)
+
+    assert active[0]["run_id"] == "run-001"
+    assert active[0]["active_execution"]["role"] == "v20-product"
+    assert not worker.is_alive()
+    assert cancelled["status"] == RunStatus.CANCELLED.value
+    assert create_result["payload"]["status"] == RunStatus.CANCELLED.value
+    assert platform.list_active_runs() == {"active": []}
 
 
 def test_read_only_inspection_survives_removed_worktree_and_profile_catalog(tmp_path):
