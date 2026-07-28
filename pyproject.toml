@@ -36,6 +36,7 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "local_codex: opt-in integration tests that invoke the locally authenticated Codex SDK",
+    "local_opencode: opt-in integration tests that invoke a locally usable OpenCode provider",
 ]
 
 [tool.ruff]

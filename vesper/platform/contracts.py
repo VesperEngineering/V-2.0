@@ -46,6 +46,8 @@ class ExecutionStatus(StrEnum):
 
 class RunStatus(StrEnum):
     CREATED = "created"
+    DATA_RESEARCH = "data-research"
+    MODEL_EVALUATION = "model-evaluation"
     PRODUCT = "product"
     DEVELOPMENT = "development"
     VALIDATION = "validation"
@@ -147,6 +149,71 @@ class TaskRequest(RunContract):
     objective: NonEmptyStr
     repository_root: RelativePath
     acceptance_checks: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+
+
+class DataResearchResult(RunContract):
+    available: bool
+    database_path: RelativePath
+    table_name: NonEmptyStr
+    row_count: Annotated[int, Field(ge=0)]
+    ticker_count: Annotated[int, Field(ge=0)]
+    start_date: NonEmptyStr | None = None
+    end_date: NonEmptyStr | None = None
+    required_columns: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    null_price_rows: Annotated[int, Field(ge=0)]
+    invalid_date_rows: Annotated[int, Field(ge=0)]
+    split_adjustments_path: RelativePath
+    split_adjustments_sha256: Sha256 | None = None
+    warnings: tuple[NonEmptyStr, ...] = ()
+    evidence: Annotated[tuple[EvidenceArtifactRef, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def result_is_consistent(self) -> DataResearchResult:
+        _evidence_matches_authority(self, self.evidence)
+        if self.available and (
+            self.row_count == 0
+            or self.ticker_count == 0
+            or self.start_date is None
+            or self.end_date is None
+            or self.invalid_date_rows != 0
+        ):
+            raise ValueError("available data research requires nonempty coverage")
+        return self
+
+
+class ModelEvaluationResult(RunContract):
+    available: bool
+    configured_model_path: RelativePath
+    metadata_path: RelativePath
+    actual_sha256: Sha256 | None = None
+    expected_sha256: Sha256 | None = None
+    hash_matches: bool | None = None
+    label_horizon: Annotated[int, Field(ge=1)] | None = None
+    train_ic: Annotated[float, Field(ge=-1, le=1)] | None = None
+    out_of_sample_ic: Annotated[float, Field(ge=-1, le=1)] | None = None
+    train_samples: Annotated[int, Field(ge=1)] | None = None
+    test_samples: Annotated[int, Field(ge=1)] | None = None
+    evaluation_passed: bool
+    warnings: tuple[NonEmptyStr, ...] = ()
+    evidence: Annotated[tuple[EvidenceArtifactRef, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def result_is_consistent(self) -> ModelEvaluationResult:
+        _evidence_matches_authority(self, self.evidence)
+        complete = (
+            self.available
+            and self.actual_sha256 is not None
+            and self.expected_sha256 is not None
+            and self.hash_matches is True
+            and self.label_horizon is not None
+            and self.train_ic is not None
+            and self.out_of_sample_ic is not None
+            and self.train_samples is not None
+            and self.test_samples is not None
+        )
+        if self.evaluation_passed != complete:
+            raise ValueError("model evaluation status must match integrity and metadata checks")
+        return self
 
 
 class SpecialistInput(RunContract):
@@ -347,7 +414,7 @@ class CodexExecutionReceipt(RunContract):
     model: NonEmptyStr | None = None
     workspace: RelativePath | None = None
     approval_mode: Literal["deny-all"] | None = None
-    authentication_type: Literal["chatgpt"] | None = None
+    authentication_type: NonEmptyStr | None = None
     permission_profile: NonEmptyStr | None = None
     started_at: AwareDatetime
     finished_at: AwareDatetime
@@ -432,6 +499,8 @@ class GraphState(RunContract):
     task: TaskRequest | None = None
     status: RunStatus
     current_role: SpecialistRole | None = None
+    data_research: DataResearchResult | None = None
+    model_evaluation: ModelEvaluationResult | None = None
     product_output: ProductSpecialistOutput | None = None
     correction_attempts: tuple[CorrectionAttempt, ...] = ()
     validation: ValidationResult | None = None
@@ -449,6 +518,18 @@ class GraphState(RunContract):
     def enforce_authority_and_budget(self) -> GraphState:
         if len(self.correction_attempts) > MAX_CORRECTION_ATTEMPTS:
             raise ValueError("correction attempts cannot exceed three")
+        if self.status in {
+            RunStatus.PRODUCT,
+            RunStatus.DEVELOPMENT,
+            RunStatus.VALIDATION,
+            RunStatus.RISK_REVIEW,
+            RunStatus.AWAITING_APPROVAL,
+            RunStatus.ACCEPTED,
+        }:
+            if self.data_research is None or not self.data_research.available:
+                raise ValueError("post-research execution requires available Data Research")
+            if self.model_evaluation is None or not self.model_evaluation.evaluation_passed:
+                raise ValueError("post-research execution requires a passing Model Evaluation")
         if self.status is RunStatus.ACCEPTED:
             if self.validation is None or not self.validation.passed:
                 raise ValueError("acceptance requires deterministic validation")

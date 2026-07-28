@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -161,9 +162,39 @@ def test_cli_does_not_expose_host_mcp_configuration_flags(cli):
     assert configs == []
 
 
+def test_cli_passes_explicit_opencode_runtime_boundary_to_service(cli):
+    runner, app, service, configs = cli
+
+    result = runner.invoke(
+        app,
+        [
+            "--runtime",
+            "opencode",
+            "--model",
+            "openrouter/approved-model",
+            "--credential-environment-key",
+            "OPENROUTER_API_KEY",
+            "--allow-repository-root-workspace",
+            "--research-data-root",
+            "D:/vesper/vesper_data/massive",
+            "status",
+            "run-001",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert service.calls == [("status", "run-001")]
+    assert configs[0].runtime == "opencode"
+    assert configs[0].model == "openrouter/approved-model"
+    assert configs[0].credential_environment_key == "OPENROUTER_API_KEY"
+    assert configs[0].allow_repository_root_workspace is True
+    assert configs[0].research_data_root == Path("D:/vesper/vesper_data/massive")
+
+
 def test_default_state_and_evidence_paths_are_outside_the_current_repository(monkeypatch, tmp_path):
     local_app_data = tmp_path / "local-app-data"
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.chdir(tmp_path)
     service = FakeService()
     configs = []
 
@@ -191,6 +222,9 @@ def test_default_state_and_evidence_paths_are_outside_the_current_repository(mon
     assert service.calls
     assert configs[0].state_db.is_relative_to(local_app_data)
     assert configs[0].evidence_root.is_relative_to(local_app_data)
+    assert configs[0].research_data_root == (
+        Path(__file__).resolve().parents[2] / "vesper" / "data" / "massive"
+    )
 
 
 @pytest.mark.parametrize("command", ("approve", "reject"))

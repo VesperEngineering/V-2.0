@@ -41,10 +41,12 @@ def main() -> None:
 
     from vesper.platform.contracts import (
         ApprovalDecision,
+        DataResearchResult,
         DevelopmentSpecialistOutput,
         EvidenceArtifactRef,
         ExecutionStatus,
         HumanApprovalDecision,
+        ModelEvaluationResult,
         ProductSpecialistOutput,
         RiskDecision,
         RiskReviewDecision,
@@ -137,8 +139,52 @@ def main() -> None:
                 ),
             )
 
+    class DataResearcher:
+        def research(self, request):
+            return DataResearchResult(
+                run_id=request.run_id,
+                task_id=request.task_id,
+                repository_revision=request.repository_revision,
+                created_at=request.created_at,
+                available=True,
+                database_path="vesper/data/massive/sp500/sp500_ohlcv.sqlite",
+                table_name="sp500_ohlcv",
+                row_count=100,
+                ticker_count=10,
+                start_date="2020-01-02",
+                end_date="2026-07-27",
+                required_columns=("ticker", "date", "open", "high", "low", "close", "volume"),
+                null_price_rows=0,
+                invalid_date_rows=0,
+                split_adjustments_path="vesper/data/massive/split_adjustments.json",
+                split_adjustments_sha256="d" * 64,
+                evidence=(evidence(request, "data-research"),),
+            )
+
+    class ModelEvaluator:
+        def evaluate(self, request):
+            return ModelEvaluationResult(
+                run_id=request.run_id,
+                task_id=request.task_id,
+                repository_revision=request.repository_revision,
+                created_at=request.created_at,
+                available=True,
+                configured_model_path="models/xgb_ranker.json",
+                metadata_path="models/xgb_ranker.metadata.json",
+                actual_sha256="e" * 64,
+                expected_sha256="e" * 64,
+                hash_matches=True,
+                label_horizon=5,
+                train_ic=0.04,
+                out_of_sample_ic=0.03,
+                train_samples=100,
+                test_samples=50,
+                evaluation_passed=True,
+                evidence=(evidence(request, "model-evaluation"),),
+            )
+
     class Reviewer:
-        def review(self, request, development_receipt, validation):
+        def review(self, request, development_receipt, validation, **_research):
             return RiskReviewDecision(
                 run_id=request.run_id,
                 task_id=request.task_id,
@@ -168,6 +214,8 @@ def main() -> None:
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=Specialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=Validator(),
             risk_reviewer=Reviewer(),
             workspace_hasher=lambda _workspace: "b" * 64,

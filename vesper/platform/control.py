@@ -12,7 +12,16 @@ from typing import Mapping, Protocol
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ACTIVE_RUN_STATUSES = frozenset(
-    {"running", "interrupted", "product", "development", "validation", "risk-review"}
+    {
+        "running",
+        "interrupted",
+        "data-research",
+        "model-evaluation",
+        "product",
+        "development",
+        "validation",
+        "risk-review",
+    }
 )
 
 
@@ -70,6 +79,32 @@ class RuntimeControl:
                 "role": role,
                 "attempt": attempt,
                 "process_id": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    def mark_active_process(
+        self,
+        *,
+        run_id: str,
+        execution_id: str,
+        runtime: str,
+        process_id: int,
+        process_identity: str,
+        role: str,
+        attempt: int,
+    ) -> None:
+        self._write(
+            run_id,
+            "active.json",
+            {
+                "run_id": run_id,
+                "execution_id": execution_id,
+                "runtime": runtime,
+                "process_id": process_id,
+                "process_identity": process_identity,
+                "role": role,
+                "attempt": attempt,
                 "started_at": datetime.now(timezone.utc).isoformat(),
             },
         )

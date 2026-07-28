@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -13,9 +15,11 @@ import pytest
 
 from vesper.platform.contracts import (
     CodexExecutionReceipt,
+    DataResearchResult,
     DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
     ExecutionStatus,
+    ModelEvaluationResult,
     ProductSpecialistOutput,
     RiskDecision,
     RiskReviewDecision,
@@ -26,6 +30,7 @@ from vesper.platform.contracts import (
     ValidationResult,
 )
 from vesper.platform.persistence import PlatformPaths, open_persistence
+from vesper.platform.opencode import _process_identity
 from vesper.platform.sandbox_runtime import DockerCodexRuntime
 from vesper.platform.cli import build_app
 from vesper.platform.service import (
@@ -39,6 +44,19 @@ from typer.testing import CliRunner
 
 NOW = datetime(2026, 7, 27, 16, 0, tzinfo=timezone.utc)
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def copy_model_evaluation_fixture(repository: Path) -> None:
+    config = repository / "config"
+    config.mkdir(exist_ok=True)
+    (config / "settings.yaml").write_text(
+        "strategy:\n  params:\n    model_path: models/xgb_ranker.json\n",
+        encoding="utf-8",
+    )
+    models = repository / "models"
+    models.mkdir(exist_ok=True)
+    shutil.copy2(REPOSITORY_ROOT / "models" / "xgb_ranker.json", models)
+    shutil.copy2(REPOSITORY_ROOT / "models" / "xgb_ranker.metadata.json", models)
 
 
 def evidence(request, name):
@@ -117,7 +135,7 @@ class Validator:
 
 
 class Reviewer:
-    def review(self, request, development_receipt, validation):
+    def review(self, request, development_receipt, validation, **_research):
         return RiskReviewDecision(
             run_id=request.run_id,
             task_id=request.task_id,
@@ -133,11 +151,59 @@ class Reviewer:
         )
 
 
+class DataResearcher:
+    def research(self, request):
+        return DataResearchResult(
+            run_id=request.run_id,
+            task_id=request.task_id,
+            repository_revision=request.repository_revision,
+            created_at=request.created_at,
+            available=True,
+            database_path="vesper/data/massive/sp500/sp500_ohlcv.sqlite",
+            table_name="sp500_ohlcv",
+            row_count=100,
+            ticker_count=10,
+            start_date="2020-01-02",
+            end_date="2026-07-27",
+            required_columns=("ticker", "date", "open", "high", "low", "close", "volume"),
+            null_price_rows=0,
+            invalid_date_rows=0,
+            split_adjustments_path="vesper/data/massive/split_adjustments.json",
+            split_adjustments_sha256="c" * 64,
+            evidence=(evidence(request, "data-research"),),
+        )
+
+
+class ModelEvaluator:
+    def evaluate(self, request):
+        return ModelEvaluationResult(
+            run_id=request.run_id,
+            task_id=request.task_id,
+            repository_revision=request.repository_revision,
+            created_at=request.created_at,
+            available=True,
+            configured_model_path="models/xgb_ranker.json",
+            metadata_path="models/xgb_ranker.metadata.json",
+            actual_sha256="d" * 64,
+            expected_sha256="d" * 64,
+            hash_matches=True,
+            label_horizon=5,
+            train_ic=0.04,
+            out_of_sample_ic=0.03,
+            train_samples=100,
+            test_samples=50,
+            evaluation_passed=True,
+            evidence=(evidence(request, "model-evaluation"),),
+        )
+
+
 def runtime_factory(persistence):
     graph = build_workflow(
         checkpointer=persistence.checkpointer,
         store=persistence.langgraph_store,
         specialists=Specialists(),
+        data_researcher=DataResearcher(),
+        model_evaluator=ModelEvaluator(),
         validator=Validator(),
         risk_reviewer=Reviewer(),
         clock=lambda: NOW,
@@ -171,6 +237,8 @@ def test_service_create_inspect_approve_and_resume(tmp_path):
     accepted = platform.resume_run("run-001")
 
     assert created["status"] == RunStatus.AWAITING_APPROVAL.value
+    assert created["data_research"]["available"] is True
+    assert created["model_evaluation"]["evaluation_passed"] is True
     assert inspected["status"] == RunStatus.AWAITING_APPROVAL.value
     assert approved["resume_required"] is True
     assert accepted["status"] == RunStatus.ACCEPTED.value
@@ -199,6 +267,37 @@ def test_service_rejects_unsafe_acceptance_checks_before_constructing_controller
 
     assert constructed is False
     assert not platform.paths.checkpoint_db.exists()
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"specialist_runtime": "unknown"}, "unsupported specialist runtime"),
+        ({"specialist_runtime": "opencode"}, "exact provider/model"),
+        ({"opencode_model": "opencode/model"}, "require the OpenCode runtime"),
+        ({"allow_repository_root_workspace": True}, "requires the OpenCode runtime"),
+        (
+            {
+                "specialist_runtime": "opencode",
+                "opencode_model": "opencode/model",
+                "allow_repository_root_workspace": True,
+                "require_disposable_worktree": False,
+            },
+            "requires a standalone disposable clone",
+        ),
+        (
+            {
+                "specialist_runtime": "opencode",
+                "opencode_model": "opencode/model",
+                "opencode_credential_environment_key": "",
+            },
+            "cannot be empty",
+        ),
+    ],
+)
+def test_service_rejects_invalid_runtime_configuration(tmp_path, options, message):
+    with pytest.raises(SpecialistRuntimeUnavailable, match=message):
+        LocalPlatformService(PlatformPaths.below(tmp_path / "platform"), **options)
 
 
 def test_service_rejects_pending_run_at_boundary(tmp_path):
@@ -238,6 +337,8 @@ def test_service_reopens_status_receipts_evidence_and_pending_approvals(tmp_path
     assert status["status"] == RunStatus.AWAITING_APPROVAL.value
     assert len(receipts["receipts"]) == 2
     assert {item["artifact_id"] for item in evidence_items["evidence"]} >= {
+        "data-research",
+        "model-evaluation",
         "validation",
         "risk",
     }
@@ -327,6 +428,9 @@ def test_default_cli_inspects_approves_and_resumes_persisted_graph(tmp_path):
 
 
 class CompositionAdapter:
+    authentication_type = "chatgpt"
+    permission_profile = "docker-one-shot"
+
     def execute(self, item, **kwargs):
         if item.role.value == "v20-product":
             output = {
@@ -411,11 +515,11 @@ class CompositionAdapter:
             attempt=item.attempt,
             status=ExecutionStatus.COMPLETED,
             sandbox=item.permissions.sandbox,
-            model="docker-codex-default",
+            model=kwargs["model"],
             workspace=item.workspace,
             approval_mode="deny-all",
-            authentication_type="chatgpt",
-            permission_profile="docker-one-shot",
+            authentication_type=self.authentication_type,
+            permission_profile=self.permission_profile,
             started_at=NOW,
             finished_at=NOW,
             thread_id=f"thread-{item.role.value}",
@@ -423,7 +527,21 @@ class CompositionAdapter:
         )
 
 
-def test_default_service_loads_production_composition_without_real_codex(tmp_path):
+class OpenCodeCompositionAdapter(CompositionAdapter):
+    authentication_type = "opencode-local"
+    permission_profile = "opencode-host"
+
+
+@pytest.mark.parametrize(
+    ("specialist_runtime", "model", "adapter_type"),
+    [
+        ("docker-codex", None, CompositionAdapter),
+        ("opencode", "opencode/north-mini-code-free", OpenCodeCompositionAdapter),
+    ],
+)
+def test_service_loads_selected_production_composition_without_real_provider(
+    tmp_path, specialist_runtime, model, adapter_type
+):
     repository = tmp_path / "repo"
     repository.mkdir()
     subprocess.run(["git", "init", "-q", str(repository)], check=True)
@@ -453,6 +571,7 @@ def test_default_service_loads_production_composition_without_real_codex(tmp_pat
     ).stdout.strip()
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    copy_model_evaluation_fixture(repository)
     workspace = repository / "exercise"
     workspace.mkdir()
     identifiers = iter(
@@ -470,7 +589,9 @@ def test_default_service_loads_production_composition_without_real_codex(tmp_pat
     platform = LocalPlatformService(
         PlatformPaths.below(tmp_path / "state"),
         profiles_root=profiles,
-        adapter_factory=lambda repository_root, models: CompositionAdapter(),
+        adapter_factory=lambda repository_root, models: adapter_type(),
+        specialist_runtime=specialist_runtime,
+        opencode_model=model,
         require_disposable_worktree=False,
         require_clean_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),
@@ -493,6 +614,10 @@ def test_default_service_loads_production_composition_without_real_codex(tmp_pat
     assert Path(workspace, "M2-CONTROLLED-EXERCISE.md").is_file()
     assert len(platform.list_receipts("run-001")["receipts"]) == 3
     with open_persistence(platform.paths) as persisted:
+        runtime = persisted.store.get(("system", "run-runtime"), "run-001")
+        assert runtime["specialist_runtime"] == specialist_runtime
+        assert runtime["specialist_model"] == model
+        assert runtime["research_data_root"] == str(REPOSITORY_ROOT / "vesper" / "data" / "massive")
         assert (
             len(
                 persisted.store.search(
@@ -529,6 +654,76 @@ def test_default_service_loads_production_composition_without_real_codex(tmp_pat
         platform.resume_run("run-001")
 
 
+def test_opencode_service_allows_explicit_clean_disposable_clone_root(tmp_path):
+    origin = tmp_path / "origin.git"
+    repository = tmp_path / "repo"
+    subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(repository)], check=True)
+    subprocess.run(["git", "switch", "-q", "-c", "m2/root-workspace"], cwd=repository, check=True)
+    profiles = repository / "profiles" / "native"
+    shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    copy_model_evaluation_fixture(repository)
+    (repository / "README.md").write_text("test repository\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=V20 Test",
+            "-c",
+            "user.email=v20-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ],
+        cwd=repository,
+        check=True,
+    )
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    identifiers = iter(
+        (
+            "run-001",
+            "task-001",
+            "candidate-product",
+            "memory-product",
+            "candidate-development",
+            "memory-development",
+            "candidate-risk",
+            "memory-risk",
+        )
+    )
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        profiles_root=profiles,
+        adapter_factory=lambda _root, _models: OpenCodeCompositionAdapter(),
+        specialist_runtime="opencode",
+        opencode_model="opencode/mimo-v2.5-free",
+        allow_repository_root_workspace=True,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+
+    created = platform.create_run(
+        "Create a harmless root-workspace marker.",
+        str(repository),
+        revision,
+        (
+            "git-diff-check",
+            "path-exists::M2-CONTROLLED-EXERCISE.md",
+        ),
+    )
+
+    assert created["status"] == RunStatus.AWAITING_APPROVAL.value
+    assert (repository / "M2-CONTROLLED-EXERCISE.md").is_file()
+
+
 def test_repository_lease_rejects_concurrent_controller_operation(tmp_path):
     repository = tmp_path / "repo"
     (repository / ".git").mkdir(parents=True)
@@ -537,6 +732,108 @@ def test_repository_lease_rejects_concurrent_controller_operation(tmp_path):
         with pytest.raises(SpecialistRuntimeUnavailable, match="owns the repository lease"):
             with _repository_lease(repository):
                 pass
+
+
+def test_research_data_root_cannot_overlap_specialist_repository(tmp_path):
+    repository = tmp_path / "repo"
+    workspace = repository / "docs" / "m2-controlled-exercise"
+    workspace.mkdir(parents=True)
+    profiles = repository / "profiles" / "native"
+    profiles.mkdir(parents=True)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        profiles_root=profiles,
+        research_data_root=repository / "vesper" / "data" / "massive",
+        require_disposable_worktree=False,
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="must not overlap"):
+        platform._validate_production_boundaries(repository, workspace)
+
+
+def test_platform_state_cannot_overlap_research_data_root(tmp_path):
+    repository = tmp_path / "repo"
+    workspace = repository / "docs" / "m2-controlled-exercise"
+    workspace.mkdir(parents=True)
+    profiles = repository / "profiles" / "native"
+    profiles.mkdir(parents=True)
+    research_data_root = tmp_path / "protected-massive"
+    platform = LocalPlatformService(
+        PlatformPaths.below(research_data_root / "platform-state"),
+        profiles_root=profiles,
+        research_data_root=research_data_root,
+        require_disposable_worktree=False,
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="must not overlap the research"):
+        platform._validate_production_boundaries(repository, workspace)
+
+
+def test_resume_revalidates_evidence_root_boundary(tmp_path):
+    repository = tmp_path / "repo"
+    workspace = repository / "docs" / "m2-controlled-exercise"
+    workspace.mkdir(parents=True)
+    profiles = repository / "profiles" / "native"
+    shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    state = tmp_path / "state"
+    paths = PlatformPaths(
+        root=state,
+        checkpoint_db=state / "checkpoints.sqlite3",
+        store_db=state / "store.sqlite3",
+        evidence_root=repository / "controller-evidence",
+    )
+    research_data_root = tmp_path / "protected-massive"
+    platform = LocalPlatformService(
+        paths,
+        profiles_root=profiles,
+        research_data_root=research_data_root,
+        require_disposable_worktree=False,
+    )
+    with open_persistence(paths) as persistence:
+        persistence.store.put(
+            ("system", "run-runtime"),
+            "run-001",
+            {
+                "repository_root": str(repository),
+                "workspace": str(workspace),
+                "repository_revision": "abc123",
+                "profiles_root": str(profiles),
+                "profile_fingerprints": platform._profile_fingerprints(),
+                "research_data_root": str(research_data_root),
+            },
+        )
+
+        with pytest.raises(SpecialistRuntimeUnavailable, match="platform state and evidence"):
+            platform._controller_for_run(persistence, "run-001")
+
+
+def test_resume_rejects_missing_persisted_research_data_root(tmp_path):
+    repository = tmp_path / "repo"
+    workspace = repository / "docs" / "m2-controlled-exercise"
+    workspace.mkdir(parents=True)
+    profiles = repository / "profiles" / "native"
+    shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        profiles_root=profiles,
+        research_data_root=tmp_path / "protected-massive",
+        require_disposable_worktree=False,
+    )
+    with open_persistence(platform.paths) as persistence:
+        persistence.store.put(
+            ("system", "run-runtime"),
+            "run-001",
+            {
+                "repository_root": str(repository),
+                "workspace": str(workspace),
+                "repository_revision": "abc123",
+                "profiles_root": str(profiles),
+                "profile_fingerprints": platform._profile_fingerprints(),
+            },
+        )
+
+        with pytest.raises(SpecialistRuntimeUnavailable, match="metadata is malformed"):
+            platform._controller_for_run(persistence, "run-001")
 
 
 @pytest.mark.parametrize("custom_runtime", (False, True))
@@ -604,12 +901,81 @@ def test_active_record_must_match_requested_run_id(tmp_path):
     assert platform.control.active_execution("run-001") is not None
 
 
+def test_stale_opencode_process_is_terminated_after_controller_loss(tmp_path):
+    repository = tmp_path / "repo"
+    (repository / ".git").mkdir(parents=True)
+    platform = LocalPlatformService(PlatformPaths.below(tmp_path / "state"))
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        identity = _process_identity(child.pid)
+        assert identity is not None
+        platform.control.mark_active_process(
+            run_id="run-001",
+            execution_id="execution-001",
+            runtime="opencode",
+            process_id=child.pid,
+            process_identity=identity,
+            role=SpecialistRole.DEVELOPMENT.value,
+            attempt=1,
+        )
+        persistence = SimpleNamespace(
+            store=SimpleNamespace(
+                get=lambda _namespace, _key: {
+                    "repository_root": str(repository),
+                    "specialist_runtime": "opencode",
+                }
+            )
+        )
+
+        with platform._lease_for_run(persistence, "run-001"):
+            pass
+
+        child.wait(timeout=5)
+        assert platform.control.active_execution("run-001") is None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_unidentifiable_opencode_process_record_is_preserved(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    (repository / ".git").mkdir(parents=True)
+    platform = LocalPlatformService(PlatformPaths.below(tmp_path / "state"))
+    platform.control.mark_active_process(
+        run_id="run-001",
+        execution_id="execution-001",
+        runtime="opencode",
+        process_id=os.getpid(),
+        process_identity="recorded-identity",
+        role=SpecialistRole.DEVELOPMENT.value,
+        attempt=1,
+    )
+    persistence = SimpleNamespace(
+        store=SimpleNamespace(
+            get=lambda _namespace, _key: {
+                "repository_root": str(repository),
+                "specialist_runtime": "opencode",
+            }
+        )
+    )
+    monkeypatch.setattr("vesper.platform.service._process_identity", lambda _pid: None)
+    monkeypatch.setattr("vesper.platform.service._process_exists", lambda _pid: None)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="cannot be identified"):
+        with platform._lease_for_run(persistence, "run-001"):
+            pass
+
+    assert platform.control.active_execution("run-001") is not None
+
+
 def test_cancel_run_signals_active_sandbox_from_another_controller_thread(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
     subprocess.run(["git", "init", "-q", str(repository)], check=True)
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    copy_model_evaluation_fixture(repository)
     workspace = repository / "exercise"
     workspace.mkdir()
     (workspace / "README.md").write_text("bounded\n", encoding="utf-8")
@@ -744,6 +1110,7 @@ def test_read_only_inspection_survives_removed_worktree_and_profile_catalog(tmp_
     ).stdout.strip()
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    copy_model_evaluation_fixture(repository)
     workspace = repository / "exercise"
     workspace.mkdir()
     identifiers = iter(
@@ -812,6 +1179,7 @@ def test_production_service_rejects_revision_not_equal_to_worktree_head(tmp_path
     )
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    copy_model_evaluation_fixture(repository)
     workspace = repository / "exercise"
     workspace.mkdir()
     platform = LocalPlatformService(
@@ -835,6 +1203,7 @@ def test_production_service_rejects_platform_state_overlapping_repository(tmp_pa
     workspace.mkdir()
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    copy_model_evaluation_fixture(repository)
     platform = LocalPlatformService(
         PlatformPaths.below(repository / ".v20-platform"),
         profiles_root=profiles,
@@ -856,6 +1225,7 @@ def test_production_service_rejects_sensitive_repository_workspace_before_specia
     workspace.mkdir()
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
+    copy_model_evaluation_fixture(repository)
     called = False
 
     def adapter_factory(_repository_root, _models):

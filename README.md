@@ -35,11 +35,29 @@ are not needed for setup or verification.
 
 The native platform command tree currently exposes `create`, `status`,
 `resume`, `receipts`, `evidence`, `approvals`, `approve`, `reject`, and
-`cancel`. Approval, rejection, and cancellation require explicit arguments;
-no command connects to a provider or trading runtime. See
+`cancel`. Approval, rejection, and cancellation require explicit arguments.
+Only `create` and a resumed specialist turn may invoke an explicitly selected
+model runtime; no command connects to a trading runtime. See
 `docs/receipts/M1-M7-offline-slice-receipt.md` for the graph-backed command
 boundary. Status, receipts, evidence, pending approvals, approval, rejection,
 resume, and cancellation use local SQLite checkpoints and Store records.
+Every run begins with controller-owned read-only Data Research and Model Evaluation
+nodes. Data Research reports only bounded SP500 coverage aggregates, null counts,
+date bounds, and split-adjustment identity from a read-only SQLite connection. Model
+Evaluation reads only the configured model path, streams its hash, and validates the
+companion metadata metrics without loading or executing the model. Both evidence
+summaries are visible in `create` and `status`, are supplied to Product and Risk Review,
+and are bound into the approval evidence set. Raw bars, model bytes, model parameters,
+broker/risk settings, credentials, trading access, and model-promotion authority are
+never exposed to specialists. Missing data, malformed coverage dates, a missing model,
+invalid metadata, or an artifact hash mismatch stops before Product with
+`operator-intervention`; it cannot reach acceptance.
+The controller data root defaults to `vesper/data/massive` relative to the installed
+Vesper package, not the operator's working directory or disposable specialist clone. Override it with global
+`--research-data-root <path>` when using the canonical protected store; the resolved
+read-only root persists with the run and must match on resume.
+Runs checkpointed before these required stages must be recreated rather than resumed
+through an approval that never reviewed research/model evidence.
 `create` fails closed until an operator-approved specialist composition is
 configured. `DockerCodexAdapter` is the first isolated runtime implementation. It
 runs Codex in an already-provisioned Docker sandbox bound to an exact disposable
@@ -52,8 +70,42 @@ closed on Git control-plane mutation. Secure `--no-share-skills` provisioning an
 Docker-managed OAuth have passed a real adapter canary. Every specialist turn
 requires a fresh uniquely named sandbox; stopped VMs are never reused. The adapter
 is not wired into `create` until one-shot provisioning exists and the specialist
-composition is adapted and reviewed. OpenCode remains fake-tested for later
-provider support and requires a provider API key before real isolated execution.
+composition is adapted and reviewed. OpenCode is an opt-in host subprocess route,
+not an OS sandbox. Select it with global `--runtime opencode --model provider/model`
+options before `create`; the selected runtime and model persist with the run. The
+gateway scrubs the child environment, isolates global and project configuration, and
+can pass only the selected provider's explicitly bound
+`--credential-environment-key`. Product and Risk Review receive no tools. Development
+receives only repository-relative, workspace-scoped read/edit/write;
+shell, search, subagents, skills, web, and external paths remain denied. Providers
+available in pure mode may use OpenCode's local authentication without an environment
+binding. The plugin-backed OpenAI OAuth route remains excluded while default plugins
+are disabled. Opt-in `local_opencode` coverage includes a complete controlled workflow
+with `opencode/mimo-v2.5-free` that stopped at persisted human approval. Host turns
+publish active child-process metadata outside the clone and cooperatively terminate on
+an operator cancellation request.
+
+For a normal code task across an entire clone, the additional
+`--allow-repository-root-workspace` flag is required. It is accepted only for OpenCode
+in a clean standalone clone retaining origin provenance on an `m2/` branch. `.git`,
+profiles, agent instructions, settings, model artifacts, environment files, controller
+state, and protected data remain unreadable and unwritable to the specialist. Clones
+containing submodules are rejected, OpenCode's patch tool is disabled, and cancelled,
+timed-out, invalid, or crash-interrupted turns roll back partial workspace edits from a
+controller-owned durable snapshot. Nested `.git`, `.state`, and environment files are
+also denied. On Windows the child tree is assigned to a kill-on-close Job Object.
+
+Example from the root of an approved disposable clone:
+
+```powershell
+$revision = git rev-parse HEAD
+uv run --locked vesper-agent --runtime opencode --model opencode/mimo-v2.5-free `
+  --allow-repository-root-workspace create `
+  --objective "Implement the bounded code change." `
+  --workspace . `
+  --repository-revision $revision `
+  --acceptance-check git-diff-check
+```
 
 ## Verification
 

@@ -10,6 +10,7 @@ from vesper.platform.contracts import (
     ApprovalDecision,
     CodexExecutionReceipt,
     CorrectionAttempt,
+    DataResearchResult,
     EvidenceArtifactRef,
     ExecutionStatus,
     GraphState,
@@ -18,6 +19,7 @@ from vesper.platform.contracts import (
     MemoryCandidate,
     MemoryRecord,
     MemoryType,
+    ModelEvaluationResult,
     PermissionSet,
     RiskDecision,
     RiskReviewDecision,
@@ -50,6 +52,44 @@ def artifact() -> EvidenceArtifactRef:
         sha256="a" * 64,
         size_bytes=12,
         media_type="application/json",
+    )
+
+
+def available_data_research() -> DataResearchResult:
+    return DataResearchResult(
+        **COMMON,
+        available=True,
+        database_path="vesper/data/massive/sp500/sp500_ohlcv.sqlite",
+        table_name="sp500_ohlcv",
+        row_count=100,
+        ticker_count=10,
+        start_date="2020-01-02",
+        end_date="2026-07-27",
+        required_columns=("ticker", "date", "open", "high", "low", "close", "volume"),
+        null_price_rows=0,
+        invalid_date_rows=0,
+        split_adjustments_path="vesper/data/massive/split_adjustments.json",
+        split_adjustments_sha256="b" * 64,
+        evidence=(artifact(),),
+    )
+
+
+def available_model_evaluation() -> ModelEvaluationResult:
+    return ModelEvaluationResult(
+        **COMMON,
+        available=True,
+        configured_model_path="models/xgb_ranker.json",
+        metadata_path="models/xgb_ranker.metadata.json",
+        actual_sha256="c" * 64,
+        expected_sha256="c" * 64,
+        hash_matches=True,
+        label_horizon=5,
+        train_ic=0.04,
+        out_of_sample_ic=0.03,
+        train_samples=100,
+        test_samples=50,
+        evaluation_passed=True,
+        evidence=(artifact(),),
     )
 
 
@@ -109,6 +149,58 @@ def test_contracts_serialize_to_stable_json_and_round_trip():
     assert payload["schema_version"] == "1.0"
     assert payload["created_at"] == "2026-07-27T16:00:00Z"
     assert TaskRequest.model_validate_json(json.dumps(payload)) == task
+
+
+def test_research_and_model_evaluation_contracts_bind_evidence_authority():
+    data = DataResearchResult(
+        **COMMON,
+        available=True,
+        database_path="vesper/data/massive/sp500/sp500_ohlcv.sqlite",
+        table_name="sp500_ohlcv",
+        row_count=100,
+        ticker_count=10,
+        start_date="2020-01-02",
+        end_date="2026-07-27",
+        required_columns=("ticker", "date", "open", "high", "low", "close", "volume"),
+        null_price_rows=0,
+        invalid_date_rows=0,
+        split_adjustments_path="vesper/data/massive/split_adjustments.json",
+        split_adjustments_sha256="b" * 64,
+        evidence=(artifact(),),
+    )
+    evaluation = ModelEvaluationResult(
+        **COMMON,
+        available=True,
+        configured_model_path="models/xgb_ranker.json",
+        metadata_path="models/xgb_ranker.metadata.json",
+        actual_sha256="c" * 64,
+        expected_sha256="c" * 64,
+        hash_matches=True,
+        label_horizon=5,
+        train_ic=0.04,
+        out_of_sample_ic=0.03,
+        train_samples=100,
+        test_samples=50,
+        evaluation_passed=True,
+        evidence=(artifact(),),
+    )
+
+    assert DataResearchResult.model_validate_json(data.model_dump_json()) == data
+    assert ModelEvaluationResult.model_validate_json(evaluation.model_dump_json()) == evaluation
+
+    foreign = artifact().model_copy(update={"run_id": "foreign"})
+    payload = data.model_dump()
+    payload["evidence"] = (foreign,)
+    with pytest.raises(ValidationError, match="evidence authority"):
+        DataResearchResult.model_validate(payload)
+
+
+def test_available_data_research_rejects_invalid_source_dates():
+    payload = available_data_research().model_dump()
+    payload["invalid_date_rows"] = 1
+
+    with pytest.raises(ValidationError, match="nonempty coverage"):
+        DataResearchResult.model_validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -223,6 +315,8 @@ def test_graph_acceptance_requires_all_authoritative_gates():
         **COMMON,
         "status": RunStatus.ACCEPTED,
         "current_role": None,
+        "data_research": available_data_research(),
+        "model_evaluation": available_model_evaluation(),
         "correction_attempts": (),
         "validation": validation(),
         "risk_review": risk(),
@@ -231,13 +325,80 @@ def test_graph_acceptance_requires_all_authoritative_gates():
     accepted = GraphState.model_validate(base)
     assert accepted.status is RunStatus.ACCEPTED
 
-    for missing in ("validation", "risk_review", "approval"):
+    for missing in (
+        "data_research",
+        "model_evaluation",
+        "validation",
+        "risk_review",
+        "approval",
+    ):
         invalid = {**base, missing: None}
         with pytest.raises(ValidationError):
             GraphState.model_validate(invalid)
 
+    with pytest.raises(ValidationError, match="available Data Research"):
+        GraphState.model_validate(
+            {
+                **base,
+                "data_research": available_data_research().model_copy(update={"available": False}),
+            }
+        )
+    with pytest.raises(ValidationError, match="passing Model Evaluation"):
+        GraphState.model_validate(
+            {
+                **base,
+                "model_evaluation": available_model_evaluation().model_copy(
+                    update={
+                        "expected_sha256": "f" * 64,
+                        "hash_matches": False,
+                        "evaluation_passed": False,
+                    }
+                ),
+            }
+        )
+
     with pytest.raises(ValidationError):
         GraphState.model_validate({**base, "approval": approval(decision=ApprovalDecision.REJECT)})
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        RunStatus.PRODUCT,
+        RunStatus.DEVELOPMENT,
+        RunStatus.VALIDATION,
+        RunStatus.RISK_REVIEW,
+        RunStatus.AWAITING_APPROVAL,
+    ),
+)
+def test_post_research_graph_states_require_passing_research(status):
+    base = {
+        **COMMON,
+        "status": status,
+        "data_research": available_data_research(),
+        "model_evaluation": available_model_evaluation(),
+    }
+
+    with pytest.raises(ValidationError, match="available Data Research"):
+        GraphState.model_validate(
+            {
+                **base,
+                "data_research": available_data_research().model_copy(update={"available": False}),
+            }
+        )
+    with pytest.raises(ValidationError, match="passing Model Evaluation"):
+        GraphState.model_validate(
+            {
+                **base,
+                "model_evaluation": available_model_evaluation().model_copy(
+                    update={
+                        "expected_sha256": "f" * 64,
+                        "hash_matches": False,
+                        "evaluation_passed": False,
+                    }
+                ),
+            }
+        )
 
 
 def test_correction_attempts_are_bounded_to_three():

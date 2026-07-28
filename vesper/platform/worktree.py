@@ -41,6 +41,10 @@ def inspect_worktree(
             raise WorktreeBoundaryError("execution requires a standalone disposable Git clone")
         if not _git_optional(root, "config", "--get", "remote.origin.url"):
             raise WorktreeBoundaryError("disposable clone must retain its origin provenance")
+        if any(
+            line.startswith("160000 ") for line in _git(root, "ls-files", "--stage").splitlines()
+        ):
+            raise WorktreeBoundaryError("disposable clone must not contain submodules")
     branch = _git(root, "branch", "--show-current")
     commit = _git(root, "rev-parse", "HEAD")
     status_text = _git(

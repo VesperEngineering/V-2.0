@@ -12,8 +12,15 @@
 > The adapter now rejects shared or additional host mounts; activation requires a replacement
 > sandbox created with skills sharing disabled. The operator selected one-shot lifecycle: every
 > specialist turn receives a fresh uniquely named sandbox that is force-removed after its outcome.
-> OpenCode remains deferred until a provider API key is available through the sandbox credential
-> proxy. LangMem remains deliberately
+> OpenCode now has an opt-in, unsandboxed host subprocess route wired into `create`, with an exact
+> persisted model and selected-provider credential pass-through. A pure-mode Product/Development/
+> Validation/Risk workflow canary and a protected disposable-clone root code canary reached
+> persisted human approval. Host process-tree containment, durable crash rollback, active-process
+> reconciliation, and cooperative cancellation are implemented.
+> Controller-owned read-only Data Research and Model Evaluation now run before Product on every
+> workflow. They expose bounded aggregate/hash/metadata evidence to Product, Risk Review, status,
+> and human approval without exposing raw bars, model bytes, settings, or mutation authority.
+> LangMem remains deliberately
 > deferred because its provider-heavy dependency closure has not been approved. See
 > `docs/receipts/M1-dependency-receipt.md`.
 > Task 4 below records the completed direct-Codex baseline; ADR-0001,
@@ -25,7 +32,7 @@
 
 **Architecture:** New code lives in a focused `vesper.platform` package. Pydantic contracts are the serialization boundary, LangGraph owns deterministic routing and interrupts, SQLite owns checkpoints and long-term Store records, and immutable artifacts remain in a content-addressed filesystem evidence store. Model execution and memory consolidation are dependency-injected ports tested with deterministic fakes; real provider execution remains opt-in.
 
-**Tech Stack:** Python 3.11, Pydantic 2, LangGraph, `langgraph-checkpoint-sqlite`, Docker Sandboxes with Codex, deferred OpenCode, Typer, PyYAML, pytest, Ruff, SQLite.
+**Tech Stack:** Python 3.11, Pydantic 2, LangGraph, `langgraph-checkpoint-sqlite`, Docker Sandboxes with Codex, opt-in OpenCode host subprocess, Typer, PyYAML, pytest, Ruff, SQLite.
 
 ## Global Constraints
 

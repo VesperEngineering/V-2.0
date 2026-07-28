@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -154,7 +155,7 @@ def test_strict_schema_conversion_preserves_fields_named_like_schema_keywords():
     assert schema["properties"]["default"] == {"type": "string"}
 
 
-def composition(tmp_path, adapter, *, protected_paths=(), turn_store=None):
+def composition(tmp_path, adapter, *, protected_paths=(), turn_store=None, **kwargs):
     return NativeSpecialistComposition(
         repository_root=tmp_path,
         profiles=ProfileCatalog(PROFILES_ROOT),
@@ -164,6 +165,7 @@ def composition(tmp_path, adapter, *, protected_paths=(), turn_store=None):
         protected_paths=protected_paths,
         clock=lambda: NOW,
         id_factory=lambda: "candidate-001",
+        **kwargs,
     )
 
 
@@ -200,8 +202,85 @@ def test_product_loads_approved_profile_and_emits_typed_receipt(tmp_path):
     assert options["reasoning_effort"] == "medium"
     assert options["output_schema"]["additionalProperties"] is False
     assert_codex_strict_objects(options["output_schema"])
+    assert "Copy schema_version, run_id, task_id" in options["prompt"]
     assert 'memory_type="product-decision"' in options["prompt"]
     assert 'content="Product routed task to v20-development."' in options["prompt"]
+
+
+def test_product_accepts_explicit_opencode_execution_boundary(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    output = {
+        "schema_version": "1.0",
+        "run_id": "run-001",
+        "task_id": "task-001",
+        "repository_revision": "b5263eb",
+        "created_at": "2026-07-27T16:00:00Z",
+        "role": "v20-product",
+        "attempt": 1,
+        "route": "v20-development",
+        "summary": "A bounded documentation task.",
+        "development_instructions": "Create only the requested documentation file.",
+        "acceptance_checks": ["git-diff-check"],
+        "memory": [],
+    }
+
+    class FakeOpenCodeAdapter:
+        def __init__(self):
+            self.options = None
+
+        def execute(self, item, **options):
+            self.options = options
+            return codex_receipt(item, json.dumps(output)).model_copy(
+                update={
+                    "model": options["model"],
+                    "authentication_type": "opencode-local",
+                    "permission_profile": "opencode-host",
+                }
+            )
+
+    adapter = FakeOpenCodeAdapter()
+    receipt = composition(
+        tmp_path,
+        adapter,
+        model_override="opencode/north-mini-code-free",
+        execution_runtime="opencode",
+        authentication_type="opencode-local",
+        permission_profile="opencode-host",
+    ).execute(request(workspace, SpecialistRole.PRODUCT))
+
+    assert receipt.status is ExecutionStatus.COMPLETED
+    assert adapter.options["model"] == "opencode/north-mini-code-free"
+    assert receipt.evidence[0].artifact_id.startswith("opencode-v20-product-")
+
+
+def test_product_accepts_explicit_repository_root_workspace(tmp_path):
+    adapter = FakeCodexAdapter(
+        [
+            {
+                "schema_version": "1.0",
+                "run_id": "run-001",
+                "task_id": "task-001",
+                "repository_revision": "b5263eb",
+                "created_at": "2026-07-27T16:00:00Z",
+                "role": "v20-product",
+                "attempt": 1,
+                "route": "v20-development",
+                "summary": "A bounded root-workspace task.",
+                "development_instructions": "Modify only controller-approved code.",
+                "acceptance_checks": ["git-diff-check"],
+                "memory": [],
+            }
+        ]
+    )
+
+    receipt = composition(
+        tmp_path,
+        adapter,
+        allow_repository_root_workspace=True,
+    ).execute(request(tmp_path, SpecialistRole.PRODUCT))
+
+    assert receipt.status is ExecutionStatus.COMPLETED
 
 
 def test_completed_specialist_turn_replays_persisted_receipt_without_redispatch(tmp_path):
@@ -267,6 +346,8 @@ def test_hard_process_exit_persists_started_turn_and_prevents_redispatch(tmp_pat
     repository.mkdir()
     workspace = repository / "task"
     workspace.mkdir()
+    controlled = workspace / "RESULT.md"
+    controlled.write_text("original\n", encoding="utf-8")
     state = tmp_path / "state"
     item = request(workspace, SpecialistRole.PRODUCT)
     script = f"""
@@ -279,6 +360,8 @@ from vesper.platform.profiles import ProfileCatalog
 
 class CrashAdapter:
     def execute(self, _item, **_kwargs):
+        Path({str(controlled)!r}).write_text("partial\\n", encoding="utf-8")
+        Path({str(workspace / "PARTIAL.md")!r}).write_text("unfinished\\n", encoding="utf-8")
         os._exit(23)
 
 item = SpecialistInput.model_validate_json({item.model_dump_json()!r})
@@ -311,6 +394,8 @@ with open_persistence(PlatformPaths.below(Path({str(state)!r}))) as persistence:
 
     assert replayed.status is ExecutionStatus.INTERRUPTED
     assert replayed.error_code == "ambiguous-prior-execution"
+    assert controlled.read_text(encoding="utf-8") == "original\n"
+    assert not (workspace / "PARTIAL.md").exists()
 
 
 @pytest.mark.parametrize(
@@ -330,6 +415,25 @@ with open_persistence(PlatformPaths.below(Path({str(state)!r}))) as persistence:
                     "attempt": 1,
                     "route": "v20-development",
                     "summary": "Foreign authority.",
+                    "development_instructions": "Do nothing.",
+                    "acceptance_checks": ["git-diff-check"],
+                    "memory": [],
+                }
+            ),
+            "foreign-specialist-output",
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "run_id": "run-001",
+                    "task_id": "task-001",
+                    "repository_revision": "b5263eb",
+                    "created_at": "2026-07-27T16:01:00Z",
+                    "role": "v20-product",
+                    "attempt": 1,
+                    "route": "v20-development",
+                    "summary": "Foreign timestamp.",
                     "development_instructions": "Do nothing.",
                     "acceptance_checks": ["git-diff-check"],
                     "memory": [],
@@ -639,6 +743,27 @@ def test_development_link_replacement_cannot_redirect_controller_restoration(tmp
     assert protected.read_text(encoding="utf-8") == "risk-policy\n"
 
 
+def test_development_rejects_workspace_hard_link_to_external_file(tmp_path):
+    repository = tmp_path / "repo"
+    workspace = repository / "task"
+    workspace.mkdir(parents=True)
+    external = tmp_path / "external-policy.md"
+    external.write_text("operator approval required\n", encoding="utf-8")
+    linked = workspace / "policy.md"
+    os.link(external, linked)
+
+    def mutate(_item):
+        linked.write_text("self approval allowed\n", encoding="utf-8")
+
+    adapter = FakeCodexAdapter([], mutate=mutate)
+
+    with pytest.raises(ProfilePermissionMismatch, match="hard link"):
+        composition(repository, adapter).execute(request(workspace, SpecialistRole.DEVELOPMENT))
+
+    assert adapter.calls == []
+    assert external.read_text(encoding="utf-8") == "operator approval required\n"
+
+
 def test_development_cannot_mutate_controller_protected_path_inside_workspace(tmp_path):
     workspace = tmp_path / "task"
     workspace.mkdir()
@@ -674,6 +799,190 @@ def test_development_cannot_mutate_controller_protected_path_inside_workspace(tm
         )
     assert protected.read_text(encoding="utf-8") == "operator approval required\n"
     assert len(adapter.calls) == 1
+
+
+def test_environment_suffix_file_is_protected_and_not_copied_to_turn_snapshot(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    protected = workspace / "production.env"
+    secret = b"PROVIDER_TOKEN=must-not-persist\n"
+    protected.write_bytes(secret)
+    store = DictStore()
+    adapter = FakeCodexAdapter(
+        [
+            {
+                "schema_version": "1.0",
+                "run_id": "run-001",
+                "task_id": "task-001",
+                "repository_revision": "b5263eb",
+                "created_at": "2026-07-27T16:00:00Z",
+                "role": "v20-product",
+                "attempt": 1,
+                "route": "v20-development",
+                "summary": "Bounded.",
+                "development_instructions": "Change only approved code.",
+                "acceptance_checks": ["git-diff-check"],
+                "memory": [],
+            }
+        ]
+    )
+
+    composition(tmp_path, adapter, turn_store=store).execute(
+        request(workspace, SpecialistRole.PRODUCT)
+    )
+
+    evidence_files = tuple((tmp_path / ".state" / "evidence").rglob("*"))
+    assert evidence_files
+    assert all(not path.is_file() or secret not in path.read_bytes() for path in evidence_files)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX executable modes")
+def test_cancelled_turn_restores_executable_mode(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    executable = workspace / "tool.sh"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    item = request(workspace, SpecialistRole.DEVELOPMENT)
+
+    class CancelledAdapter:
+        def execute(self, development_item, **kwargs):
+            executable.chmod(0o644)
+            return CodexExecutionReceipt(
+                run_id=development_item.run_id,
+                task_id=development_item.task_id,
+                repository_revision=development_item.repository_revision,
+                created_at=development_item.created_at,
+                execution_id=kwargs["execution_id"] or "cancelled",
+                role=development_item.role,
+                attempt=development_item.attempt,
+                status=ExecutionStatus.CANCELLED,
+                sandbox=development_item.permissions.sandbox,
+                model=kwargs["model"],
+                workspace=development_item.workspace,
+                approval_mode="deny-all",
+                authentication_type="chatgpt",
+                permission_profile="docker-one-shot",
+                started_at=NOW,
+                finished_at=NOW,
+                error_code="cancelled",
+            )
+
+    receipt = composition(tmp_path, CancelledAdapter()).execute(item)
+
+    assert receipt.status is ExecutionStatus.CANCELLED
+    assert executable.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize("status", (ExecutionStatus.CANCELLED, ExecutionStatus.TIMEOUT))
+def test_noncompleted_development_turn_rolls_back_partial_workspace_edits(tmp_path, status):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    controlled = workspace / "RESULT.md"
+    controlled.write_text("original\n", encoding="utf-8")
+    item = request(workspace, SpecialistRole.DEVELOPMENT)
+
+    class NoncompletedAdapter:
+        def execute(self, development_item, **kwargs):
+            controlled.write_text("partial\n", encoding="utf-8")
+            (workspace / "PARTIAL.md").write_text("unfinished\n", encoding="utf-8")
+            return CodexExecutionReceipt(
+                run_id=development_item.run_id,
+                task_id=development_item.task_id,
+                repository_revision=development_item.repository_revision,
+                created_at=development_item.created_at,
+                execution_id=kwargs["execution_id"] or "development-noncompleted",
+                role=development_item.role,
+                attempt=development_item.attempt,
+                status=status,
+                sandbox=development_item.permissions.sandbox,
+                model=kwargs["model"],
+                workspace=development_item.workspace,
+                approval_mode="deny-all",
+                authentication_type="chatgpt",
+                permission_profile="docker-one-shot",
+                started_at=NOW,
+                finished_at=NOW,
+                error_code=status.value,
+            )
+
+    receipt = composition(tmp_path, NoncompletedAdapter()).execute(item)
+
+    assert receipt.status is status
+    assert controlled.read_text(encoding="utf-8") == "original\n"
+    assert not (workspace / "PARTIAL.md").exists()
+
+
+def test_development_cannot_create_nested_reserved_metadata(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    nested_state = workspace / "src" / ".state"
+
+    def mutate(_item):
+        nested_state.mkdir(parents=True)
+        (nested_state / "escape.txt").write_text("untracked\n", encoding="utf-8")
+
+    adapter = FakeCodexAdapter(
+        [
+            {
+                "schema_version": "1.0",
+                "run_id": "run-001",
+                "task_id": "task-001",
+                "repository_revision": "b5263eb",
+                "created_at": "2026-07-27T16:00:00Z",
+                "role": "v20-development",
+                "attempt": 1,
+                "summary": "Done.",
+                "changed_files": [],
+                "verification_commands": [],
+                "residual_risks": [],
+                "memory": [],
+            }
+        ],
+        mutate=mutate,
+    )
+
+    with pytest.raises(WorkspaceMutationDenied, match="protected path"):
+        composition(tmp_path, adapter).execute(request(workspace, SpecialistRole.DEVELOPMENT))
+
+    assert not (workspace / "src").exists()
+
+
+def test_development_removes_only_exact_new_json_response_sidecar(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    requested = workspace / "calculator.py"
+    requested.write_text("return 0\n", encoding="utf-8")
+    sidecar = workspace / "output.json"
+    retained = workspace / "result.json"
+    output = {
+        "schema_version": "1.0",
+        "run_id": "run-001",
+        "task_id": "task-001",
+        "repository_revision": "b5263eb",
+        "created_at": "2026-07-27T16:00:00Z",
+        "role": "v20-development",
+        "attempt": 1,
+        "summary": "Done.",
+        "changed_files": ["calculator.py"],
+        "verification_commands": [],
+        "residual_risks": [],
+        "memory": [],
+    }
+
+    def mutate(_item):
+        requested.write_text("return left + right\n", encoding="utf-8")
+        sidecar.write_text(json.dumps(output), encoding="utf-8")
+        retained.write_text('{"task_artifact":true}', encoding="utf-8")
+
+    receipt = composition(tmp_path, FakeCodexAdapter([output], mutate=mutate)).execute(
+        request(workspace, SpecialistRole.DEVELOPMENT)
+    )
+
+    assert receipt.status is ExecutionStatus.COMPLETED
+    assert receipt.output.changed_files == ("calculator.py", "result.json")
+    assert not sidecar.exists()
+    assert retained.is_file()
 
 
 def test_risk_review_uses_independent_read_only_turn_and_structured_decision(tmp_path):

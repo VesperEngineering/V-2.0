@@ -114,6 +114,12 @@ The following require explicit human approval. Do not attempt them:
 - Writing feed adapters and data pipelines (read-only from Massive data)
 - Any change reviewed and approved by the user
 
+### 5.3 Private-Chat Credential Handling
+- The user may share API keys and other credentials in the current private chat, and agents may acknowledge, reference, and discuss them there when needed for the task.
+- This permission is limited to the chat itself. Never reproduce a credential in repository files, patches, commands or tool calls, terminal output or logs, tests, fixtures, screenshots, reports, generated artifacts, Git staging/commits/history, external messages or services, or any public display.
+- Outside the private chat, refer to credentials only in redacted or masked form. If a task requires a raw credential to leave the chat or be persisted, stop and request a secure alternative.
+- Sharing or discussing a credential does not authorize using, validating, rotating, revoking, or changing it, and does not expand any other authority in this file.
+
 ---
 
 ## 6. Verification Requirements
@@ -155,4 +161,4 @@ The following require explicit human approval. Do not attempt them:
 
 ---
 
-*Last updated: 2026-07-23. If this file conflicts with `SKILLS/CODE.md`, `SKILLS/CODE.md` wins on coding style and `AGENTS.md` wins on project-specific authority boundaries.*
+*Last updated: 2026-07-28. If this file conflicts with `SKILLS/CODE.md`, `SKILLS/CODE.md` wins on coding style and `AGENTS.md` wins on project-specific authority boundaries.*

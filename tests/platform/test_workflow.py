@@ -4,16 +4,19 @@ import socket
 import urllib.request
 from collections import defaultdict, deque
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from langgraph.types import Command
 
 from vesper.platform.contracts import (
     ApprovalDecision,
+    DataResearchResult,
     DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
     ExecutionStatus,
     HumanApprovalDecision,
+    ModelEvaluationResult,
     ProductSpecialistOutput,
     RiskDecision,
     RiskReviewExecution,
@@ -50,6 +53,23 @@ def task(tmp_path) -> TaskRequest:
         repository_root=str(tmp_path),
         acceptance_checks=("python -m pytest tests/platform",),
     )
+
+
+def test_workspace_hash_excludes_git_and_controller_state(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".state").mkdir()
+    (tmp_path / ".git" / "control.lock").write_text("locked\n", encoding="utf-8")
+    (tmp_path / ".state" / "runtime.json").write_text("state\n", encoding="utf-8")
+    source = tmp_path / "source.py"
+    source.write_text("before\n", encoding="utf-8")
+
+    initial = _workspace_sha256(tmp_path)
+    (tmp_path / ".git" / "control.lock").write_text("changed\n", encoding="utf-8")
+    (tmp_path / ".state" / "runtime.json").write_text("changed\n", encoding="utf-8")
+
+    assert _workspace_sha256(tmp_path) == initial
+    source.write_text("after\n", encoding="utf-8")
+    assert _workspace_sha256(tmp_path) != initial
 
 
 def artifact(name: str = "result") -> EvidenceArtifactRef:
@@ -102,6 +122,54 @@ class QueuedSpecialists:
         return receipt(request.role, request.attempt)
 
 
+class DataResearcher:
+    def __init__(self):
+        self.calls = []
+
+    def research(self, request):
+        self.calls.append(request)
+        return DataResearchResult(
+            **COMMON,
+            available=True,
+            database_path="vesper/data/massive/sp500/sp500_ohlcv.sqlite",
+            table_name="sp500_ohlcv",
+            row_count=100,
+            ticker_count=10,
+            start_date="2020-01-02",
+            end_date="2026-07-27",
+            required_columns=("ticker", "date", "open", "high", "low", "close", "volume"),
+            null_price_rows=0,
+            invalid_date_rows=0,
+            split_adjustments_path="vesper/data/massive/split_adjustments.json",
+            split_adjustments_sha256="d" * 64,
+            evidence=(artifact("data-research"),),
+        )
+
+
+class ModelEvaluator:
+    def __init__(self):
+        self.calls = []
+
+    def evaluate(self, request):
+        self.calls.append(request)
+        return ModelEvaluationResult(
+            **COMMON,
+            available=True,
+            configured_model_path="models/xgb_ranker.json",
+            metadata_path="models/xgb_ranker.metadata.json",
+            actual_sha256="e" * 64,
+            expected_sha256="e" * 64,
+            hash_matches=True,
+            label_horizon=5,
+            train_ic=0.04,
+            out_of_sample_ic=0.03,
+            train_samples=100,
+            test_samples=50,
+            evaluation_passed=True,
+            evidence=(artifact("model-evaluation"),),
+        )
+
+
 class QueuedValidator:
     def __init__(self, results):
         self.results = deque(results)
@@ -131,8 +199,18 @@ class QueuedRiskReviewer:
         self.decisions = deque(decisions)
         self.calls = []
 
-    def review(self, request, development_receipt, validation):
-        self.calls.append((request, development_receipt, validation))
+    def review(
+        self,
+        request,
+        development_receipt,
+        validation,
+        *,
+        data_research,
+        model_evaluation,
+    ):
+        self.calls.append(
+            (request, development_receipt, validation, data_research, model_evaluation)
+        )
         decision = self.decisions.popleft()
         return RiskReviewDecision(
             **COMMON,
@@ -153,14 +231,21 @@ def controller(
     risks=(RiskDecision.APPROVE,),
     workspace_hasher=lambda _workspace: "b" * 64,
     evidence_reader=None,
+    data_researcher=None,
+    model_evaluator=None,
+    specialist_executor=None,
 ):
-    specialists = QueuedSpecialists()
+    specialists = specialist_executor or QueuedSpecialists()
+    data_researcher = data_researcher or DataResearcher()
+    model_evaluator = model_evaluator or ModelEvaluator()
     validator = QueuedValidator(validations)
     reviewer = QueuedRiskReviewer(risks)
     graph = build_workflow(
         checkpointer=persistence.checkpointer,
         store=persistence.langgraph_store,
         specialists=specialists,
+        data_researcher=data_researcher,
+        model_evaluator=model_evaluator,
         validator=validator,
         risk_reviewer=reviewer,
         workspace_hasher=workspace_hasher,
@@ -182,6 +267,133 @@ def controller(
     )
 
 
+@pytest.mark.parametrize("foreign_stage", ("data", "model"))
+def test_research_nodes_fail_closed_on_foreign_authority(tmp_path, foreign_stage):
+    class ForeignDataResearcher(DataResearcher):
+        def research(self, request):
+            return super().research(request).model_copy(update={"run_id": "foreign"})
+
+    class ForeignModelEvaluator(ModelEvaluator):
+        def evaluate(self, request):
+            return super().evaluate(request).model_copy(update={"run_id": "foreign"})
+
+    options = (
+        {"data_researcher": ForeignDataResearcher()}
+        if foreign_stage == "data"
+        else {"model_evaluator": ForeignModelEvaluator()}
+    )
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, specialists, validator, reviewer = controller(persistence, **options)
+
+        view = workflow.start(task(tmp_path))
+
+    assert view.state.status is RunStatus.FAILED
+    assert (
+        foreign_stage.replace("data", "Data Research").replace("model", "Model Evaluation")
+        in view.state.terminal_reason
+    )
+    assert specialists.calls == []
+    assert validator.calls == []
+    assert reviewer.calls == []
+
+
+@pytest.mark.parametrize("failed_stage", ("data", "model"))
+def test_research_readiness_failure_stops_before_product(tmp_path, failed_stage):
+    class UnavailableDataResearcher(DataResearcher):
+        def research(self, request):
+            return (
+                super()
+                .research(request)
+                .model_copy(update={"available": False, "warnings": ("data unavailable",)})
+            )
+
+    class FailedModelEvaluator(ModelEvaluator):
+        def evaluate(self, request):
+            return (
+                super()
+                .evaluate(request)
+                .model_copy(
+                    update={
+                        "expected_sha256": "f" * 64,
+                        "hash_matches": False,
+                        "evaluation_passed": False,
+                        "warnings": ("model failed",),
+                    }
+                )
+            )
+
+    options = (
+        {"data_researcher": UnavailableDataResearcher()}
+        if failed_stage == "data"
+        else {"model_evaluator": FailedModelEvaluator()}
+    )
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, specialists, validator, reviewer = controller(persistence, **options)
+
+        view = workflow.start(task(tmp_path))
+
+    assert view.state.status is RunStatus.OPERATOR_INTERVENTION
+    assert "Research readiness gate failed" in view.state.terminal_reason
+    assert specialists.calls == []
+    assert validator.calls == []
+    assert reviewer.calls == []
+
+
+def test_resumed_product_rechecks_research_evidence_before_specialist_execution(tmp_path):
+    class CrashOnceAtProduct(QueuedSpecialists):
+        def __init__(self):
+            super().__init__()
+            self.crash = True
+
+        def execute(self, request):
+            if request.role is SpecialistRole.PRODUCT and self.crash:
+                self.crash = False
+                raise RuntimeError("simulated controller loss before Product completed")
+            return super().execute(request)
+
+    evidence_available = True
+
+    def read_evidence(_artifact):
+        if not evidence_available:
+            raise OSError("research evidence removed")
+        return b"verified"
+
+    specialists = CrashOnceAtProduct()
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, _, validator, reviewer = controller(
+            persistence,
+            evidence_reader=read_evidence,
+            specialist_executor=specialists,
+        )
+        with pytest.raises(RuntimeError, match="controller loss"):
+            workflow.start(task(tmp_path))
+
+        evidence_available = False
+        view = workflow.resume("run-001")
+
+    assert view.state.status is RunStatus.OPERATOR_INTERVENTION
+    assert "evidence integrity" in view.state.terminal_reason
+    assert specialists.calls == []
+    assert validator.calls == []
+    assert reviewer.calls == []
+
+
+def test_pre_research_checkpoint_requires_explicit_new_run(tmp_path):
+    legacy = SimpleNamespace(
+        values={
+            "task": task(tmp_path).model_dump(mode="json"),
+            "status": RunStatus.PRODUCT.value,
+        },
+        config={"configurable": {"checkpoint_id": "legacy-checkpoint"}},
+    )
+    graph = SimpleNamespace(get_state=lambda _config: legacy)
+    store = SimpleNamespace(get=lambda *_args: None)
+    workflow = WorkflowController(graph=graph, store=store)
+
+    with pytest.raises(PendingApprovalError, match="predates required"):
+        workflow.inspect("run-001")
+
+
 def test_product_routes_to_development_then_validation_and_risk(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         workflow, specialists, validator, reviewer = controller(persistence)
@@ -195,8 +407,17 @@ def test_product_routes_to_development_then_validation_and_risk(tmp_path):
     ]
     assert len(validator.calls) == 1
     assert len(reviewer.calls) == 1
+    assert view.state.data_research is not None
+    assert view.state.model_evaluation is not None
+    assert "Controller-owned read-only research context" in specialists.calls[0].instructions
+    assert '"row_count": 100' in specialists.calls[0].instructions
+    assert "runs/run-001/data-research.json" not in specialists.calls[0].instructions
+    assert reviewer.calls[0][3] == view.state.data_research
+    assert reviewer.calls[0][4] == view.state.model_evaluation
     assert view.pending_approval is not None
     assert {item.artifact_id for item in view.pending_approval.evidence} == {
+        "data-research",
+        "model-evaluation",
         "v20-product-1",
         "v20-development-1",
         "validation-1",
@@ -441,6 +662,8 @@ def test_usage_limit_stops_without_consuming_correction_budget(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=specialists,
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=QueuedRiskReviewer((RiskDecision.APPROVE,)),
             clock=lambda: NOW,
@@ -465,6 +688,8 @@ def test_completed_product_without_typed_output_fails_closed(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=MissingOutputSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=QueuedRiskReviewer((RiskDecision.APPROVE,)),
             clock=lambda: NOW,
@@ -494,7 +719,7 @@ def test_risk_infrastructure_failure_persists_receipt_and_stops(
     error_code,
 ):
     class InfrastructureReviewer:
-        def review(self, request, development_receipt, validation):
+        def review(self, request, development_receipt, validation, **_research):
             return RiskReviewExecution(
                 receipt=SpecialistReceipt(
                     **COMMON,
@@ -511,6 +736,8 @@ def test_risk_infrastructure_failure_persists_receipt_and_stops(
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=QueuedSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=InfrastructureReviewer(),
             clock=lambda: NOW,
@@ -529,8 +756,8 @@ def test_risk_infrastructure_failure_persists_receipt_and_stops(
 
 def test_mismatched_risk_authority_fails_closed_without_approval(tmp_path):
     class MismatchedReviewer(QueuedRiskReviewer):
-        def review(self, request, development_receipt, validation):
-            valid = super().review(request, development_receipt, validation)
+        def review(self, request, development_receipt, validation, **_research):
+            valid = super().review(request, development_receipt, validation, **_research)
             return valid.model_copy(update={"task_id": "different-task"})
 
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
@@ -539,6 +766,8 @@ def test_mismatched_risk_authority_fails_closed_without_approval(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=specialists,
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=MismatchedReviewer((RiskDecision.APPROVE,)),
             clock=lambda: NOW,
@@ -564,6 +793,8 @@ def test_mismatched_specialist_evidence_authority_fails_closed(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=MismatchedEvidenceSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=QueuedRiskReviewer((RiskDecision.APPROVE,)),
             clock=lambda: NOW,
@@ -589,6 +820,8 @@ def test_mismatched_validation_evidence_authority_fails_closed(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=QueuedSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=MismatchedEvidenceValidator((True,)),
             risk_reviewer=QueuedRiskReviewer((RiskDecision.APPROVE,)),
             clock=lambda: NOW,
@@ -603,8 +836,8 @@ def test_mismatched_validation_evidence_authority_fails_closed(tmp_path):
 
 def test_mismatched_risk_evidence_authority_fails_closed(tmp_path):
     class MismatchedEvidenceReviewer(QueuedRiskReviewer):
-        def review(self, request, development_receipt, validation):
-            valid = super().review(request, development_receipt, validation)
+        def review(self, request, development_receipt, validation, **_research):
+            valid = super().review(request, development_receipt, validation, **_research)
             foreign = artifact("foreign-risk").model_copy(
                 update={"repository_revision": "different-revision"}
             )
@@ -615,6 +848,8 @@ def test_mismatched_risk_evidence_authority_fails_closed(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=QueuedSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=MismatchedEvidenceReviewer((RiskDecision.APPROVE,)),
             clock=lambda: NOW,
@@ -701,6 +936,8 @@ def test_product_typed_brief_is_injected_into_development(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=specialists,
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=QueuedRiskReviewer((RiskDecision.APPROVE,)),
             workspace_hasher=lambda _workspace: "b" * 64,
@@ -719,8 +956,8 @@ def test_product_typed_brief_is_injected_into_development(tmp_path):
 
 def test_risk_execution_receipt_is_persisted_in_graph_state(tmp_path):
     class ReceiptReviewer(QueuedRiskReviewer):
-        def review(self, request, development_receipt, validation):
-            decision = super().review(request, development_receipt, validation)
+        def review(self, request, development_receipt, validation, **_research):
+            decision = super().review(request, development_receipt, validation, **_research)
             return RiskReviewExecution(
                 receipt=receipt(SpecialistRole.RISK_REVIEW, development_receipt.attempt),
                 decision=decision.model_copy(
@@ -737,6 +974,8 @@ def test_risk_execution_receipt_is_persisted_in_graph_state(tmp_path):
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=QueuedSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=ReceiptReviewer((RiskDecision.APPROVE,)),
             workspace_hasher=lambda _workspace: "b" * 64,
@@ -770,8 +1009,8 @@ def test_risk_hold_or_failed_compliance_requires_operator_intervention(
     compliance,
 ):
     class FailClosedReviewer(QueuedRiskReviewer):
-        def review(self, request, development_receipt, validation):
-            result = super().review(request, development_receipt, validation)
+        def review(self, request, development_receipt, validation, **_research):
+            result = super().review(request, development_receipt, validation, **_research)
             return result.model_copy(
                 update={
                     "decision": decision,
@@ -786,6 +1025,8 @@ def test_risk_hold_or_failed_compliance_requires_operator_intervention(
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=QueuedSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=FailClosedReviewer((decision,)),
             clock=lambda: NOW,
@@ -802,8 +1043,8 @@ def test_risk_hold_or_failed_compliance_requires_operator_intervention(
 
 def test_legacy_risk_approval_without_compliance_gates_cannot_reach_approval(tmp_path):
     class LegacyReviewer(QueuedRiskReviewer):
-        def review(self, request, development_receipt, validation):
-            result = super().review(request, development_receipt, validation)
+        def review(self, request, development_receipt, validation, **_research):
+            result = super().review(request, development_receipt, validation, **_research)
             return result.model_copy(
                 update={
                     "scope_compliant": None,
@@ -817,6 +1058,8 @@ def test_legacy_risk_approval_without_compliance_gates_cannot_reach_approval(tmp
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=QueuedSpecialists(),
+            data_researcher=DataResearcher(),
+            model_evaluator=ModelEvaluator(),
             validator=QueuedValidator((True,)),
             risk_reviewer=LegacyReviewer((RiskDecision.APPROVE,)),
             clock=lambda: NOW,

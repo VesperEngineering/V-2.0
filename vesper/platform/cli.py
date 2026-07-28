@@ -11,12 +11,19 @@ from typing import Callable, Mapping, Protocol
 
 import typer
 
+_DEFAULT_RESEARCH_DATA_ROOT = Path(__file__).resolve().parents[2] / "vesper" / "data" / "massive"
+
 
 @dataclass(frozen=True, slots=True)
 class CliConfig:
     state_db: Path
     evidence_root: Path
     profiles_root: Path
+    runtime: str = "docker-codex"
+    model: str | None = None
+    credential_environment_key: str | None = None
+    allow_repository_root_workspace: bool = False
+    research_data_root: Path = _DEFAULT_RESEARCH_DATA_ROOT
 
 
 class PlatformService(Protocol):
@@ -76,7 +83,15 @@ def _default_service_factory(config: CliConfig) -> PlatformService:
         store_db=state_db.parent / "store.sqlite3",
         evidence_root=config.evidence_root.resolve(),
     )
-    return LocalPlatformService(paths, profiles_root=config.profiles_root)
+    return LocalPlatformService(
+        paths,
+        profiles_root=config.profiles_root,
+        specialist_runtime=config.runtime,
+        opencode_model=config.model,
+        opencode_credential_environment_key=config.credential_environment_key,
+        allow_repository_root_workspace=config.allow_repository_root_workspace,
+        research_data_root=config.research_data_root,
+    )
 
 
 def _emit(value: object, *, json_output: bool) -> None:
@@ -136,10 +151,44 @@ def build_app(
             "--profiles-root",
             help="Native profile catalog.",
         ),
+        runtime: str = typer.Option(
+            "docker-codex",
+            "--runtime",
+            help="Specialist runtime: docker-codex or opencode.",
+        ),
+        model: str | None = typer.Option(
+            None,
+            "--model",
+            help="Exact provider/model required by the OpenCode runtime.",
+        ),
+        credential_environment_key: str | None = typer.Option(
+            None,
+            "--credential-environment-key",
+            help="Environment variable name for the selected OpenCode provider credential.",
+        ),
+        allow_repository_root_workspace: bool = typer.Option(
+            False,
+            "--allow-repository-root-workspace",
+            help="Allow OpenCode to work across a clean disposable clone root.",
+        ),
+        research_data_root: Path = typer.Option(
+            _DEFAULT_RESEARCH_DATA_ROOT,
+            "--research-data-root",
+            help="Controller-owned read-only Massive data root.",
+        ),
         json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
     ) -> None:
         context.obj = _Context(
-            config=CliConfig(state_db, evidence_root, profiles_root),
+            config=CliConfig(
+                state_db,
+                evidence_root,
+                profiles_root,
+                runtime,
+                model,
+                credential_environment_key,
+                allow_repository_root_workspace,
+                research_data_root,
+            ),
             json_output=json_output,
             service_factory=service_factory,
         )
@@ -191,7 +240,7 @@ def build_app(
 
     @app.command("active")
     def list_active_runs(context: typer.Context) -> None:
-        """List running or crash-interrupted runs and active sandbox metadata."""
+        """List running or crash-interrupted runs and active runtime metadata."""
         _call(context, "list_active_runs")
 
     @app.command("approve")

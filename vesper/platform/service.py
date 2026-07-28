@@ -25,7 +25,14 @@ from .contracts import (
 from .control import RuntimeControl
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
+from .opencode import (
+    OpenCodeGateway,
+    _process_exists,
+    _process_identity,
+    _terminate_process_tree,
+)
 from .profiles import ProfileCatalog
+from .research import LocalDataResearcher, LocalModelEvaluator
 from .sandbox_runtime import DockerCodexRuntime
 from .validation import LocalDeterministicValidator, validate_acceptance_checks
 from .worktree import inspect_worktree
@@ -38,6 +45,21 @@ from .workflow import (
 
 RUN_RUNTIME_NAMESPACE = ("system", "run-runtime")
 M2_APPROVED_WORKSPACE = Path("docs/m2-controlled-exercise")
+DOCKER_CODEX_RUNTIME = "docker-codex"
+OPENCODE_RUNTIME = "opencode"
+ROOT_WORKSPACE_PROTECTED_PATHS = (
+    Path(".git"),
+    Path(".state"),
+    Path(".env"),
+    Path("AGENTS.md"),
+    Path("SKILLS"),
+    Path("profiles"),
+    Path("vesper/platform"),
+    Path("config/settings.yaml"),
+    Path("models"),
+    Path("vesper/data/massive"),
+    Path("vesper/data/model_research"),
+)
 
 
 class SpecialistRuntimeUnavailable(RuntimeError):
@@ -114,6 +136,16 @@ class _UnavailableRiskReviewer:
         raise SpecialistRuntimeUnavailable("Risk Review specialist is not configured")
 
 
+class _UnavailableDataResearcher:
+    def research(self, request):
+        raise SpecialistRuntimeUnavailable("Data Research is not configured")
+
+
+class _UnavailableModelEvaluator:
+    def evaluate(self, request):
+        raise SpecialistRuntimeUnavailable("Model Evaluation is not configured")
+
+
 class LocalPlatformService:
     """Open local persistence per command and expose graph lifecycle operations."""
 
@@ -124,6 +156,11 @@ class LocalPlatformService:
         controller_factory: Callable[[PlatformPersistence], WorkflowController] | None = None,
         profiles_root: Path | None = None,
         adapter_factory: Callable[[Path, tuple[str, ...]], object] | None = None,
+        specialist_runtime: str = DOCKER_CODEX_RUNTIME,
+        opencode_model: str | None = None,
+        opencode_credential_environment_key: str | None = None,
+        allow_repository_root_workspace: bool = False,
+        research_data_root: Path | None = None,
         require_disposable_worktree: bool = True,
         require_clean_worktree: bool = True,
         required_branch_prefix: str = "m2/",
@@ -139,6 +176,28 @@ class LocalPlatformService:
             Path("profiles/native").resolve() if profiles_root is None else profiles_root.resolve()
         )
         self._adapter_factory = adapter_factory
+        self._validate_runtime_configuration(
+            specialist_runtime,
+            opencode_model,
+            opencode_credential_environment_key,
+        )
+        self._specialist_runtime = specialist_runtime
+        self._opencode_model = opencode_model
+        self._opencode_credential_environment_key = opencode_credential_environment_key
+        if allow_repository_root_workspace and specialist_runtime != OPENCODE_RUNTIME:
+            raise SpecialistRuntimeUnavailable(
+                "repository-root workspace requires the OpenCode runtime"
+            )
+        if allow_repository_root_workspace and not require_disposable_worktree:
+            raise SpecialistRuntimeUnavailable(
+                "repository-root workspace requires a standalone disposable clone"
+            )
+        self._allow_repository_root_workspace = allow_repository_root_workspace
+        self._research_data_root = (
+            (Path(__file__).resolve().parents[2] / "vesper" / "data" / "massive")
+            if research_data_root is None
+            else research_data_root.resolve()
+        )
         self._require_disposable_worktree = require_disposable_worktree
         self._require_clean_worktree = require_clean_worktree
         self._required_branch_prefix = required_branch_prefix
@@ -236,6 +295,15 @@ class LocalPlatformService:
                             "repository_revision": repository_revision,
                             "profiles_root": str(self._profiles_root),
                             "profile_fingerprints": profile_fingerprints,
+                            "specialist_runtime": self._specialist_runtime,
+                            "specialist_model": self._opencode_model,
+                            "credential_environment_key": (
+                                self._opencode_credential_environment_key
+                            ),
+                            "allow_repository_root_workspace": (
+                                self._allow_repository_root_workspace
+                            ),
+                            "research_data_root": str(self._research_data_root),
                         },
                     )
                 view = self._controller(persistence, repository_root=repository_root).start(task)
@@ -275,6 +343,8 @@ class LocalPlatformService:
                     in {
                         "running",
                         RunStatus.INTERRUPTED.value,
+                        RunStatus.DATA_RESEARCH.value,
+                        RunStatus.MODEL_EVALUATION.value,
                         RunStatus.PRODUCT.value,
                         RunStatus.DEVELOPMENT.value,
                         RunStatus.VALIDATION.value,
@@ -298,6 +368,10 @@ class LocalPlatformService:
         with open_persistence(self.paths) as persistence:
             view = self._controller(persistence).inspect(run_id)
         artifacts = []
+        if view.state.data_research is not None:
+            artifacts.extend(view.state.data_research.evidence)
+        if view.state.model_evaluation is not None:
+            artifacts.extend(view.state.model_evaluation.evidence)
         for receipt in view.state.receipts:
             artifacts.extend(receipt.evidence)
         if view.state.validation is not None:
@@ -393,37 +467,83 @@ class LocalPlatformService:
         persistence: PlatformPersistence,
         *,
         repository_root: Path | None = None,
+        specialist_runtime: str | None = None,
+        opencode_model: str | None = None,
+        opencode_credential_environment_key: str | None = None,
+        allow_repository_root_workspace: bool | None = None,
     ) -> WorkflowController:
         if self._controller_factory is not None:
             return self._controller_factory(persistence)
         if repository_root is not None:
+            runtime_name = specialist_runtime or self._specialist_runtime
+            if specialist_runtime is None:
+                opencode_model = self._opencode_model
+                opencode_credential_environment_key = self._opencode_credential_environment_key
+                allow_repository_root_workspace = self._allow_repository_root_workspace
+            if allow_repository_root_workspace is None:
+                allow_repository_root_workspace = False
+            self._validate_runtime_configuration(
+                runtime_name,
+                opencode_model,
+                opencode_credential_environment_key,
+            )
             if not self._profiles_root.is_relative_to(repository_root):
                 raise SpecialistRuntimeUnavailable(
                     "native profile catalog must be inside the approved clone"
                 )
             profiles = ProfileCatalog(self._profiles_root)
             loaded = profiles.load_all()
-            models = tuple(sorted({profile.model.name for profile in loaded}))
-            adapter = (
-                self._adapter_factory(repository_root, models)
-                if self._adapter_factory is not None
-                else DockerCodexRuntime(
+            profile_models = tuple(sorted({profile.model.name for profile in loaded}))
+            approved_models = (
+                (opencode_model,) if runtime_name == OPENCODE_RUNTIME else profile_models
+            )
+            protected_paths = (
+                *(repository_root / relative for relative in ROOT_WORKSPACE_PROTECTED_PATHS),
+                *(
+                    repository_root / relative / "README.md"
+                    for relative in self._approved_workspace_relative_paths
+                ),
+            )
+            if self._adapter_factory is not None:
+                adapter = self._adapter_factory(repository_root, approved_models)
+            elif runtime_name == OPENCODE_RUNTIME:
+                provider = opencode_model.split("/", maxsplit=1)[0]
+                credential_keys = (
+                    {}
+                    if opencode_credential_environment_key is None
+                    else {provider: opencode_credential_environment_key}
+                )
+                adapter = OpenCodeGateway(
                     repository_root=repository_root,
-                    approved_models=models,
+                    approved_models=approved_models,
+                    credential_environment_keys=credential_keys,
+                    protected_paths=protected_paths,
                     control=self.control,
                     clock=self._clock,
                 )
-            )
+            else:
+                adapter = DockerCodexRuntime(
+                    repository_root=repository_root,
+                    approved_models=approved_models,
+                    control=self.control,
+                    clock=self._clock,
+                )
             composition = NativeSpecialistComposition(
                 repository_root=repository_root,
                 profiles=profiles,
                 adapter=adapter,
                 evidence=persistence.evidence,
                 turn_store=persistence.store,
-                protected_paths=tuple(
-                    repository_root / relative / "README.md"
-                    for relative in self._approved_workspace_relative_paths
+                protected_paths=protected_paths,
+                model_override=(opencode_model if runtime_name == OPENCODE_RUNTIME else None),
+                execution_runtime=("opencode" if runtime_name == OPENCODE_RUNTIME else "codex"),
+                authentication_type=(
+                    "opencode-local" if runtime_name == OPENCODE_RUNTIME else "chatgpt"
                 ),
+                permission_profile=(
+                    "opencode-host" if runtime_name == OPENCODE_RUNTIME else "docker-one-shot"
+                ),
+                allow_repository_root_workspace=allow_repository_root_workspace,
                 clock=self._clock,
                 id_factory=self._id_factory,
             )
@@ -431,6 +551,17 @@ class LocalPlatformService:
                 checkpointer=persistence.checkpointer,
                 store=persistence.langgraph_store,
                 specialists=composition,
+                data_researcher=LocalDataResearcher(
+                    repository_root,
+                    persistence.evidence,
+                    clock=self._clock,
+                    massive_data_root=self._research_data_root,
+                ),
+                model_evaluator=LocalModelEvaluator(
+                    repository_root,
+                    persistence.evidence,
+                    clock=self._clock,
+                ),
                 validator=LocalDeterministicValidator(
                     repository_root=repository_root,
                     evidence=persistence.evidence,
@@ -457,6 +588,8 @@ class LocalPlatformService:
             checkpointer=persistence.checkpointer,
             store=persistence.langgraph_store,
             specialists=_UnavailableSpecialists(),
+            data_researcher=_UnavailableDataResearcher(),
+            model_evaluator=_UnavailableModelEvaluator(),
             validator=_UnavailableValidator(),
             risk_reviewer=_UnavailableRiskReviewer(),
             clock=self._clock,
@@ -475,9 +608,11 @@ class LocalPlatformService:
             return self._controller(persistence)
         try:
             repository_root = Path(str(runtime["repository_root"])).resolve()
+            workspace = Path(str(runtime["workspace"])).resolve()
             expected_revision = str(runtime["repository_revision"])
             profiles_root = Path(str(runtime["profiles_root"])).resolve()
             expected_profile_fingerprints = runtime["profile_fingerprints"]
+            persisted_research_data_root = Path(str(runtime["research_data_root"])).resolve()
         except KeyError as exc:
             raise SpecialistRuntimeUnavailable(
                 "persisted run runtime metadata is malformed"
@@ -490,6 +625,18 @@ class LocalPlatformService:
             raise SpecialistRuntimeUnavailable(
                 "native profile bytes differ from the persisted run runtime"
             )
+        if persisted_research_data_root != self._research_data_root:
+            raise SpecialistRuntimeUnavailable(
+                "configured research data root differs from the persisted run runtime"
+            )
+        allow_repository_root_workspace = bool(
+            runtime.get("allow_repository_root_workspace", False)
+        )
+        self._validate_production_boundaries(
+            repository_root,
+            workspace,
+            allow_repository_root_workspace=allow_repository_root_workspace,
+        )
         context = inspect_worktree(
             repository_root,
             require_standalone=self._require_disposable_worktree,
@@ -502,7 +649,19 @@ class LocalPlatformService:
             raise SpecialistRuntimeUnavailable(
                 "persisted run revision no longer matches the clone HEAD"
             )
-        return self._controller(persistence, repository_root=repository_root)
+        runtime_name = str(runtime.get("specialist_runtime", DOCKER_CODEX_RUNTIME))
+        raw_model = runtime.get("specialist_model")
+        raw_credential_key = runtime.get("credential_environment_key")
+        model = None if raw_model is None else str(raw_model)
+        credential_key = None if raw_credential_key is None else str(raw_credential_key)
+        return self._controller(
+            persistence,
+            repository_root=repository_root,
+            specialist_runtime=runtime_name,
+            opencode_model=model,
+            opencode_credential_environment_key=credential_key,
+            allow_repository_root_workspace=allow_repository_root_workspace,
+        )
 
     @contextmanager
     def _lease_for_run(
@@ -528,38 +687,108 @@ class LocalPlatformService:
         with _repository_lease(repository_root, wait_seconds=wait_seconds):
             active = self.control.active_execution(run_id)
             if active is not None:
-                execution_id = str(active.get("execution_id", ""))
-                sandbox_name = str(active.get("sandbox_name", ""))
-                if not execution_id or not sandbox_name:
+                runtime_name = str(runtime.get("specialist_runtime", DOCKER_CODEX_RUNTIME))
+                if runtime_name == OPENCODE_RUNTIME:
+                    execution_id = str(active.get("execution_id", ""))
+                    role = str(active.get("role", ""))
+                    process_identity = str(active.get("process_identity", ""))
+                    try:
+                        process_id = int(active.get("process_id", 0))
+                    except (TypeError, ValueError):
+                        process_id = 0
+                    if (
+                        active.get("run_id") != run_id
+                        or active.get("runtime") != OPENCODE_RUNTIME
+                        or not execution_id
+                        or role not in {item.value for item in SpecialistRole}
+                        or process_id <= 0
+                        or not process_identity
+                    ):
+                        raise SpecialistRuntimeUnavailable(
+                            "persisted active OpenCode process identity is invalid"
+                        )
+                    current_identity = _process_identity(process_id)
+                    if current_identity is None:
+                        if _process_exists(process_id) is not False:
+                            raise SpecialistRuntimeUnavailable(
+                                "persisted active OpenCode process cannot be identified"
+                            )
+                    elif current_identity != process_identity:
+                        raise SpecialistRuntimeUnavailable(
+                            "persisted active OpenCode PID has been reused"
+                        )
+                    _terminate_process_tree(process_id)
+                    self.control.clear_active(run_id, execution_id)
+                elif runtime_name != DOCKER_CODEX_RUNTIME:
                     raise SpecialistRuntimeUnavailable(
-                        "persisted active execution metadata is malformed"
+                        "host runtime active execution cannot be reconciled automatically"
                     )
-                role = str(active.get("role", ""))
-                if (
-                    active.get("run_id") != run_id
-                    or role not in {item.value for item in SpecialistRole}
-                    or sandbox_name != DockerCodexRuntime.expected_sandbox_name(role, execution_id)
-                ):
-                    raise SpecialistRuntimeUnavailable(
-                        "persisted active execution sandbox identity is invalid"
-                    )
-                if self._adapter_factory is not None:
-                    raise SpecialistRuntimeUnavailable(
-                        "custom runtime must reconcile its active sandbox before resume"
-                    )
-                DockerCodexRuntime(
-                    repository_root=repository_root,
-                    control=self.control,
-                ).reconcile_sandbox(sandbox_name)
-                self.control.clear_active(run_id, execution_id)
+                else:
+                    execution_id = str(active.get("execution_id", ""))
+                    sandbox_name = str(active.get("sandbox_name", ""))
+                    if not execution_id or not sandbox_name:
+                        raise SpecialistRuntimeUnavailable(
+                            "persisted active execution metadata is malformed"
+                        )
+                    role = str(active.get("role", ""))
+                    if (
+                        active.get("run_id") != run_id
+                        or role not in {item.value for item in SpecialistRole}
+                        or sandbox_name
+                        != DockerCodexRuntime.expected_sandbox_name(role, execution_id)
+                    ):
+                        raise SpecialistRuntimeUnavailable(
+                            "persisted active execution sandbox identity is invalid"
+                        )
+                    if self._adapter_factory is not None:
+                        raise SpecialistRuntimeUnavailable(
+                            "custom runtime must reconcile its active sandbox before resume"
+                        )
+                    DockerCodexRuntime(
+                        repository_root=repository_root,
+                        control=self.control,
+                    ).reconcile_sandbox(sandbox_name)
+                    self.control.clear_active(run_id, execution_id)
             yield
+
+    @staticmethod
+    def _validate_runtime_configuration(
+        specialist_runtime: str,
+        opencode_model: str | None,
+        credential_environment_key: str | None,
+    ) -> None:
+        if specialist_runtime not in {DOCKER_CODEX_RUNTIME, OPENCODE_RUNTIME}:
+            raise SpecialistRuntimeUnavailable(
+                f"unsupported specialist runtime: {specialist_runtime}"
+            )
+        if specialist_runtime == OPENCODE_RUNTIME:
+            if not opencode_model or "/" not in opencode_model:
+                raise SpecialistRuntimeUnavailable(
+                    "OpenCode runtime requires an exact provider/model"
+                )
+            if credential_environment_key == "":
+                raise SpecialistRuntimeUnavailable(
+                    "OpenCode credential environment key cannot be empty"
+                )
+            return
+        if opencode_model is not None or credential_environment_key is not None:
+            raise SpecialistRuntimeUnavailable(
+                "OpenCode model and credential binding require the OpenCode runtime"
+            )
 
     def _validate_production_boundaries(
         self,
         repository_root: Path,
         workspace: Path,
+        *,
+        allow_repository_root_workspace: bool | None = None,
     ) -> None:
-        if workspace == repository_root:
+        allow_root = (
+            self._allow_repository_root_workspace
+            if allow_repository_root_workspace is None
+            else allow_repository_root_workspace
+        )
+        if workspace == repository_root and not allow_root:
             raise SpecialistRuntimeUnavailable(
                 "specialist workspace must be a dedicated clone subdirectory"
             )
@@ -567,9 +796,12 @@ class LocalPlatformService:
             (repository_root / relative).resolve()
             for relative in self._approved_workspace_relative_paths
         )
-        if not approved_roots or not any(
-            workspace == approved or workspace.is_relative_to(approved)
-            for approved in approved_roots
+        if workspace != repository_root and (
+            not approved_roots
+            or not any(
+                workspace == approved or workspace.is_relative_to(approved)
+                for approved in approved_roots
+            )
         ):
             raise SpecialistRuntimeUnavailable(
                 "specialist workspace is outside the M2 controller-approved documentation boundary"
@@ -579,11 +811,26 @@ class LocalPlatformService:
                 "native profile catalog must be inside the approved clone"
             )
 
-        if self._profiles_root.is_relative_to(workspace) or workspace.is_relative_to(
-            self._profiles_root
+        if workspace != repository_root and (
+            self._profiles_root.is_relative_to(workspace)
+            or workspace.is_relative_to(self._profiles_root)
         ):
             raise SpecialistRuntimeUnavailable("specialist workspace overlaps native profiles")
+        if self._research_data_root.is_relative_to(
+            repository_root
+        ) or repository_root.is_relative_to(self._research_data_root):
+            raise SpecialistRuntimeUnavailable(
+                "research data root must not overlap the approved repository"
+            )
         state_roots = (self.paths.root.resolve(), self.paths.evidence_root.resolve())
+        if any(
+            state.is_relative_to(self._research_data_root)
+            or self._research_data_root.is_relative_to(state)
+            for state in state_roots
+        ):
+            raise SpecialistRuntimeUnavailable(
+                "platform state and evidence must not overlap the research data root"
+            )
         if any(
             state.is_relative_to(repository_root) or repository_root.is_relative_to(state)
             for state in state_roots
@@ -653,6 +900,16 @@ class LocalPlatformService:
             "checkpoint_id": view.checkpoint_id,
             "next_nodes": list(view.next_nodes),
             "correction_count": view.state.correction_count,
+            "data_research": (
+                None
+                if view.state.data_research is None
+                else view.state.data_research.model_dump(mode="json")
+            ),
+            "model_evaluation": (
+                None
+                if view.state.model_evaluation is None
+                else view.state.model_evaluation.model_dump(mode="json")
+            ),
             "pending_approval": (
                 None
                 if view.pending_approval is None

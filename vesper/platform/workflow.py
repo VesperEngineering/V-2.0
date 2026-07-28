@@ -1,4 +1,4 @@
-"""First native Product/Development/Validation/Risk LangGraph workflow."""
+"""Native research, model, Product, Development, Validation, and Risk workflow."""
 
 from __future__ import annotations
 
@@ -15,12 +15,14 @@ from typing import Callable, Mapping, Protocol, TypedDict
 from .contracts import (
     ApprovalDecision,
     CorrectionAttempt,
+    DataResearchResult,
     DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
     ExecutionStatus,
     GraphState,
     HumanApprovalDecision,
     HumanApprovalRequest,
+    ModelEvaluationResult,
     PermissionSet,
     ProductSpecialistOutput,
     RiskDecision,
@@ -76,7 +78,18 @@ class RiskReviewer(Protocol):
         request: TaskRequest,
         development_receipt: SpecialistReceipt,
         validation: ValidationResult,
+        *,
+        data_research: DataResearchResult,
+        model_evaluation: ModelEvaluationResult,
     ) -> RiskReviewDecision | RiskReviewExecution: ...
+
+
+class DataResearcher(Protocol):
+    def research(self, request: TaskRequest) -> DataResearchResult: ...
+
+
+class ModelEvaluator(Protocol):
+    def evaluate(self, request: TaskRequest) -> ModelEvaluationResult: ...
 
 
 class StorePort(Protocol):
@@ -89,6 +102,8 @@ class WorkflowRuntimeState(TypedDict, total=False):
     task: dict[str, object]
     status: str
     current_role: str | None
+    data_research: dict[str, object] | None
+    model_evaluation: dict[str, object] | None
     product_output: dict[str, object] | None
     correction_attempts: list[dict[str, object]]
     validation: dict[str, object] | None
@@ -169,6 +184,8 @@ def _workspace_sha256(workspace: Path) -> str:
     digest = hashlib.sha256()
     for current, directories, files in os.walk(root, followlinks=False):
         directory = Path(current)
+        if directory == root:
+            directories[:] = [name for name in directories if name not in {".git", ".state"}]
         directories.sort()
         files.sort()
         for name in (*directories, *files):
@@ -196,6 +213,12 @@ def _workspace_sha256(workspace: Path) -> str:
 
 def _approval_evidence(state: Mapping[str, object]) -> tuple[EvidenceArtifactRef, ...]:
     artifacts = []
+    raw_data_research = state.get("data_research")
+    if raw_data_research is not None:
+        artifacts.extend(_parse(DataResearchResult, raw_data_research).evidence)
+    raw_model_evaluation = state.get("model_evaluation")
+    if raw_model_evaluation is not None:
+        artifacts.extend(_parse(ModelEvaluationResult, raw_model_evaluation).evidence)
     for raw in state.get("receipts", []):
         artifacts.extend(_parse(SpecialistReceipt, raw).evidence)
     raw_validation = state.get("validation")
@@ -210,11 +233,43 @@ def _approval_evidence(state: Mapping[str, object]) -> tuple[EvidenceArtifactRef
     )
 
 
+def _research_summary(
+    data_research: DataResearchResult,
+    model_evaluation: ModelEvaluationResult,
+) -> dict[str, object]:
+    return {
+        "data": {
+            "available": data_research.available,
+            "row_count": data_research.row_count,
+            "ticker_count": data_research.ticker_count,
+            "start_date": data_research.start_date,
+            "end_date": data_research.end_date,
+            "null_price_rows": data_research.null_price_rows,
+            "invalid_date_rows": data_research.invalid_date_rows,
+            "split_adjustments_verified": data_research.split_adjustments_sha256 is not None,
+            "warnings": data_research.warnings,
+        },
+        "model": {
+            "available": model_evaluation.available,
+            "hash_matches": model_evaluation.hash_matches,
+            "label_horizon": model_evaluation.label_horizon,
+            "train_ic": model_evaluation.train_ic,
+            "out_of_sample_ic": model_evaluation.out_of_sample_ic,
+            "train_samples": model_evaluation.train_samples,
+            "test_samples": model_evaluation.test_samples,
+            "evaluation_passed": model_evaluation.evaluation_passed,
+            "warnings": model_evaluation.warnings,
+        },
+    }
+
+
 def build_workflow(
     *,
     checkpointer,
     store,
     specialists: SpecialistExecutor,
+    data_researcher: DataResearcher,
+    model_evaluator: ModelEvaluator,
     validator: DeterministicValidator,
     risk_reviewer: RiskReviewer,
     memory_service: MemoryService | None = None,
@@ -225,8 +280,74 @@ def build_workflow(
 ):
     """Compile the first bounded native workflow against local persistence."""
 
+    def data_research_node(state: WorkflowRuntimeState) -> dict[str, object]:
+        request = _parse(TaskRequest, state["task"])
+        result = data_researcher.research(request)
+        if not _authority_matches(request, result):
+            return {
+                "status": RunStatus.FAILED.value,
+                "current_role": None,
+                "terminal_reason": "Data Research authority mismatch",
+            }
+        return {
+            "status": RunStatus.MODEL_EVALUATION.value,
+            "current_role": None,
+            "data_research": _dump(result),
+        }
+
+    def model_evaluation_node(state: WorkflowRuntimeState) -> dict[str, object]:
+        request = _parse(TaskRequest, state["task"])
+        data_research = _parse(DataResearchResult, state["data_research"])
+        result = model_evaluator.evaluate(request)
+        if not _authority_matches(request, result):
+            return {
+                "status": RunStatus.FAILED.value,
+                "current_role": None,
+                "terminal_reason": "Model Evaluation authority mismatch",
+            }
+        if not data_research.available or not result.evaluation_passed:
+            reasons = [
+                *data_research.warnings,
+                *result.warnings,
+            ]
+            return {
+                "status": RunStatus.OPERATOR_INTERVENTION.value,
+                "current_role": None,
+                "model_evaluation": _dump(result),
+                "terminal_reason": ("Research readiness gate failed: " + "; ".join(reasons)),
+            }
+        return {
+            "status": RunStatus.PRODUCT.value,
+            "current_role": SpecialistRole.PRODUCT.value,
+            "model_evaluation": _dump(result),
+        }
+
     def product_node(state: WorkflowRuntimeState) -> dict[str, object]:
         request = _parse(TaskRequest, state["task"])
+        data_research = _parse(DataResearchResult, state["data_research"])
+        model_evaluation = _parse(ModelEvaluationResult, state["model_evaluation"])
+        if (
+            not _authority_matches(request, data_research)
+            or not _authority_matches(request, model_evaluation)
+            or not data_research.available
+            or not model_evaluation.evaluation_passed
+        ):
+            return {
+                "status": RunStatus.OPERATOR_INTERVENTION.value,
+                "current_role": None,
+                "terminal_reason": "Research readiness gate failed before Product.",
+            }
+        if evidence_reader is not None:
+            try:
+                for artifact in (*data_research.evidence, *model_evaluation.evidence):
+                    evidence_reader(artifact)
+            except Exception:
+                return {
+                    "status": RunStatus.OPERATOR_INTERVENTION.value,
+                    "current_role": None,
+                    "terminal_reason": "Research evidence integrity gate failed before Product.",
+                }
+        research_context = _research_summary(data_research, model_evaluation)
         specialist_input = SpecialistInput(
             run_id=request.run_id,
             task_id=request.task_id,
@@ -234,7 +355,11 @@ def build_workflow(
             created_at=request.created_at,
             role=SpecialistRole.PRODUCT,
             attempt=1,
-            instructions=f"Produce a bounded development brief for: {request.objective}",
+            instructions=(
+                f"Produce a bounded development brief for: {request.objective}\n"
+                "Controller-owned read-only research context:\n"
+                + json.dumps(research_context, sort_keys=True)
+            ),
             workspace=request.repository_root,
             memory_namespace=("profiles", "v20-product", "product-decisions"),
             permissions=PermissionSet(
@@ -401,7 +526,15 @@ def build_workflow(
         request = _parse(TaskRequest, state["task"])
         development_receipt = _latest_development_receipt(state)
         validation = _parse(ValidationResult, state["validation"])
-        review = risk_reviewer.review(request, development_receipt, validation)
+        data_research = _parse(DataResearchResult, state["data_research"])
+        model_evaluation = _parse(ModelEvaluationResult, state["model_evaluation"])
+        review = risk_reviewer.review(
+            request,
+            development_receipt,
+            validation,
+            data_research=data_research,
+            model_evaluation=model_evaluation,
+        )
         if isinstance(review, RiskReviewExecution):
             risk_receipt = review.receipt
             if (
@@ -558,12 +691,26 @@ def build_workflow(
         }
 
     builder = StateGraph(WorkflowRuntimeState)
+    builder.add_node("data_research", data_research_node)
+    builder.add_node("model_evaluation", model_evaluation_node)
     builder.add_node("product", product_node)
     builder.add_node("development", development_node)
     builder.add_node("validation", validation_node)
     builder.add_node("risk_review", risk_review_node)
     builder.add_node("human_approval", human_approval_node)
-    builder.add_edge(START, "product")
+    builder.add_edge(START, "data_research")
+    builder.add_conditional_edges(
+        "data_research",
+        lambda state: (
+            "model_evaluation" if state["status"] == RunStatus.MODEL_EVALUATION.value else "end"
+        ),
+        {"model_evaluation": "model_evaluation", "end": END},
+    )
+    builder.add_conditional_edges(
+        "model_evaluation",
+        lambda state: "product" if state["status"] == RunStatus.PRODUCT.value else "end",
+        {"product": "product", "end": END},
+    )
     builder.add_conditional_edges(
         "product",
         lambda state: "development" if state["status"] == RunStatus.DEVELOPMENT.value else "end",
@@ -643,8 +790,10 @@ class WorkflowController:
     def start(self, task: TaskRequest) -> WorkflowView:
         initial: WorkflowRuntimeState = {
             "task": _dump(task),
-            "status": RunStatus.PRODUCT.value,
-            "current_role": SpecialistRole.PRODUCT.value,
+            "status": RunStatus.DATA_RESEARCH.value,
+            "current_role": None,
+            "data_research": None,
+            "model_evaluation": None,
             "product_output": None,
             "correction_attempts": [],
             "validation": None,
@@ -666,6 +815,10 @@ class WorkflowController:
 
     def inspect(self, run_id: str) -> WorkflowView:
         snapshot = self.snapshot(run_id)
+        if "data_research" not in snapshot.values or "model_evaluation" not in snapshot.values:
+            raise PendingApprovalError(
+                "run predates required Data Research and Model Evaluation; create a new run"
+            )
         checkpoint_id = str(snapshot.config["configurable"]["checkpoint_id"])
         pending = self._ensure_approval_request(snapshot, checkpoint_id)
         state = self._state_contract(snapshot.values, pending)
@@ -705,6 +858,8 @@ class WorkflowController:
                 view.state.status
                 not in {
                     RunStatus.PRODUCT,
+                    RunStatus.DATA_RESEARCH,
+                    RunStatus.MODEL_EVALUATION,
                     RunStatus.DEVELOPMENT,
                     RunStatus.VALIDATION,
                     RunStatus.RISK_REVIEW,
@@ -830,6 +985,8 @@ class WorkflowController:
             "task": values["task"],
             "status": values["status"],
             "current_role": values.get("current_role"),
+            "data_research": values.get("data_research"),
+            "model_evaluation": values.get("model_evaluation"),
             "product_output": values.get("product_output"),
             "correction_attempts": values.get("correction_attempts", []),
             "validation": values.get("validation"),

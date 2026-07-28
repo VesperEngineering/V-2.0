@@ -15,13 +15,19 @@ The initial architecture must remain local, resumable, and narrow. It must not r
 
 ## Decision
 
-V20 will replace the target Hermes-oriented runtime with a native platform built around LangGraph, the LangGraph Store abstraction, LangMem-compatible memory consolidation, provider-neutral model-execution adapters, and SQLite for initial local persistence. Docker-isolated Codex is the first runtime; OpenCode remains a later multi-provider adapter. No Hermes runtime adapter will be built.
+V20 will replace the target Hermes-oriented runtime with a native platform built around LangGraph, the LangGraph Store abstraction, LangMem-compatible memory consolidation, provider-neutral model-execution adapters, and SQLite for initial local persistence. Docker-isolated Codex is the first sandboxed runtime; OpenCode is an opt-in host subprocess adapter. No Hermes runtime adapter will be built.
 
 ### Control graph
 
 The first vertical workflow is:
 
 ```text
+Controller Data Research
+        |
+        v
+Controller Model Evaluation
+        |
+        v
 Product supervisor
         |
         v
@@ -40,14 +46,19 @@ Human approval interrupt
 Final acceptance
 ```
 
-The Product supervisor is the graph owner. Development and Risk Review are independent specialist subgraphs. Deterministic validation is controller code, not a model judgment.
+LangGraph is the graph owner. Data Research, Model Evaluation, and deterministic validation are controller code, not model judgments. Product, Development, and Risk Review are independent specialist stages.
 
+- Data Research always runs first through a read-only SQLite URI and emits only bounded aggregate coverage, null-count, date-bound, and split-adjustment evidence; raw bars never enter graph state or prompts.
+- Its controller-owned Massive root is separate from the disposable specialist clone, opens SQLite with `mode=ro&immutable=1`, persists with the run, and must match on resume.
+- Model Evaluation always runs second, hashes but never loads or executes the configured artifact, validates bounded companion metadata, and excludes model parameters and unrelated settings from evidence.
+- Missing or malformed data, invalid bounded dates/metrics, unavailable model artifacts, and hash mismatches produce typed summaries and stop at operator intervention before Product.
 - A validation failure routes back to Development.
 - A Risk Review rejection routes back to Development.
 - The combined correction budget is at most three failed attempts for a workflow.
 - A third failed attempt stops automatic correction and requires operator intervention.
 - Risk approval does not finalize the task; it produces a real human-approval interrupt.
 - Final acceptance occurs only after explicit operator approval.
+- Acceptance additionally requires available Data Research and a passing Model Evaluation; legacy checkpoints without these stages require a new run.
 - The controller, not a specialist or model session, owns routing, validation, approval state, and acceptance.
 
 ### Persistence and evidence
@@ -58,6 +69,7 @@ SQLite is the initial local persistence boundary:
 - Long-term records are accessed through the LangGraph Store abstraction. The implementation phase must select or implement a compatible local SQLite-backed store without introducing hosted infrastructure.
 - LangMem-compatible consolidation operates only on validated memory candidates and writes through the Store boundary.
 - Large or immutable evidence remains in a filesystem evidence store. SQLite stores identifiers, hashes, paths, verification state, and relationships rather than duplicating artifact bodies.
+- Data Research and Model Evaluation evidence is revision-bound, included in Risk Review context, and required in the final human-approval evidence set.
 
 Checkpoint state, long-term memory, and authoritative filesystem evidence are separate concerns. A process interruption must be resumable from the checkpoint without treating an interrupted specialist call as successful.
 
@@ -65,7 +77,11 @@ Checkpoint state, long-term memory, and authoritative filesystem evidence are se
 
 V20 will expose narrow, provider-neutral execution adapters. The first adapter invokes Codex only inside an already-provisioned Docker sandbox bound to the exact disposable standalone repository. It verifies the sandbox identity, OpenAI OAuth mode, disabled MCP gateway, exact model-provider network allowlist, implicit default-deny behavior, and Git control-plane integrity. It captures bounded process metadata and emits typed receipts for timeout, cancellation, usage limits, permissions, and completion. LangGraph remains the only workflow controller; no model runtime owns V20 state, memory, routing, evidence, or approval.
 
-Docker Sandboxes brokers the operator's ChatGPT-authenticated OpenAI access without exposing the underlying token to V20 or the sandbox. Read-only requests retain Codex's inner read-only sandbox. Workspace-write requests use Codex's documented externally-sandboxed mode only after the Docker boundary passes preflight, because nested Bubblewrap cannot remount the Windows-backed workspace reliably. Each sandbox is uniquely provisioned for one specialist turn and force-removed after every outcome; a stopped guest is never reused because its disk state is not authoritative. The adapter must not read, print, copy, persist, or place authentication material into prompts, receipts, memory, or source control. OpenCode remains an approved future route for other providers once a provider API key can be supplied through the same credential boundary.
+Docker Sandboxes brokers the operator's ChatGPT-authenticated OpenAI access without exposing the underlying token to V20 or the sandbox. Read-only requests retain Codex's inner read-only sandbox. Workspace-write requests use Codex's documented externally-sandboxed mode only after the Docker boundary passes preflight, because nested Bubblewrap cannot remount the Windows-backed workspace reliably. Each sandbox is uniquely provisioned for one specialist turn and force-removed after every outcome; a stopped guest is never reused because its disk state is not authoritative. The adapter must not read, print, copy, persist, or place authentication material into prompts, receipts, memory, or source control.
+
+OpenCode may be used as an explicitly operator-selected host subprocess route when OS sandboxing is not required. `create` activates it only with an exact `provider/model`; the runtime, model, and optional credential environment-variable name persist with the run. Its adapter disables sharing, external plugins, and model-list fetching, isolates global and project configuration, and starts from a scrubbed environment. Product and Risk Review receive no tools. Development receives only repository-relative, workspace-scoped read/edit/write; shell, search, subagents, skills, web, and external paths remain denied. A caller may bind one environment variable name to a provider; only the selected provider's bound value crosses the process boundary, and a missing bound value fails before spawn. Providers available in pure mode may use OpenCode's local authentication without an environment binding; plugin-backed authentication remains unavailable while default plugins are disabled. Credential values must not enter commands, generated configuration, prompts, receipts, evidence, memory, or source control. The controller still owns deterministic validation, Risk Review routing, and persisted human approval.
+
+Repository-root execution is a separate explicit OpenCode grant. It requires a clean standalone clone retaining origin provenance, no Git submodules, an `m2/` branch, and an operator-supplied root-workspace flag that persists with the run. The adapter and controller independently protect top-level and nested Git control data, controller state, environment files, agent and profile policy, configured trading and risk settings, model artifacts, and protected data. OpenCode's patch tool is disabled because its move operation does not authorize the destination independently; exact edit and write tools remain path-scoped. A newly created JSON sidecar is treated as transport residue only when its parsed content exactly equals the model's final response; other JSON remains a task change. Before dispatch, the controller stores a durable rollback image for the writable, non-secret workspace. Cancelled, timed-out, invalid, and crash-interrupted turns restore that image. Host turns record their OS process identity outside the clone, poll the durable cancellation signal, terminate their process tree on request or timeout, and clear active state only after confirmed exit. Windows turns run in a kill-on-close Job Object so controller failure terminates descendants; POSIX turns use a dedicated process group. Crash recovery compares the live identity before terminating an orphan and never trusts or reuses an ambiguous or stale PID.
 
 ### Contracts and authority
 

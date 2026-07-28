@@ -145,3 +145,46 @@ def test_standalone_clone_requires_the_controller_approved_temporary_branch_pref
 
     with pytest.raises(WorktreeBoundaryError, match="branch"):
         inspect_worktree(clone, required_branch_prefix="m2/")
+
+
+def test_standalone_clone_with_gitlink_is_rejected(tmp_path):
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    git("init", "-q", cwd=primary)
+    (primary / "README.md").write_text("baseline\n", encoding="utf-8")
+    git("add", "README.md", cwd=primary)
+    git(
+        "-c",
+        "user.name=V20 Test",
+        "-c",
+        "user.email=v20-test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "baseline",
+        cwd=primary,
+    )
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=primary,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    git("update-index", "--add", "--cacheinfo", f"160000,{revision},vendor/library", cwd=primary)
+    git(
+        "-c",
+        "user.name=V20 Test",
+        "-c",
+        "user.email=v20-test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "gitlink",
+        cwd=primary,
+    )
+    clone = tmp_path / "clone"
+    git("clone", "-q", str(primary), str(clone), cwd=tmp_path)
+
+    with pytest.raises(WorktreeBoundaryError, match="submodules"):
+        inspect_worktree(clone)
