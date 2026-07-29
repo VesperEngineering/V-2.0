@@ -72,7 +72,6 @@ uv run --locked ruff format `
   vesper/platform/workflow.py `
   vesper/platform/service.py `
   vesper/platform/cli.py `
-  vesper/platform/persistence.py `
   tests/platform/test_contracts.py `
   tests/platform/test_knowledge.py `
   tests/platform/test_knowledge_lifecycle.py `
@@ -100,6 +99,7 @@ uv run --locked ruff format --check `
   vesper/platform/workflow.py `
   vesper/platform/service.py `
   vesper/platform/cli.py `
+  vesper/platform/persistence.py `
   tests/platform/test_contracts.py `
   tests/platform/test_knowledge.py `
   tests/platform/test_knowledge_lifecycle.py `
