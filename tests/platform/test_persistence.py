@@ -86,9 +86,11 @@ def test_persistence_creates_only_explicit_local_paths(tmp_path):
 
     assert paths.checkpoint_db.is_file()
     assert paths.store_db.is_file()
+    assert paths.knowledge_index_db.is_file()
     assert paths.evidence_root.is_dir()
     assert {path.name for path in paths.root.iterdir()} <= {
         "checkpoints.sqlite3",
+        "knowledge-index.sqlite3",
         "store.sqlite3",
         "evidence",
     }

@@ -53,6 +53,18 @@ class FakeService:
         self.calls.append(("cancel", run_id, reason))
         return {"run_id": run_id, "status": "cancelled"}
 
+    def sync_knowledge(self):
+        self.calls.append(("knowledge-sync",))
+        return {"added": 1, "updated": 0, "unchanged": 0, "deleted": 0}
+
+    def search_knowledge(self, query, role):
+        self.calls.append(("knowledge-search", query, role))
+        return {"query": query, "role": role, "results": []}
+
+    def knowledge_status(self):
+        self.calls.append(("knowledge-status",))
+        return {"documents": 1, "memory": 0, "skill": 1}
+
 
 @pytest.fixture
 def cli():
@@ -119,6 +131,18 @@ def cli():
             ["cancel", "run-001", "--reason", "Operator cancelled"],
             ("cancel", "run-001", "Operator cancelled"),
         ),
+        (["knowledge-sync"], ("knowledge-sync",)),
+        (
+            [
+                "knowledge-search",
+                "--query",
+                "documentation marker",
+                "--role",
+                "v20-development",
+            ],
+            ("knowledge-search", "documentation marker", "v20-development"),
+        ),
+        (["knowledge-status"], ("knowledge-status",)),
     ],
 )
 def test_cli_routes_explicit_commands_to_injected_service(cli, arguments, expected_call):
@@ -134,6 +158,9 @@ def test_cli_routes_explicit_commands_to_injected_service(cli, arguments, expect
         "evidence",
         "approvals",
         "active",
+        "knowledge-sync",
+        "knowledge-search",
+        "knowledge-status",
     }
 
 
@@ -146,6 +173,9 @@ def test_read_only_help_does_not_construct_service(cli):
     assert "approve" in result.output
     assert "cancel" in result.output
     assert "active" in result.output
+    assert "knowledge-sync" in result.output
+    assert "knowledge-search" in result.output
+    assert "knowledge-status" in result.output
     assert service.calls == []
     assert configs == []
 
@@ -177,6 +207,8 @@ def test_cli_passes_explicit_opencode_runtime_boundary_to_service(cli):
             "--allow-repository-root-workspace",
             "--research-data-root",
             "D:/vesper/vesper_data/massive",
+            "--knowledge-root",
+            "knowledge",
             "status",
             "run-001",
         ],
@@ -189,6 +221,7 @@ def test_cli_passes_explicit_opencode_runtime_boundary_to_service(cli):
     assert configs[0].credential_environment_key == "OPENROUTER_API_KEY"
     assert configs[0].allow_repository_root_workspace is True
     assert configs[0].research_data_root == Path("D:/vesper/vesper_data/massive")
+    assert configs[0].knowledge_root == Path("knowledge")
 
 
 def test_default_state_and_evidence_paths_are_outside_the_current_repository(monkeypatch, tmp_path):
@@ -225,6 +258,7 @@ def test_default_state_and_evidence_paths_are_outside_the_current_repository(mon
     assert configs[0].research_data_root == (
         Path(__file__).resolve().parents[2] / "vesper" / "data" / "massive"
     )
+    assert configs[0].knowledge_root == Path("knowledge")
 
 
 @pytest.mark.parametrize("command", ("approve", "reject"))

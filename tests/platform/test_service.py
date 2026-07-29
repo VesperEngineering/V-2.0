@@ -59,6 +59,67 @@ def copy_model_evaluation_fixture(repository: Path) -> None:
     shutil.copy2(REPOSITORY_ROOT / "models" / "xgb_ranker.metadata.json", models)
 
 
+def create_knowledge_fixture(repository: Path) -> Path:
+    knowledge = repository / "knowledge"
+    note = knowledge / "skills" / "documentation-marker.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        """---
+vesper_id: documentation-marker
+vesper_kind: skill
+vesper_status: approved
+vesper_scope: shared
+title: Harmless documentation marker
+tags:
+  - documentation
+  - marker
+---
+# Harmless documentation marker
+
+Create only the bounded documentation marker requested by the controller.
+""",
+        encoding="utf-8",
+    )
+    return knowledge
+
+
+def test_service_syncs_searches_and_reports_repository_knowledge(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    monkeypatch.chdir(repository)
+    knowledge = create_knowledge_fixture(repository)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        knowledge_root=knowledge,
+    )
+
+    synchronized = platform.sync_knowledge()
+    searched = platform.search_knowledge("documentation marker", "v20-development")
+    status = platform.knowledge_status()
+
+    assert synchronized == {"added": 1, "updated": 0, "unchanged": 0, "deleted": 0}
+    assert [item["knowledge_id"] for item in searched["results"]] == ["documentation-marker"]
+    assert status == {"documents": 1, "memory": 0, "skill": 1}
+    with pytest.raises(SpecialistRuntimeUnavailable, match="unknown specialist role"):
+        platform.search_knowledge("documentation marker", "unknown")
+
+
+def test_operator_knowledge_commands_reject_vault_outside_current_repository(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    monkeypatch.chdir(repository)
+    external_knowledge = create_knowledge_fixture(tmp_path / "external")
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        knowledge_root=external_knowledge,
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="inside the current repository"):
+        platform.sync_knowledge()
+
+
 def evidence(request, name):
     return EvidenceArtifactRef(
         run_id=request.run_id,
@@ -431,7 +492,11 @@ class CompositionAdapter:
     authentication_type = "chatgpt"
     permission_profile = "docker-one-shot"
 
+    def __init__(self):
+        self.calls = []
+
     def execute(self, item, **kwargs):
+        self.calls.append((item, kwargs))
         if item.role.value == "v20-product":
             output = {
                 "schema_version": "1.0",
@@ -572,6 +637,7 @@ def test_service_loads_selected_production_composition_without_real_provider(
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
     copy_model_evaluation_fixture(repository)
+    knowledge = create_knowledge_fixture(repository)
     workspace = repository / "exercise"
     workspace.mkdir()
     identifiers = iter(
@@ -586,12 +652,14 @@ def test_service_loads_selected_production_composition_without_real_provider(
             "memory-risk",
         )
     )
+    adapter = adapter_type()
     platform = LocalPlatformService(
         PlatformPaths.below(tmp_path / "state"),
         profiles_root=profiles,
-        adapter_factory=lambda repository_root, models: adapter_type(),
+        adapter_factory=lambda repository_root, models: adapter,
         specialist_runtime=specialist_runtime,
         opencode_model=model,
+        knowledge_root=knowledge,
         require_disposable_worktree=False,
         require_clean_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),
@@ -613,11 +681,22 @@ def test_service_loads_selected_production_composition_without_real_provider(
     assert created["status"] == RunStatus.AWAITING_APPROVAL.value
     assert Path(workspace, "M2-CONTROLLED-EXERCISE.md").is_file()
     assert len(platform.list_receipts("run-001")["receipts"]) == 3
+    assert len(adapter.calls) == 3
+    assert all("<v20_knowledge>" in call[1]["prompt"] for call in adapter.calls)
+    assert all("Harmless documentation marker" in call[1]["prompt"] for call in adapter.calls)
     with open_persistence(platform.paths) as persisted:
         runtime = persisted.store.get(("system", "run-runtime"), "run-001")
         assert runtime["specialist_runtime"] == specialist_runtime
         assert runtime["specialist_model"] == model
         assert runtime["research_data_root"] == str(REPOSITORY_ROOT / "vesper" / "data" / "massive")
+        assert runtime["knowledge_root"] == str(knowledge)
+        assert (
+            persisted.store.get(
+                ("runs", "run-001", "knowledge"),
+                SpecialistRole.DEVELOPMENT.value,
+            )
+            is not None
+        )
         assert (
             len(
                 persisted.store.search(
@@ -663,6 +742,7 @@ def test_opencode_service_allows_explicit_clean_disposable_clone_root(tmp_path):
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
     copy_model_evaluation_fixture(repository)
+    create_knowledge_fixture(repository)
     (repository / "README.md").write_text("test repository\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repository, check=True)
     subprocess.run(
@@ -780,6 +860,7 @@ def test_resume_revalidates_evidence_root_boundary(tmp_path):
         root=state,
         checkpoint_db=state / "checkpoints.sqlite3",
         store_db=state / "store.sqlite3",
+        knowledge_index_db=state / "knowledge-index.sqlite3",
         evidence_root=repository / "controller-evidence",
     )
     research_data_root = tmp_path / "protected-massive"
@@ -976,6 +1057,7 @@ def test_cancel_run_signals_active_sandbox_from_another_controller_thread(tmp_pa
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
     copy_model_evaluation_fixture(repository)
+    create_knowledge_fixture(repository)
     workspace = repository / "exercise"
     workspace.mkdir()
     (workspace / "README.md").write_text("bounded\n", encoding="utf-8")
@@ -1085,7 +1167,8 @@ def test_read_only_inspection_survives_removed_worktree_and_profile_catalog(tmp_
     repository.mkdir()
     subprocess.run(["git", "init", "-q", str(repository)], check=True)
     (repository / "README.md").write_text("test repository\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=repository, check=True)
+    create_knowledge_fixture(repository)
+    subprocess.run(["git", "add", "README.md", "knowledge"], cwd=repository, check=True)
     subprocess.run(
         [
             "git",

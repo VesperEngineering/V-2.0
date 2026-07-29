@@ -34,8 +34,9 @@ are not needed for setup or verification.
 | Universe builder | `uv run --locked python scripts/build_universe.py` | Operational command with network and configuration-write side effects; it has no help mode. |
 
 The native platform command tree currently exposes `create`, `status`,
-`resume`, `receipts`, `evidence`, `approvals`, `approve`, `reject`, and
-`cancel`. Approval, rejection, and cancellation require explicit arguments.
+`resume`, `receipts`, `evidence`, `approvals`, `active`, `approve`, `reject`,
+`cancel`, `knowledge-sync`, `knowledge-search`, and `knowledge-status`.
+Approval, rejection, and cancellation require explicit arguments.
 Only `create` and a resumed specialist turn may invoke an explicitly selected
 model runtime; no command connects to a trading runtime. See
 `docs/receipts/M1-M7-offline-slice-receipt.md` for the graph-backed command
@@ -84,6 +85,29 @@ are disabled. Opt-in `local_opencode` coverage includes a complete controlled wo
 with `opencode/mimo-v2.5-free` that stopped at persisted human approval. Host turns
 publish active child-process metadata outside the clone and cooperatively terminate on
 an operator cancellation request.
+
+## Agent knowledge
+
+The repository-local [`knowledge/`](knowledge/README.md) directory is the
+canonical Obsidian-compatible source for approved agent memories and procedures.
+Obsidian is optional: the runtime reads ordinary Markdown directly. Approved
+notes synchronize into LangGraph Store and a rebuildable local SQLite FTS5
+index; every production run receives an immutable, bounded, role-scoped snapshot
+before Product executes. Specialists cannot access the vault directly, and
+retrieved knowledge is context rather than evidence or authority.
+
+From the repository root:
+
+```powershell
+uv run --locked vesper-agent knowledge-sync
+uv run --locked vesper-agent knowledge-status
+uv run --locked vesper-agent knowledge-search --query "split adjustment" --role v20-development
+```
+
+See the [knowledge operator runbook](docs/runbooks/obsidian-knowledge.md) for
+frontmatter, review, promotion, retrieval, and recovery rules. The default vault
+is `knowledge/`; use global `--knowledge-root <path>` only for another approved
+repository-local vault.
 
 For a normal code task across an entire clone, the additional
 `--allow-repository-root-workspace` flag is required. It is accepted only for OpenCode

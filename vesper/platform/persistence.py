@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterator, Mapping
 
 from .evidence import FilesystemEvidenceStore
+from .knowledge import SqliteKnowledgeIndex
 from .runtime_env import enforce_offline_runtime_environment
 
 enforce_offline_runtime_environment()
@@ -23,6 +24,7 @@ class PlatformPaths:
     root: Path
     checkpoint_db: Path
     store_db: Path
+    knowledge_index_db: Path
     evidence_root: Path
 
     @classmethod
@@ -32,6 +34,7 @@ class PlatformPaths:
             root=resolved,
             checkpoint_db=resolved / "checkpoints.sqlite3",
             store_db=resolved / "store.sqlite3",
+            knowledge_index_db=resolved / "knowledge-index.sqlite3",
             evidence_root=resolved / "evidence",
         )
 
@@ -52,6 +55,10 @@ class LangGraphStoreAdapter:
             item = self._store.get(namespace, key)
         return None if item is None else item.value
 
+    def delete(self, namespace: tuple[str, ...], key: str) -> None:
+        with self._lock:
+            self._store.delete(namespace, key)
+
     def search(
         self,
         namespace: tuple[str, ...],
@@ -69,11 +76,13 @@ class PlatformPersistence:
     checkpointer: SqliteSaver
     langgraph_store: SqliteStore
     store: LangGraphStoreAdapter
+    knowledge_index: SqliteKnowledgeIndex
     evidence: FilesystemEvidenceStore
     _checkpoint_connection: sqlite3.Connection
     _store_connection: sqlite3.Connection
 
     def close(self) -> None:
+        self.knowledge_index.close()
         self._store_connection.close()
         self._checkpoint_connection.close()
 
@@ -92,15 +101,24 @@ def open_persistence(paths: PlatformPaths) -> Iterator[PlatformPersistence]:
         isolation_level=None,
         timeout=30,
     )
+    knowledge_index_connection = sqlite3.connect(
+        paths.knowledge_index_db,
+        check_same_thread=False,
+        isolation_level=None,
+        timeout=30,
+    )
     checkpointer = SqliteSaver(checkpoint_connection)
     langgraph_store = SqliteStore(store_connection)
     checkpointer.setup()
     langgraph_store.setup()
+    knowledge_index = SqliteKnowledgeIndex(knowledge_index_connection)
+    knowledge_index.setup()
     persistence = PlatformPersistence(
         paths=paths,
         checkpointer=checkpointer,
         langgraph_store=langgraph_store,
         store=LangGraphStoreAdapter(langgraph_store),
+        knowledge_index=knowledge_index,
         evidence=FilesystemEvidenceStore(paths.evidence_root),
         _checkpoint_connection=checkpoint_connection,
         _store_connection=store_connection,

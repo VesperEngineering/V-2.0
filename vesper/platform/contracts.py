@@ -90,6 +90,18 @@ class MemoryType(StrEnum):
     FAILED_ATTEMPT = "failed-attempt"
 
 
+class KnowledgeKind(StrEnum):
+    MEMORY = "memory"
+    SKILL = "skill"
+
+
+class KnowledgeScope(StrEnum):
+    SHARED = "shared"
+    PRODUCT = "v20-product"
+    DEVELOPMENT = "v20-development"
+    RISK_REVIEW = "v20-risk-review"
+
+
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -474,6 +486,23 @@ class MemoryRecord(RunContract):
     def source_matches_authority(self) -> MemoryRecord:
         _evidence_matches_authority(self, (self.source_artifact,))
         return self
+
+
+class KnowledgeDocument(ContractModel):
+    knowledge_id: NonEmptyStr
+    kind: KnowledgeKind
+    scope: KnowledgeScope
+    approval_status: Literal["approved"] = "approved"
+    title: NonEmptyStr
+    tags: tuple[NonEmptyStr, ...] = ()
+    content: NonEmptyStr
+    source_path: RelativePath
+    source_sha256: Sha256
+
+
+class KnowledgeContext(RunContract):
+    role: SpecialistRole
+    documents: tuple[KnowledgeDocument, ...] = ()
 
 
 class ResumableRunMetadata(RunContract):

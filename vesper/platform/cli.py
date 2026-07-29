@@ -24,6 +24,7 @@ class CliConfig:
     credential_environment_key: str | None = None
     allow_repository_root_workspace: bool = False
     research_data_root: Path = _DEFAULT_RESEARCH_DATA_ROOT
+    knowledge_root: Path = Path("knowledge")
 
 
 class PlatformService(Protocol):
@@ -53,6 +54,12 @@ class PlatformService(Protocol):
 
     def cancel_run(self, run_id: str, reason: str): ...
 
+    def sync_knowledge(self): ...
+
+    def search_knowledge(self, query: str, role: str): ...
+
+    def knowledge_status(self): ...
+
 
 class PlatformRuntimeUnavailable(RuntimeError):
     """A requested platform capability has no configured local runtime."""
@@ -81,6 +88,7 @@ def _default_service_factory(config: CliConfig) -> PlatformService:
         root=state_db.parent,
         checkpoint_db=state_db,
         store_db=state_db.parent / "store.sqlite3",
+        knowledge_index_db=state_db.parent / "knowledge-index.sqlite3",
         evidence_root=config.evidence_root.resolve(),
     )
     return LocalPlatformService(
@@ -90,6 +98,7 @@ def _default_service_factory(config: CliConfig) -> PlatformService:
         opencode_model=config.model,
         opencode_credential_environment_key=config.credential_environment_key,
         allow_repository_root_workspace=config.allow_repository_root_workspace,
+        knowledge_root=config.knowledge_root,
         research_data_root=config.research_data_root,
     )
 
@@ -176,6 +185,11 @@ def build_app(
             "--research-data-root",
             help="Controller-owned read-only Massive data root.",
         ),
+        knowledge_root: Path = typer.Option(
+            Path("knowledge"),
+            "--knowledge-root",
+            help="Dedicated repository-owned Obsidian knowledge vault.",
+        ),
         json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
     ) -> None:
         context.obj = _Context(
@@ -188,6 +202,7 @@ def build_app(
                 credential_environment_key,
                 allow_repository_root_workspace,
                 research_data_root,
+                knowledge_root,
             ),
             json_output=json_output,
             service_factory=service_factory,
@@ -242,6 +257,25 @@ def build_app(
     def list_active_runs(context: typer.Context) -> None:
         """List running or crash-interrupted runs and active runtime metadata."""
         _call(context, "list_active_runs")
+
+    @app.command("knowledge-sync")
+    def sync_knowledge(context: typer.Context) -> None:
+        """Synchronize approved Obsidian notes into the derived local index."""
+        _call(context, "sync_knowledge")
+
+    @app.command("knowledge-search")
+    def search_knowledge(
+        context: typer.Context,
+        query: str = typer.Option(..., "--query", help="Terms to retrieve."),
+        role: str = typer.Option(..., "--role", help="Specialist role and scope."),
+    ) -> None:
+        """Search approved knowledge visible to one specialist role."""
+        _call(context, "search_knowledge", query, role)
+
+    @app.command("knowledge-status")
+    def knowledge_status(context: typer.Context) -> None:
+        """Report the documents in the derived knowledge store."""
+        _call(context, "knowledge_status")
 
     @app.command("approve")
     def approve_run(

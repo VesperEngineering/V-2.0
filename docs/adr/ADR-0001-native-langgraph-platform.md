@@ -4,6 +4,7 @@
 - Date: 2026-07-27
 - Owner: V20 operator
 - Decision scope: Target architecture only; implementation and dependency changes require a later authorized phase
+- Knowledge amendment: [ADR-0002](ADR-0002-obsidian-langgraph-knowledge.md)
 
 ## Context
 
@@ -15,7 +16,7 @@ The initial architecture must remain local, resumable, and narrow. It must not r
 
 ## Decision
 
-V20 will replace the target Hermes-oriented runtime with a native platform built around LangGraph, the LangGraph Store abstraction, LangMem-compatible memory consolidation, provider-neutral model-execution adapters, and SQLite for initial local persistence. Docker-isolated Codex is the first sandboxed runtime; OpenCode is an opt-in host subprocess adapter. No Hermes runtime adapter will be built.
+V20 will replace the target Hermes-oriented runtime with a native platform built around LangGraph, the LangGraph Store abstraction, provider-neutral model-execution adapters, and SQLite for initial local persistence. Docker-isolated Codex is the first sandboxed runtime; OpenCode is an opt-in host subprocess adapter. Durable operator-authored knowledge is governed by ADR-0002. No Hermes runtime adapter will be built.
 
 ### Control graph
 
@@ -66,8 +67,8 @@ LangGraph is the graph owner. Data Research, Model Evaluation, and deterministic
 SQLite is the initial local persistence boundary:
 
 - A SQLite LangGraph checkpointer persists graph state, interrupts, correction counters, specialist thread references, and resumable execution state.
-- Long-term records are accessed through the LangGraph Store abstraction. The implementation phase must select or implement a compatible local SQLite-backed store without introducing hosted infrastructure.
-- LangMem-compatible consolidation operates only on validated memory candidates and writes through the Store boundary.
+- Long-term records are accessed through a local SQLite-backed LangGraph Store abstraction without hosted infrastructure.
+- Validated receipt-derived memory remains separate from the operator-authored Obsidian knowledge standardized in ADR-0002.
 - Large or immutable evidence remains in a filesystem evidence store. SQLite stores identifiers, hashes, paths, verification state, and relationships rather than duplicating artifact bodies.
 - Data Research and Model Evaluation evidence is revision-bound, included in Risk Review context, and required in the final human-approval evidence set.
 
@@ -89,12 +90,14 @@ The platform will define typed contracts for tasks, graph state, specialist rece
 
 Initial specialist profiles are `v20-product`, `v20-development`, and `v20-risk-review`. Each owns a distinct memory namespace and permission set. Development cannot write Risk Review decision memory. Dynamic repository state is injected by the controller rather than embedded in profile prompts.
 
-Memory consolidation is selective:
+Receipt-derived runtime memory remains selective:
 
 - only validated candidates may be stored;
 - contradictory or superseded records remain traceable;
 - receipts, repository state, tests, and source artifacts outrank generated memories;
 - profile identity, `SOUL.md`, security policy, permissions, approval rules, and risk limits cannot be edited automatically.
+
+Operator-authored memories and procedures use the repository-local Obsidian-compatible Markdown vault, derived Store/FTS indexing, and immutable per-run snapshots defined by ADR-0002. Those notes are context, not validated evidence or new authority.
 
 No graph node is authorized to contact Massive, a broker, or another external service; place paper or live orders; enable schedules; promote models; change portfolio or risk limits; deploy; merge; push; or rewrite Git history. Such actions remain outside this architecture phase and require separate authority where applicable.
 
@@ -127,7 +130,7 @@ Positive consequences:
 Costs and risks:
 
 - V20 assumes responsibility for orchestration, persistence migrations, memory hygiene, receipt integrity, and operator tooling that Hermes previously supplied.
-- LangGraph, LangMem, Docker Sandboxes, Codex, and OpenCode executable APIs and compatible versions must be resolved before their respective implementation phases.
+- LangGraph, Docker Sandboxes, Codex, and OpenCode executable APIs and compatible versions must be resolved before their respective implementation phases.
 - SQLite requires locking, backup, corruption recovery, schema migration, and concurrency tests.
 - ChatGPT-account SDK authentication may be unavailable or may not support the required local boundary; implementation must stop rather than fall back to unapproved credentials.
 - Deterministic validation can be incomplete if its inputs and evidence schemas are underspecified.
@@ -154,5 +157,6 @@ This ADR does not authorize dependency installation or runtime integration. Befo
 ## References
 
 - [Proposed evidence/history migration plan](../plans/evidence-history-migration-plan.md)
+- [Obsidian and LangGraph knowledge standard](ADR-0002-obsidian-langgraph-knowledge.md)
 - [Repository architecture overview](../../architecture.txt)
 - [Repository operating guidance](../../AGENTS.md)

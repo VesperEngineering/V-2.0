@@ -25,6 +25,7 @@ from .contracts import (
 from .control import RuntimeControl
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
+from .knowledge import ObsidianKnowledgeService
 from .opencode import (
     OpenCodeGateway,
     _process_exists,
@@ -57,6 +58,7 @@ ROOT_WORKSPACE_PROTECTED_PATHS = (
     Path("vesper/platform"),
     Path("config/settings.yaml"),
     Path("models"),
+    Path("knowledge"),
     Path("vesper/data/massive"),
     Path("vesper/data/model_research"),
 )
@@ -160,6 +162,7 @@ class LocalPlatformService:
         opencode_model: str | None = None,
         opencode_credential_environment_key: str | None = None,
         allow_repository_root_workspace: bool = False,
+        knowledge_root: Path | None = None,
         research_data_root: Path | None = None,
         require_disposable_worktree: bool = True,
         require_clean_worktree: bool = True,
@@ -193,6 +196,7 @@ class LocalPlatformService:
                 "repository-root workspace requires a standalone disposable clone"
             )
         self._allow_repository_root_workspace = allow_repository_root_workspace
+        self._knowledge_root = None if knowledge_root is None else knowledge_root.resolve()
         self._research_data_root = (
             (Path(__file__).resolve().parents[2] / "vesper" / "data" / "massive")
             if research_data_root is None
@@ -286,6 +290,14 @@ class LocalPlatformService:
         try:
             with open_persistence(self.paths) as persistence:
                 if repository_root is not None:
+                    knowledge_root = self._knowledge_root_for_repository(repository_root)
+                    knowledge = ObsidianKnowledgeService(
+                        vault_root=knowledge_root,
+                        store=persistence.store,
+                        index=persistence.knowledge_index,
+                    )
+                    knowledge_sync = knowledge.sync()
+                    knowledge.snapshot(task)
                     persistence.store.put(
                         RUN_RUNTIME_NAMESPACE,
                         task.run_id,
@@ -304,6 +316,8 @@ class LocalPlatformService:
                                 self._allow_repository_root_workspace
                             ),
                             "research_data_root": str(self._research_data_root),
+                            "knowledge_root": str(knowledge_root),
+                            "knowledge_sync": knowledge_sync,
                         },
                     )
                 view = self._controller(persistence, repository_root=repository_root).start(task)
@@ -462,6 +476,42 @@ class LocalPlatformService:
                 self.control.set_run_status(run_id, view.state.status.value)
         return self._view_payload(view)
 
+    def sync_knowledge(self) -> dict[str, int]:
+        with open_persistence(self.paths) as persistence:
+            return ObsidianKnowledgeService(
+                vault_root=self._operator_knowledge_root(),
+                store=persistence.store,
+                index=persistence.knowledge_index,
+            ).sync()
+
+    def search_knowledge(self, query: str, role: str) -> dict[str, object]:
+        try:
+            specialist_role = SpecialistRole(role)
+        except ValueError as exc:
+            choices = ", ".join(item.value for item in SpecialistRole)
+            raise SpecialistRuntimeUnavailable(
+                f"unknown specialist role {role!r}; expected one of: {choices}"
+            ) from exc
+        with open_persistence(self.paths) as persistence:
+            documents = ObsidianKnowledgeService(
+                vault_root=self._operator_knowledge_root(),
+                store=persistence.store,
+                index=persistence.knowledge_index,
+            ).search(specialist_role, query)
+        return {
+            "query": query,
+            "role": specialist_role.value,
+            "results": [item.model_dump(mode="json") for item in documents],
+        }
+
+    def knowledge_status(self) -> dict[str, int]:
+        with open_persistence(self.paths) as persistence:
+            return ObsidianKnowledgeService(
+                vault_root=self._operator_knowledge_root(),
+                store=persistence.store,
+                index=persistence.knowledge_index,
+            ).status()
+
     def _controller(
         self,
         persistence: PlatformPersistence,
@@ -499,6 +549,7 @@ class LocalPlatformService:
             )
             protected_paths = (
                 *(repository_root / relative for relative in ROOT_WORKSPACE_PROTECTED_PATHS),
+                self._knowledge_root_for_repository(repository_root),
                 *(
                     repository_root / relative / "README.md"
                     for relative in self._approved_workspace_relative_paths
@@ -544,6 +595,11 @@ class LocalPlatformService:
                     "opencode-host" if runtime_name == OPENCODE_RUNTIME else "docker-one-shot"
                 ),
                 allow_repository_root_workspace=allow_repository_root_workspace,
+                knowledge_context_reader=ObsidianKnowledgeService(
+                    vault_root=self._knowledge_root_for_repository(repository_root),
+                    store=persistence.store,
+                    index=persistence.knowledge_index,
+                ).context,
                 clock=self._clock,
                 id_factory=self._id_factory,
             )
@@ -628,6 +684,13 @@ class LocalPlatformService:
         if persisted_research_data_root != self._research_data_root:
             raise SpecialistRuntimeUnavailable(
                 "configured research data root differs from the persisted run runtime"
+            )
+        persisted_knowledge_root = runtime.get("knowledge_root")
+        if persisted_knowledge_root is not None and Path(
+            str(persisted_knowledge_root)
+        ).resolve() != (self._knowledge_root_for_repository(repository_root)):
+            raise SpecialistRuntimeUnavailable(
+                "configured knowledge root differs from the persisted run runtime"
             )
         allow_repository_root_workspace = bool(
             runtime.get("allow_repository_root_workspace", False)
@@ -810,6 +873,13 @@ class LocalPlatformService:
             raise SpecialistRuntimeUnavailable(
                 "native profile catalog must be inside the approved clone"
             )
+        knowledge_root = self._knowledge_root_for_repository(repository_root)
+        if not knowledge_root.is_relative_to(repository_root):
+            raise SpecialistRuntimeUnavailable("knowledge root must be inside the approved clone")
+        if workspace != repository_root and (
+            knowledge_root.is_relative_to(workspace) or workspace.is_relative_to(knowledge_root)
+        ):
+            raise SpecialistRuntimeUnavailable("specialist workspace overlaps knowledge root")
 
         if workspace != repository_root and (
             self._profiles_root.is_relative_to(workspace)
@@ -844,6 +914,22 @@ class LocalPlatformService:
             profile.profile_id.value: [profile.profile_sha256, profile.soul_sha256]
             for profile in ProfileCatalog(self._profiles_root).load_all()
         }
+
+    def _knowledge_root_for_repository(self, repository_root: Path) -> Path:
+        if self._knowledge_root is None:
+            return (repository_root / "knowledge").resolve()
+        return self._knowledge_root
+
+    def _operator_knowledge_root(self) -> Path:
+        knowledge_root = (
+            Path("knowledge").resolve() if self._knowledge_root is None else self._knowledge_root
+        )
+        repository_root = self._repository_root(Path.cwd().resolve())
+        if not knowledge_root.is_relative_to(repository_root):
+            raise SpecialistRuntimeUnavailable(
+                "knowledge root must be inside the current repository"
+            )
+        return knowledge_root
 
     @staticmethod
     def _repository_root(workspace: Path) -> Path:
