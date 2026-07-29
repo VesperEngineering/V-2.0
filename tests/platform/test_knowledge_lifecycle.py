@@ -21,6 +21,9 @@ from vesper.platform.contracts import (
     KnowledgeTier,
     KnowledgeContext,
     KnowledgeDocument,
+    ProductSpecialistOutput,
+    RiskDecision,
+    RiskSpecialistOutput,
     SpecialistReceipt,
     SpecialistRole,
     TaskRequest,
@@ -70,10 +73,10 @@ def lifecycle_service(tmp_path: Path):
     )
 
 
-def task(*, run_id: str = "run-001") -> TaskRequest:
+def task(*, run_id: str = "run-001", task_id: str = "task-001") -> TaskRequest:
     return TaskRequest(
         run_id=run_id,
-        task_id="task-001",
+        task_id=task_id,
         repository_revision="abc1234",
         created_at=NOW,
         objective="Record adaptive knowledge usage.",
@@ -129,33 +132,60 @@ def knowledge_context(
     )
 
 
-def receipt_with_observation(*, run_id: str = "run-001") -> SpecialistReceipt:
-    output = DevelopmentSpecialistOutput(
-        run_id=run_id,
-        task_id="task-001",
-        repository_revision="abc1234",
-        created_at=NOW,
-        role=SpecialistRole.DEVELOPMENT,
-        attempt=1,
-        summary="Implemented the bounded change.",
-        knowledge_observations=(
+def receipt_with_observation(
+    *,
+    run_id: str = "run-001",
+    task_id: str = "task-001",
+    role: SpecialistRole = SpecialistRole.DEVELOPMENT,
+    explicit: bool = True,
+) -> SpecialistReceipt:
+    common = {
+        "run_id": run_id,
+        "task_id": task_id,
+        "repository_revision": "abc1234",
+        "created_at": NOW,
+        "role": role,
+        "attempt": 1,
+        "knowledge_observations": (
             KnowledgeObservationProposal(
                 concept_key="accepted-observation",
                 title="Accepted observation",
                 kind=KnowledgeKind.MEMORY,
                 scope=KnowledgeScope.DEVELOPMENT,
                 summary="Only accepted runs materialize this observation.",
-                explicit=True,
+                explicit=explicit,
             ),
         ),
-    )
+    }
+    if role is SpecialistRole.PRODUCT:
+        output = ProductSpecialistOutput(
+            **common,
+            route=SpecialistRole.DEVELOPMENT,
+            summary="Defined the bounded change.",
+            development_instructions="Implement only the bounded change.",
+            acceptance_checks=("python -m pytest tests/platform",),
+        )
+    elif role is SpecialistRole.DEVELOPMENT:
+        output = DevelopmentSpecialistOutput(
+            **common,
+            summary="Implemented the bounded change.",
+        )
+    else:
+        output = RiskSpecialistOutput(
+            **common,
+            decision=RiskDecision.APPROVE,
+            rationale="The bounded change is compliant.",
+            scope_compliant=True,
+            evidence_owned=True,
+            prohibited_actions_compliant=True,
+        )
     return SpecialistReceipt(
         run_id=run_id,
-        task_id="task-001",
+        task_id=task_id,
         repository_revision="abc1234",
         created_at=NOW,
-        receipt_id="receipt-001",
-        role=SpecialistRole.DEVELOPMENT,
+        receipt_id=f"receipt-{role.value}",
+        role=role,
         attempt=1,
         status=ExecutionStatus.COMPLETED,
         output=output,
@@ -490,6 +520,35 @@ def test_secret_like_observation_never_writes_candidate(tmp_path, summary):
     assert not (vault / "inbox").exists()
 
 
+@pytest.mark.parametrize(
+    ("summary", "secret_value"),
+    (
+        ("The password is hunter2.", "hunter2"),
+        ("Our API key is example-key-123.", "example-key-123"),
+        ("The credential was example-credential.", "example-credential"),
+    ),
+    ids=("password-is", "api-key-is", "credential-was"),
+)
+def test_natural_language_secret_fails_before_ledger_or_candidate_write(
+    tmp_path, summary, secret_value
+):
+    store = DictStore()
+    vault = tmp_path / "knowledge"
+    service = _lifecycle_module().KnowledgeLifecycleService(
+        vault_root=vault,
+        store=store,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(_lifecycle_module().KnowledgeLifecycleError) as error:
+        service.observe(observation(summary=summary, explicit=True))
+
+    assert str(error.value) == "prohibited content in observation"
+    assert secret_value not in str(error.value)
+    assert store.values == {}
+    assert not (vault / "inbox").exists()
+
+
 def test_atomic_replacement_failure_preserves_existing_candidate(tmp_path, monkeypatch):
     service, vault = lifecycle_service(tmp_path)
     for index in range(3):
@@ -615,6 +674,47 @@ def test_accepted_run_credits_selected_documents_once_and_records_observations(t
     assert first["knowledge_ids"] == ["active-id"]
     assert first["observations"][0]["concept_key"] == "accepted-observation"
     assert (vault / "inbox" / "accepted-observation.md").is_file()
+
+
+def test_accepted_specialist_proposals_count_once_per_task_source(tmp_path):
+    store = DictStore()
+    vault = tmp_path / "knowledge"
+    service = _lifecycle_module().KnowledgeLifecycleService(
+        vault_root=vault,
+        store=store,
+        clock=lambda: NOW,
+    )
+    receipts = tuple(receipt_with_observation(role=role, explicit=False) for role in SpecialistRole)
+
+    accepted = service.accept_run(task(), receipts=receipts)
+    replay = service.accept_run(task(), receipts=receipts)
+
+    state = store.get(_lifecycle_module().OBSERVATION_NAMESPACE, "accepted-observation")
+    assert state is not None
+    assert state["source_refs"] == ["run-001:task-001"]
+    assert accepted == replay
+    assert not (vault / "inbox" / "accepted-observation.md").exists()
+
+    for index in (2, 3):
+        run_id = f"run-{index:03d}"
+        task_id = f"task-{index:03d}"
+        service.accept_run(
+            task(run_id=run_id, task_id=task_id),
+            receipts=(
+                receipt_with_observation(
+                    run_id=run_id,
+                    task_id=task_id,
+                    explicit=False,
+                ),
+            ),
+        )
+
+    candidate = vault / "inbox" / "accepted-observation.md"
+    assert _metadata(candidate)["vesper_source_refs"] == [
+        "run-001:task-001",
+        "run-002:task-002",
+        "run-003:task-003",
+    ]
 
 
 def test_one_accepted_run_selected_by_three_roles_counts_as_one_success(tmp_path):

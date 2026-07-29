@@ -41,7 +41,10 @@ _CANDIDATE_THRESHOLD = 3
 _MAX_ACTIVE_LINES = 3_000
 _CONCEPT_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)\b(?:api[_-]?key|password|secret|token|credential)\s*[:=]\s*\S+"),
+    re.compile(
+        r"(?i)\b(?:api[\s_-]?key|password|secret|token|credential)\b"
+        r"\s*(?::|=|is\b|was\b)\s*\S+"
+    ),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
@@ -142,7 +145,7 @@ class KnowledgeLifecycleService:
                                 scope=proposal.scope,
                                 summary=proposal.summary,
                                 explicit=proposal.explicit,
-                                source_ref=f"{task.run_id}:{receipt.role.value}:{receipt.attempt}",
+                                source_ref=f"{task.run_id}:{task.task_id}",
                                 observed_at=observed_at,
                             )
                         )
