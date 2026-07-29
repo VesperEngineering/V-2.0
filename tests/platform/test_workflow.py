@@ -224,6 +224,17 @@ class QueuedRiskReviewer:
         )
 
 
+class FakeKnowledgeLifecycle:
+    def __init__(self, error=None):
+        self.error = error
+        self.accepted_runs = []
+
+    def accept_run(self, request, receipts):
+        self.accepted_runs.append((request.run_id, len(receipts)))
+        if self.error is not None:
+            raise self.error
+
+
 def controller(
     persistence,
     *,
@@ -234,6 +245,7 @@ def controller(
     data_researcher=None,
     model_evaluator=None,
     specialist_executor=None,
+    knowledge_lifecycle=None,
 ):
     specialists = specialist_executor or QueuedSpecialists()
     data_researcher = data_researcher or DataResearcher()
@@ -248,6 +260,7 @@ def controller(
         model_evaluator=model_evaluator,
         validator=validator,
         risk_reviewer=reviewer,
+        knowledge_lifecycle=knowledge_lifecycle,
         workspace_hasher=workspace_hasher,
         evidence_reader=evidence_reader,
         clock=lambda: NOW,
@@ -264,6 +277,19 @@ def controller(
         specialists,
         validator,
         reviewer,
+    )
+
+
+def approval_decision(pending, decision=ApprovalDecision.APPROVE):
+    return HumanApprovalDecision(
+        **COMMON,
+        approval_id="approval-001",
+        request_id=pending.pending_approval.request_id,
+        checkpoint_id=pending.checkpoint_id,
+        operator_id="operator",
+        decision=decision,
+        reason="Operator reviewed the bounded run.",
+        decided_at=NOW,
     )
 
 
@@ -510,6 +536,56 @@ def test_explicit_approval_then_resume_is_required_for_acceptance(tmp_path):
     assert accepted.pending_approval is None
 
 
+def test_operator_approval_consolidates_knowledge_observation_once(tmp_path):
+    lifecycle = FakeKnowledgeLifecycle()
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, _, _, _ = controller(persistence, knowledge_lifecycle=lifecycle)
+        pending = workflow.start(task(tmp_path))
+        workflow.record_decision("run-001", approval_decision(pending))
+
+        accepted = workflow.resume("run-001")
+        inspected = workflow.inspect("run-001")
+        with pytest.raises(PendingApprovalError, match="no resumable checkpoint"):
+            workflow.resume("run-001")
+
+    assert accepted.state.status is RunStatus.ACCEPTED
+    assert inspected.state.status is RunStatus.ACCEPTED
+    assert lifecycle.accepted_runs == [("run-001", 2)]
+
+
+def test_operator_rejection_never_consolidates_knowledge_observations(tmp_path):
+    lifecycle = FakeKnowledgeLifecycle()
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, _, _, _ = controller(persistence, knowledge_lifecycle=lifecycle)
+        pending = workflow.start(task(tmp_path))
+        workflow.record_decision(
+            "run-001",
+            approval_decision(pending, ApprovalDecision.REJECT),
+        )
+
+        rejected = workflow.resume("run-001")
+
+    assert rejected.state.status is RunStatus.REJECTED
+    assert lifecycle.accepted_runs == []
+
+
+def test_lifecycle_failure_does_not_bypass_acceptance_or_create_approval(tmp_path):
+    lifecycle = FakeKnowledgeLifecycle(RuntimeError("lifecycle failed"))
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        workflow, _, _, _ = controller(persistence, knowledge_lifecycle=lifecycle)
+        pending = workflow.start(task(tmp_path))
+        workflow.record_decision("run-001", approval_decision(pending))
+
+        with pytest.raises(RuntimeError, match="lifecycle failed"):
+            workflow.resume("run-001")
+        still_pending = workflow.inspect("run-001")
+
+    assert still_pending.state.status is RunStatus.AWAITING_APPROVAL
+    assert still_pending.state.approval is None
+    assert still_pending.pending_approval is None
+    assert lifecycle.accepted_runs == [("run-001", 2)]
+
+
 def test_rejection_at_approval_boundary_cannot_accept(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         workflow, _, _, _ = controller(persistence)
@@ -546,10 +622,12 @@ def test_approval_cannot_accept_workspace_bytes_changed_after_decision(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "RESULT.md").write_text("reviewed\n", encoding="utf-8")
+    lifecycle = FakeKnowledgeLifecycle()
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         workflow, _, _, _ = controller(
             persistence,
             workspace_hasher=_workspace_sha256,
+            knowledge_lifecycle=lifecycle,
         )
         pending = workflow.start(task(workspace))
         decision = HumanApprovalDecision(
@@ -567,6 +645,8 @@ def test_approval_cannot_accept_workspace_bytes_changed_after_decision(tmp_path)
 
         with pytest.raises(PendingApprovalError, match="workspace changed"):
             workflow.resume("run-001")
+
+    assert lifecycle.accepted_runs == []
 
 
 def test_approval_cannot_accept_corrupt_evidence(tmp_path):

@@ -37,6 +37,7 @@ from .contracts import (
     ValidationResult,
 )
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
+from .knowledge_lifecycle import KnowledgeLifecycleService
 from .runtime_env import enforce_offline_runtime_environment
 
 enforce_offline_runtime_environment()
@@ -274,6 +275,7 @@ def build_workflow(
     risk_reviewer: RiskReviewer,
     memory_service: MemoryService | None = None,
     memory_validator: DeterministicMemoryCandidateValidator | None = None,
+    knowledge_lifecycle: KnowledgeLifecycleService | None = None,
     workspace_hasher: Callable[[Path], str] = _workspace_sha256,
     evidence_reader: Callable[[EvidenceArtifactRef], bytes] | None = None,
     clock: Callable[[], datetime] = _utc_now,
@@ -679,6 +681,11 @@ def build_workflow(
             or decision.repository_revision != request.repository_revision
         ):
             raise PendingApprovalError("operator decision authority fields do not match the run")
+        if decision.decision is ApprovalDecision.APPROVE and knowledge_lifecycle is not None:
+            knowledge_lifecycle.accept_run(
+                request,
+                tuple(_parse(SpecialistReceipt, item) for item in state["receipts"]),
+            )
         status = (
             RunStatus.ACCEPTED
             if decision.decision is ApprovalDecision.APPROVE

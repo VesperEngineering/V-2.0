@@ -26,6 +26,7 @@ from .control import RuntimeControl
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .knowledge import ObsidianKnowledgeService
+from .knowledge_lifecycle import KnowledgeLifecycleService
 from .opencode import (
     OpenCodeGateway,
     _process_exists,
@@ -289,6 +290,7 @@ class LocalPlatformService:
         )
         try:
             with open_persistence(self.paths) as persistence:
+                knowledge_lifecycle = None
                 if repository_root is not None:
                     knowledge_root = self._knowledge_root_for_repository(repository_root)
                     knowledge = ObsidianKnowledgeService(
@@ -297,7 +299,12 @@ class LocalPlatformService:
                         index=persistence.knowledge_index,
                     )
                     knowledge_sync = knowledge.sync()
-                    knowledge.snapshot(task)
+                    contexts = knowledge.snapshot(task)
+                    knowledge_lifecycle = self._knowledge_lifecycle(
+                        persistence,
+                        repository_root,
+                    )
+                    knowledge_lifecycle.record_selections(contexts)
                     persistence.store.put(
                         RUN_RUNTIME_NAMESPACE,
                         task.run_id,
@@ -320,7 +327,11 @@ class LocalPlatformService:
                             "knowledge_sync": knowledge_sync,
                         },
                     )
-                view = self._controller(persistence, repository_root=repository_root).start(task)
+                view = self._controller(
+                    persistence,
+                    repository_root=repository_root,
+                    knowledge_lifecycle=knowledge_lifecycle,
+                ).start(task)
         except Exception:
             self.control.set_run_status(task.run_id, "interrupted")
             raise
@@ -521,6 +532,7 @@ class LocalPlatformService:
         opencode_model: str | None = None,
         opencode_credential_environment_key: str | None = None,
         allow_repository_root_workspace: bool | None = None,
+        knowledge_lifecycle: KnowledgeLifecycleService | None = None,
     ) -> WorkflowController:
         if self._controller_factory is not None:
             return self._controller_factory(persistence)
@@ -603,6 +615,8 @@ class LocalPlatformService:
                 clock=self._clock,
                 id_factory=self._id_factory,
             )
+            if knowledge_lifecycle is None:
+                knowledge_lifecycle = self._knowledge_lifecycle(persistence, repository_root)
             graph = build_workflow(
                 checkpointer=persistence.checkpointer,
                 store=persistence.langgraph_store,
@@ -630,6 +644,7 @@ class LocalPlatformService:
                     clock=self._clock,
                 ),
                 memory_validator=DeterministicMemoryCandidateValidator(),
+                knowledge_lifecycle=knowledge_lifecycle,
                 evidence_reader=persistence.evidence.read_verified,
                 clock=self._clock,
             )
@@ -919,6 +934,17 @@ class LocalPlatformService:
         if self._knowledge_root is None:
             return (repository_root / "knowledge").resolve()
         return self._knowledge_root
+
+    def _knowledge_lifecycle(
+        self,
+        persistence: PlatformPersistence,
+        repository_root: Path,
+    ) -> KnowledgeLifecycleService:
+        return KnowledgeLifecycleService(
+            vault_root=self._knowledge_root_for_repository(repository_root),
+            store=persistence.store,
+            clock=self._clock,
+        )
 
     def _operator_knowledge_root(self) -> Path:
         knowledge_root = (

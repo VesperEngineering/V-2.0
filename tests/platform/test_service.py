@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -68,6 +69,7 @@ def create_knowledge_fixture(repository: Path) -> Path:
 vesper_id: documentation-marker
 vesper_kind: skill
 vesper_status: approved
+vesper_retention: adaptive
 vesper_scope: shared
 title: Harmless documentation marker
 tags:
@@ -81,6 +83,27 @@ Create only the bounded documentation marker requested by the controller.
         encoding="utf-8",
     )
     return knowledge
+
+
+def create_research_data_fixture(root: Path) -> Path:
+    research_data = root / "research-data"
+    database = research_data / "sp500" / "sp500_ohlcv.sqlite"
+    database.parent.mkdir(parents=True)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE sp500_ohlcv "
+            "(ticker TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL)"
+        )
+        connection.execute(
+            "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("SPY", "2026-07-27", 100.0, 101.0, 99.0, 100.5, 1_000.0),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    (research_data / "split_adjustments.json").write_text("{}\n", encoding="utf-8")
+    return research_data
 
 
 def test_service_syncs_searches_and_reports_repository_knowledge(tmp_path, monkeypatch):
@@ -100,7 +123,15 @@ def test_service_syncs_searches_and_reports_repository_knowledge(tmp_path, monke
 
     assert synchronized == {"added": 1, "updated": 0, "unchanged": 0, "deleted": 0}
     assert [item["knowledge_id"] for item in searched["results"]] == ["documentation-marker"]
-    assert status == {"documents": 1, "memory": 0, "skill": 1}
+    assert status == {
+        "documents": 1,
+        "memory": 0,
+        "skill": 1,
+        "active": 1,
+        "archived": 0,
+        "active_lines": 14,
+        "active_line_limit": 3_000,
+    }
     with pytest.raises(SpecialistRuntimeUnavailable, match="unknown specialist role"):
         platform.search_knowledge("documentation marker", "unknown")
 
@@ -517,6 +548,16 @@ class CompositionAdapter:
                         "confidence": 0.9,
                     }
                 ],
+                "knowledge_observations": [
+                    {
+                        "concept_key": "bounded-documentation-procedure",
+                        "title": "Bounded documentation procedure",
+                        "kind": "memory",
+                        "scope": "v20-product",
+                        "summary": "Keep documentation-only changes inside the requested scope.",
+                        "explicit": True,
+                    }
+                ],
             }
         elif item.role.value == "v20-development":
             Path(item.workspace, "M2-CONTROLLED-EXERCISE.md").write_text(
@@ -638,6 +679,7 @@ def test_service_loads_selected_production_composition_without_real_provider(
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
     copy_model_evaluation_fixture(repository)
     knowledge = create_knowledge_fixture(repository)
+    research_data = create_research_data_fixture(tmp_path)
     workspace = repository / "exercise"
     workspace.mkdir()
     identifiers = iter(
@@ -650,6 +692,7 @@ def test_service_loads_selected_production_composition_without_real_provider(
             "memory-development",
             "candidate-risk",
             "memory-risk",
+            "approval-001",
         )
     )
     adapter = adapter_type()
@@ -660,6 +703,7 @@ def test_service_loads_selected_production_composition_without_real_provider(
         specialist_runtime=specialist_runtime,
         opencode_model=model,
         knowledge_root=knowledge,
+        research_data_root=research_data,
         require_disposable_worktree=False,
         require_clean_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),
@@ -688,7 +732,7 @@ def test_service_loads_selected_production_composition_without_real_provider(
         runtime = persisted.store.get(("system", "run-runtime"), "run-001")
         assert runtime["specialist_runtime"] == specialist_runtime
         assert runtime["specialist_model"] == model
-        assert runtime["research_data_root"] == str(REPOSITORY_ROOT / "vesper" / "data" / "massive")
+        assert runtime["research_data_root"] == str(research_data)
         assert runtime["knowledge_root"] == str(knowledge)
         assert (
             persisted.store.get(
@@ -724,6 +768,49 @@ def test_service_loads_selected_production_composition_without_real_provider(
             )
             == 1
         )
+        usage = persisted.store.get(
+            ("knowledge", "adaptive", "usage"),
+            "documentation-marker",
+        )
+        assert usage["selection_refs"] == [
+            "run-001:v20-development",
+            "run-001:v20-product",
+            "run-001:v20-risk-review",
+        ]
+        assert usage["successful_refs"] == []
+
+    platform.approve_run(
+        "run-001",
+        created["checkpoint_id"],
+        "operator",
+        "Reviewed evidence",
+    )
+    accepted = platform.resume_run("run-001")
+
+    assert accepted["status"] == RunStatus.ACCEPTED.value
+    assert (knowledge / "inbox" / "bounded-documentation-procedure.md").is_file()
+    with open_persistence(platform.paths) as persisted:
+        usage = persisted.store.get(
+            ("knowledge", "adaptive", "usage"),
+            "documentation-marker",
+        )
+        assert usage["successful_refs"] == usage["selection_refs"]
+        assert (
+            persisted.store.get(
+                ("knowledge", "adaptive", "accepted-runs"),
+                "run-001",
+            )
+            is not None
+        )
+        assert (
+            len(
+                persisted.store.search(
+                    ("profiles", "v20-product", "product-decisions"),
+                    limit=10,
+                )
+            )
+            == 1
+        )
 
     (profiles / "v20-product" / "SOUL.md").write_text(
         "modified after checkpoint\n",
@@ -743,6 +830,7 @@ def test_opencode_service_allows_explicit_clean_disposable_clone_root(tmp_path):
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
     copy_model_evaluation_fixture(repository)
     create_knowledge_fixture(repository)
+    research_data = create_research_data_fixture(tmp_path)
     (repository / "README.md").write_text("test repository\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repository, check=True)
     subprocess.run(
@@ -786,6 +874,7 @@ def test_opencode_service_allows_explicit_clean_disposable_clone_root(tmp_path):
         specialist_runtime="opencode",
         opencode_model="opencode/mimo-v2.5-free",
         allow_repository_root_workspace=True,
+        research_data_root=research_data,
         clock=lambda: NOW,
         id_factory=lambda: next(identifiers),
     )
@@ -1058,6 +1147,7 @@ def test_cancel_run_signals_active_sandbox_from_another_controller_thread(tmp_pa
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
     copy_model_evaluation_fixture(repository)
     create_knowledge_fixture(repository)
+    research_data = create_research_data_fixture(tmp_path)
     workspace = repository / "exercise"
     workspace.mkdir()
     (workspace / "README.md").write_text("bounded\n", encoding="utf-8")
@@ -1135,6 +1225,7 @@ def test_cancel_run_signals_active_sandbox_from_another_controller_thread(tmp_pa
         PlatformPaths.below(tmp_path / "state"),
         profiles_root=profiles,
         adapter_factory=adapter_factory,
+        research_data_root=research_data,
         require_disposable_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),
         clock=lambda: NOW,
@@ -1194,6 +1285,7 @@ def test_read_only_inspection_survives_removed_worktree_and_profile_catalog(tmp_
     profiles = repository / "profiles" / "native"
     shutil.copytree(REPOSITORY_ROOT / "profiles" / "native", profiles)
     copy_model_evaluation_fixture(repository)
+    research_data = create_research_data_fixture(tmp_path)
     workspace = repository / "exercise"
     workspace.mkdir()
     identifiers = iter(
@@ -1212,6 +1304,7 @@ def test_read_only_inspection_survives_removed_worktree_and_profile_catalog(tmp_
         PlatformPaths.below(tmp_path / "state"),
         profiles_root=profiles,
         adapter_factory=lambda repository_root, models: CompositionAdapter(),
+        research_data_root=research_data,
         require_disposable_worktree=False,
         require_clean_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),

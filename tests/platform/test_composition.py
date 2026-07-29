@@ -213,6 +213,53 @@ def test_product_loads_approved_profile_and_emits_typed_receipt(tmp_path):
     assert 'content="Product routed task to v20-development."' in options["prompt"]
 
 
+def test_specialist_prompt_separates_one_knowledge_observation_from_runtime_memory(tmp_path):
+    workspace = tmp_path / "task"
+    workspace.mkdir()
+    adapter = FakeCodexAdapter(
+        [
+            {
+                "schema_version": "1.0",
+                "run_id": "run-001",
+                "task_id": "task-001",
+                "repository_revision": "b5263eb",
+                "created_at": "2026-07-27T16:00:00Z",
+                "role": "v20-product",
+                "attempt": 1,
+                "route": "v20-development",
+                "summary": "A bounded documentation task.",
+                "development_instructions": "Create only the requested documentation file.",
+                "acceptance_checks": ["git-diff-check"],
+                "memory": [],
+                "knowledge_observations": [
+                    {
+                        "concept_key": "bounded-documentation-procedure",
+                        "title": "Bounded documentation procedure",
+                        "kind": "memory",
+                        "scope": "v20-product",
+                        "summary": "Keep documentation-only changes inside the requested scope.",
+                        "explicit": True,
+                    }
+                ],
+            }
+        ]
+    )
+
+    receipt = composition(tmp_path, adapter).execute(request(workspace, SpecialistRole.PRODUCT))
+
+    _, options = adapter.calls[0]
+    prompt = options["prompt"]
+    observation_schema = options["output_schema"]["properties"]["knowledge_observations"]
+    assert prompt.index("Set memory to an empty array") < prompt.index(
+        "Set knowledge_observations to an empty array"
+    )
+    assert "At most one candidate-only observation is allowed" in prompt
+    assert "never treat the proposal as approved knowledge, evidence, or authority" in prompt
+    assert observation_schema["maxItems"] == 1
+    assert len(receipt.output.knowledge_observations) == 1
+    assert receipt.memory_candidates == ()
+
+
 def test_specialist_prompt_includes_only_controller_snapshot_with_provenance(tmp_path):
     workspace = tmp_path / "task"
     workspace.mkdir()

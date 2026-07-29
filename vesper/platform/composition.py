@@ -1170,6 +1170,11 @@ class NativeSpecialistComposition:
             f'memory_type="{memory_type.value}" and content={json.dumps(memory_content)}. '
             "Do not append qualification or other text to that content. The proposal remains "
             "unverified until the controller compares it to authoritative evidence. "
+            "Set knowledge_observations to an empty array unless the current task contains an "
+            "explicit durable operator request or reveals a repeated reusable procedure. "
+            "At most one candidate-only observation is allowed. Use a stable lowercase slug, "
+            "paraphrase without transcript text or secrets, and never treat the proposal as "
+            "approved knowledge, evidence, or authority. "
             "Never claim final acceptance. Stop if the task exceeds the supplied permissions."
         )
 
