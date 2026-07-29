@@ -409,6 +409,7 @@ class LocalFinancialResearchExecutor:
                                  WHEN length(CAST(date AS BLOB)) <> 10 THEN 0
                                  WHEN date NOT GLOB
                                       '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' THEN 0
+                                 WHEN substr(date, 1, 4) = '0000' THEN 0
                                  WHEN julianday(date) IS NULL THEN 0
                                  WHEN date(julianday(date)) <> date THEN 0
                                  ELSE 1

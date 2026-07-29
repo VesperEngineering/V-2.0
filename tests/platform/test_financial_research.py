@@ -346,6 +346,20 @@ def test_executor_rejects_invalid_requested_symbol_date_anywhere_in_source(
     assert not (tmp_path / "derived").exists()
 
 
+def test_executor_rejects_python_invalid_year_zero_date_for_requested_symbol(tmp_path):
+    database = market_database(tmp_path / "massive")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("SPY", "0000-01-01", 1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+
+    with pytest.raises(FinancialResearchError, match="invalid dates"):
+        executor(tmp_path).execute(*execution_inputs())
+
+    assert not (tmp_path / "derived").exists()
+
+
 def test_executor_ignores_invalid_dates_for_unrequested_symbols(tmp_path):
     database = market_database(tmp_path / "massive")
     with sqlite3.connect(database) as connection:
