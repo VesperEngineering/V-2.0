@@ -20,22 +20,33 @@ def _write_note(
     knowledge_id: str = "split-adjustment-policy",
     kind: str = "memory",
     status: str = "approved",
+    retention: str | None = "adaptive",
     scope: str = "shared",
     title: str = "Split adjustment policy",
     tags: tuple[str, ...] = ("prices", "splits"),
     body: str = "Raw prices must be split-adjusted before feature computation.",
+    supersedes: tuple[str, ...] = (),
+    review_after: str | None = None,
+    contested: bool | None = None,
 ) -> Path:
     path = vault / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
     tag_lines = "\n".join(f"  - {tag}" for tag in tags)
+    metadata = (
+        f"vesper_id: {knowledge_id}",
+        f"vesper_kind: {kind}",
+        f"vesper_status: {status}",
+        *((f"vesper_retention: {retention}",) if retention is not None else ()),
+        f"vesper_scope: {scope}",
+        *(("vesper_supersedes:", *(f"  - {item}" for item in supersedes)) if supersedes else ()),
+        *((f"vesper_review_after: {review_after}",) if review_after is not None else ()),
+        *((f"vesper_contested: {str(contested).lower()}",) if contested is not None else ()),
+    )
     path.write_text(
         "\n".join(
             (
                 "---",
-                f"vesper_id: {knowledge_id}",
-                f"vesper_kind: {kind}",
-                f"vesper_status: {status}",
-                f"vesper_scope: {scope}",
+                *metadata,
                 f"title: {title}",
                 "tags:",
                 tag_lines,
@@ -116,6 +127,147 @@ def test_candidate_and_out_of_scope_markdown_never_enter_approved_documents(tmp_
     (vault / "README.md").write_text("# V20 Knowledge\n", encoding="utf-8")
 
     assert _knowledge_module().load_approved_documents(vault) == ()
+
+
+def test_corpus_separates_active_and_archived_and_counts_complete_active_lines(tmp_path):
+    vault = tmp_path / "knowledge"
+    active = _write_note(
+        vault,
+        "memory/active.md",
+        retention="pinned",
+        supersedes=("prior-split-policy",),
+        review_after="2026-08-01",
+        contested=True,
+    )
+    _write_note(
+        vault,
+        "archive/skills/archived.md",
+        knowledge_id="archived-procedure",
+        kind="skill",
+        status="archived",
+        retention="adaptive",
+    )
+
+    corpus = _knowledge_module().load_knowledge_corpus(vault)
+
+    assert [item.knowledge_id for item in corpus.active] == ["split-adjustment-policy"]
+    assert [item.knowledge_id for item in corpus.archived] == ["archived-procedure"]
+    assert corpus.active_lines == len(active.read_text(encoding="utf-8").splitlines())
+    assert corpus.active[0].supersedes == ("prior-split-policy",)
+    assert str(corpus.active[0].review_after) == "2026-08-01"
+    assert corpus.active[0].contested is True
+    assert _knowledge_module().load_approved_documents(vault) == corpus.active
+
+
+def test_active_corpus_over_3000_lines_fails_before_sync_mutates_store(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(vault, "memory/too-large.md", body="\n".join("line" for _ in range(3000)))
+    paths = PlatformPaths.below(tmp_path / "platform")
+
+    with open_persistence(paths) as persistence:
+        service = _service(vault, persistence)
+        with pytest.raises(_knowledge_module().KnowledgeSyncError, match=r"3,000.*active lines"):
+            service.sync()
+        assert service.status()["documents"] == 0
+
+
+def test_active_corpus_at_3000_lines_is_admitted(tmp_path):
+    vault = tmp_path / "knowledge"
+    note = _write_note(
+        vault,
+        "memory/exact-budget.md",
+        body="\n".join("line" for _ in range(2987)),
+    )
+
+    assert len(note.read_text(encoding="utf-8").splitlines()) == 3_000
+
+    corpus = _knowledge_module().load_knowledge_corpus(vault)
+
+    assert corpus.active_lines == 3_000
+
+
+def test_duplicate_ids_across_active_archive_and_inbox_fail_before_admission(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(vault, "memory/active.md", knowledge_id="active-id")
+    _write_note(
+        vault,
+        "archive/skills/archived.md",
+        knowledge_id="shared-id",
+        kind="skill",
+        status="archived",
+    )
+    _write_note(vault, "inbox/candidate.md", knowledge_id="shared-id", status="candidate")
+
+    with pytest.raises(
+        _knowledge_module().KnowledgeSyncError, match=r"duplicate vesper_id.*shared-id"
+    ):
+        _knowledge_module().load_knowledge_corpus(vault)
+
+
+def test_admitted_note_requires_retention(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(vault, "memory/missing-retention.md", retention=None)
+
+    with pytest.raises(
+        _knowledge_module().KnowledgeSyncError,
+        match=r"memory/missing-retention\.md.*vesper_retention",
+    ):
+        _knowledge_module().load_knowledge_corpus(vault)
+
+
+def test_archived_note_cannot_use_pinned_retention(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(
+        vault,
+        "archive/memory/pinned.md",
+        status="archived",
+        retention="pinned",
+    )
+
+    with pytest.raises(_knowledge_module().KnowledgeSyncError, match=r"archive/memory/pinned\.md"):
+        _knowledge_module().load_knowledge_corpus(vault)
+
+
+def test_archived_note_must_match_its_kind_directory(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(
+        vault,
+        "archive/memory/wrong-kind.md",
+        kind="skill",
+        status="archived",
+    )
+
+    with pytest.raises(
+        _knowledge_module().KnowledgeSyncError,
+        match=r"archive/memory/wrong-kind\.md.*vesper_kind must be 'memory'",
+    ):
+        _knowledge_module().load_knowledge_corpus(vault)
+
+
+def test_linked_archived_note_fails_closed(tmp_path, monkeypatch):
+    vault = tmp_path / "knowledge"
+    note = _write_note(vault, "archive/memory/linked.md", status="archived")
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path == note or original_is_symlink(path),
+    )
+
+    with pytest.raises(
+        _knowledge_module().KnowledgeSyncError,
+        match=r"archive/memory/linked\.md.*linked knowledge notes",
+    ):
+        _knowledge_module().load_knowledge_corpus(vault)
+
+
+def test_readme_is_excluded_from_corpus_roots(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(vault, "memory/README.md")
+
+    corpus = _knowledge_module().load_knowledge_corpus(vault)
+
+    assert corpus.documents == ()
 
 
 def test_malformed_approved_note_fails_with_relative_source_path(tmp_path):

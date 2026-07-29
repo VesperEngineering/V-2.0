@@ -8,6 +8,7 @@ import re
 import sqlite3
 import stat
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -30,20 +31,34 @@ class KnowledgeSyncError(RuntimeError):
     """The dedicated V20 knowledge vault failed deterministic validation."""
 
 
-_APPROVED_STATUS = "approved"
-_SCANNED_ROOTS = {
-    "memory": KnowledgeKind.MEMORY,
-    "skills": KnowledgeKind.SKILL,
-}
+_MAX_ACTIVE_LINES = 3_000
+_KNOWLEDGE_ROOTS = (
+    ("memory", KnowledgeKind.MEMORY, KnowledgeTier.ACTIVE, "approved"),
+    ("skills", KnowledgeKind.SKILL, KnowledgeTier.ACTIVE, "approved"),
+    ("archive/memory", KnowledgeKind.MEMORY, KnowledgeTier.ARCHIVE, "archived"),
+    ("archive/skills", KnowledgeKind.SKILL, KnowledgeTier.ARCHIVE, "archived"),
+)
 _REQUIRED_FIELDS = (
     "vesper_id",
     "vesper_kind",
+    "vesper_retention",
     "vesper_scope",
     "title",
 )
 _DOCUMENT_NAMESPACE = ("knowledge", "obsidian", "documents")
 _MAX_CONTEXT_DOCUMENTS = 5
 _MAX_CONTEXT_CHARACTERS = 8_000
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCorpus:
+    active: tuple[KnowledgeDocument, ...]
+    archived: tuple[KnowledgeDocument, ...]
+    active_lines: int
+
+    @property
+    def documents(self) -> tuple[KnowledgeDocument, ...]:
+        return self.active + self.archived
 
 
 class KnowledgeStorePort(Protocol):
@@ -272,7 +287,12 @@ def _first_link_component(root: Path, path: Path) -> Path | None:
 
 
 def load_approved_documents(vault_root: Path) -> tuple[KnowledgeDocument, ...]:
-    """Load approved notes from the dedicated memory and skills directories."""
+    """Load only active approved notes for existing retrieval callers."""
+    return load_knowledge_corpus(vault_root).active
+
+
+def load_knowledge_corpus(vault_root: Path) -> KnowledgeCorpus:
+    """Validate the complete canonical corpus before exposing active notes."""
     vault = vault_root.resolve()
     if not vault_root.exists() or not vault_root.is_dir():
         raise KnowledgeSyncError(f"knowledge vault does not exist: {vault_root}")
@@ -280,15 +300,19 @@ def load_approved_documents(vault_root: Path) -> tuple[KnowledgeDocument, ...]:
         raise KnowledgeSyncError("knowledge vault cannot be a linked knowledge path")
 
     documents: dict[str, KnowledgeDocument] = {}
-    for directory_name, expected_kind in _SCANNED_ROOTS.items():
+    active = []
+    archived = []
+    for directory_name, expected_kind, tier, status in _KNOWLEDGE_ROOTS:
         directory = vault / directory_name
         if not directory.exists():
             continue
         if not directory.is_dir() or _first_link_component(vault, directory) is not None:
             raise KnowledgeSyncError(f"{directory_name}: linked knowledge paths are not allowed")
         for path in sorted(directory.rglob("*.md")):
+            if path.name.casefold() == "readme.md":
+                continue
             relative = path.relative_to(vault).as_posix()
-            document = _load_note(vault, path, relative, expected_kind)
+            document = _load_note(vault, path, relative, expected_kind, tier, status)
             if document is None:
                 continue
             if document.knowledge_id in documents:
@@ -296,7 +320,44 @@ def load_approved_documents(vault_root: Path) -> tuple[KnowledgeDocument, ...]:
                     f"duplicate vesper_id {document.knowledge_id!r}: {relative}"
                 )
             documents[document.knowledge_id] = document
-    return tuple(documents[key] for key in sorted(documents))
+            (active if tier is KnowledgeTier.ACTIVE else archived).append(document)
+
+    _inventory_inbox_ids(vault, documents)
+    active = tuple(sorted(active, key=lambda item: item.knowledge_id))
+    archived = tuple(sorted(archived, key=lambda item: item.knowledge_id))
+    active_lines = sum(item.source_line_count for item in active)
+    if active_lines > _MAX_ACTIVE_LINES:
+        per_note_counts = ", ".join(
+            f"{item.source_path}={item.source_line_count}" for item in active
+        )
+        raise KnowledgeSyncError(
+            f"active corpus exceeds {_MAX_ACTIVE_LINES:,} active lines: total={active_lines}, "
+            f"overage={active_lines - _MAX_ACTIVE_LINES}, notes={per_note_counts}"
+        )
+    return KnowledgeCorpus(active=active, archived=archived, active_lines=active_lines)
+
+
+def _inventory_inbox_ids(vault: Path, documents: Mapping[str, KnowledgeDocument]) -> None:
+    inbox = vault / "inbox"
+    if not inbox.exists():
+        return
+    if not inbox.is_dir() or _first_link_component(vault, inbox) is not None:
+        raise KnowledgeSyncError("inbox: linked knowledge paths are not allowed")
+    known_ids = set(documents)
+    for path in sorted(inbox.rglob("*.md")):
+        if path.name.casefold() == "readme.md":
+            continue
+        relative = path.relative_to(vault).as_posix()
+        parsed = _read_note_metadata(vault, path, relative)
+        if parsed is None:
+            continue
+        _, _, metadata = parsed
+        knowledge_id = metadata.get("vesper_id")
+        if not isinstance(knowledge_id, str) or not knowledge_id.strip():
+            continue
+        if knowledge_id in known_ids:
+            raise KnowledgeSyncError(f"duplicate vesper_id {knowledge_id!r}: {relative}")
+        known_ids.add(knowledge_id)
 
 
 def _load_note(
@@ -304,7 +365,60 @@ def _load_note(
     path: Path,
     relative: str,
     expected_kind: KnowledgeKind,
+    expected_tier: KnowledgeTier,
+    expected_status: str,
 ) -> KnowledgeDocument | None:
+    parsed = _read_note_metadata(vault, path, relative)
+    if parsed is None:
+        return None
+    source, lines, metadata = parsed
+    if metadata.get("vesper_status") != expected_status:
+        return None
+    for field in _REQUIRED_FIELDS:
+        if field not in metadata:
+            raise KnowledgeSyncError(f"{relative}: admitted note requires {field}")
+    if metadata["vesper_kind"] != expected_kind.value:
+        raise KnowledgeSyncError(
+            f"{relative}: vesper_kind must be {expected_kind.value!r} in this directory"
+        )
+    body = "\n".join(lines[_frontmatter_boundary(lines) + 1 :]).strip()
+    tags = metadata.get("tags", ())
+    if tags is None:
+        tags = ()
+    if not isinstance(tags, (list, tuple)):
+        raise KnowledgeSyncError(f"{relative}: tags must be a list")
+    supersedes = metadata.get("vesper_supersedes", ())
+    if supersedes is None:
+        supersedes = ()
+    if not isinstance(supersedes, (list, tuple)):
+        raise KnowledgeSyncError(f"{relative}: vesper_supersedes must be a list")
+    try:
+        return KnowledgeDocument(
+            knowledge_id=metadata["vesper_id"],
+            kind=KnowledgeKind(metadata["vesper_kind"]),
+            scope=KnowledgeScope(metadata["vesper_scope"]),
+            approval_status=expected_status,
+            tier=expected_tier,
+            retention=KnowledgeRetention(metadata["vesper_retention"]),
+            title=metadata["title"],
+            tags=tuple(tags),
+            content=body,
+            source_path=relative,
+            source_sha256=hashlib.sha256(source).hexdigest(),
+            source_line_count=len(lines),
+            supersedes=tuple(supersedes),
+            review_after=metadata.get("vesper_review_after"),
+            contested=metadata.get("vesper_contested", False),
+        )
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise KnowledgeSyncError(f"{relative}: admitted note metadata is invalid: {exc}") from exc
+
+
+def _read_note_metadata(
+    vault: Path,
+    path: Path,
+    relative: str,
+) -> tuple[bytes, list[str], dict[str, object]] | None:
     if _first_link_component(vault, path) is not None or not path.resolve().is_relative_to(vault):
         raise KnowledgeSyncError(f"{relative}: linked knowledge notes are not allowed")
     source = path.read_bytes()
@@ -315,46 +429,18 @@ def _load_note(
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return None
-    try:
-        boundary = next(index for index, line in enumerate(lines[1:], start=1) if line == "---")
-    except StopIteration as exc:
-        raise KnowledgeSyncError(f"{relative}: frontmatter is not terminated") from exc
+    boundary = _frontmatter_boundary(lines, relative)
     try:
         raw_metadata = yaml.safe_load("\n".join(lines[1:boundary]))
     except yaml.YAMLError as exc:
         raise KnowledgeSyncError(f"{relative}: frontmatter is invalid YAML") from exc
     if not isinstance(raw_metadata, Mapping):
         raise KnowledgeSyncError(f"{relative}: frontmatter must be a mapping")
-    metadata = dict(raw_metadata)
-    if metadata.get("vesper_status") != _APPROVED_STATUS:
-        return None
-    for field in _REQUIRED_FIELDS:
-        if field not in metadata:
-            raise KnowledgeSyncError(f"{relative}: approved note requires {field}")
-    if metadata["vesper_kind"] != expected_kind.value:
-        raise KnowledgeSyncError(
-            f"{relative}: vesper_kind must be {expected_kind.value!r} in this directory"
-        )
-    body = "\n".join(lines[boundary + 1 :]).strip()
-    tags = metadata.get("tags", ())
-    if tags is None:
-        tags = ()
-    if not isinstance(tags, (list, tuple)):
-        raise KnowledgeSyncError(f"{relative}: tags must be a list")
+    return source, lines, dict(raw_metadata)
+
+
+def _frontmatter_boundary(lines: list[str], relative: str = "note") -> int:
     try:
-        return KnowledgeDocument(
-            knowledge_id=metadata["vesper_id"],
-            kind=KnowledgeKind(metadata["vesper_kind"]),
-            scope=KnowledgeScope(metadata["vesper_scope"]),
-            approval_status="approved",
-            tier=KnowledgeTier.ACTIVE,
-            retention=KnowledgeRetention.ADAPTIVE,
-            title=metadata["title"],
-            tags=tuple(tags),
-            content=body,
-            source_path=relative,
-            source_sha256=hashlib.sha256(source).hexdigest(),
-            source_line_count=len(lines),
-        )
-    except (ValidationError, TypeError, ValueError) as exc:
-        raise KnowledgeSyncError(f"{relative}: approved note metadata is invalid: {exc}") from exc
+        return next(index for index, line in enumerate(lines[1:], start=1) if line == "---")
+    except StopIteration as exc:
+        raise KnowledgeSyncError(f"{relative}: frontmatter is not terminated") from exc

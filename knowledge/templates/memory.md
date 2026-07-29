@@ -2,6 +2,7 @@
 vesper_id: replace-with-stable-id
 vesper_kind: memory
 vesper_status: candidate
+vesper_retention: adaptive
 vesper_scope: shared
 title: Replace with a precise title
 tags:

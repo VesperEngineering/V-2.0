@@ -2,6 +2,7 @@
 vesper_id: replace-with-stable-id
 vesper_kind: skill
 vesper_status: candidate
+vesper_retention: adaptive
 vesper_scope: shared
 title: Replace with a precise procedure name
 tags:
