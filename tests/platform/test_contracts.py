@@ -7,13 +7,23 @@ import pytest
 from pydantic import ValidationError
 
 from vesper.platform.contracts import (
+    AnalysisNode,
     ApprovalDecision,
     CodexExecutionReceipt,
     CorrectionAttempt,
     DataResearchResult,
     DevelopmentSpecialistOutput,
+    DerivedDatasetReceipt,
     EvidenceArtifactRef,
     ExecutionStatus,
+    FinancialAnalysisPlan,
+    FinancialEventEnvelope,
+    FinancialEventType,
+    FinancialGapAssessment,
+    FinancialRecommendation,
+    FinancialResearchRequest,
+    FinancialResearchStatus,
+    FinancialTriggerDecision,
     GraphState,
     HumanApprovalDecision,
     HumanApprovalRequest,
@@ -144,6 +154,155 @@ def approval(*, decision: ApprovalDecision = ApprovalDecision.APPROVE):
         reason="Reviewed the evidence.",
         decided_at=NOW,
     )
+
+
+def financial_common(event_id: str = "event-001") -> dict[str, object]:
+    return {
+        **COMMON,
+        "event_id": event_id,
+        "non_authority": "Research only; no trading, deployment, or capital-allocation authority.",
+    }
+
+
+def direct_financial_event() -> FinancialEventEnvelope:
+    return FinancialEventEnvelope(
+        **financial_common(),
+        event_type=FinancialEventType.DIRECT_REQUEST,
+        occurred_at=NOW,
+        observed_at=NOW,
+        symbols=("SPY",),
+        origin="operator",
+        deduplication_key="direct-request-spy",
+        payload_sha256="d" * 64,
+        summary="Assess SPY coverage for a research request.",
+    )
+
+
+def coverage_analysis_plan(event: FinancialEventEnvelope) -> FinancialAnalysisPlan:
+    first = AnalysisNode(
+        **financial_common(event.event_id),
+        node_id="coverage-source",
+        kind="source-coverage",
+        output_schema=("symbol", "coverage_start", "coverage_end"),
+        transform_sha256="e" * 64,
+    )
+    second = AnalysisNode(
+        **financial_common(event.event_id),
+        node_id="coverage-summary",
+        kind="coverage-summary",
+        depends_on=(first.node_id,),
+        output_schema=("symbol", "coverage_days"),
+        transform_sha256="f" * 64,
+    )
+    return FinancialAnalysisPlan(
+        **financial_common(event.event_id),
+        plan_id="plan-001",
+        status=FinancialResearchStatus.PLANNED,
+        nodes=(first, second),
+        acceptance_checks=("coverage dates are present",),
+    )
+
+
+def valid_recommendation() -> FinancialRecommendation:
+    return FinancialRecommendation(
+        **financial_common(),
+        recommendation_id="recommendation-001",
+        status=FinancialResearchStatus.COMPLETE,
+        conclusions=("Coverage supports additional read-only analysis.",),
+        uncertainty="No claim about future returns is made.",
+        evidence=(artifact(),),
+    )
+
+
+def test_phase_one_financial_contract_chain_is_typed():
+    event = direct_financial_event()
+    decision = FinancialTriggerDecision(
+        **financial_common(event.event_id),
+        triggered=True,
+        status=FinancialResearchStatus.REQUESTED,
+        reason="A direct operator request is in scope for analysis-only research.",
+        workflow="analysis-only",
+        resource_budget="bounded-local",
+    )
+    request = FinancialResearchRequest(
+        **financial_common(event.event_id),
+        request_id="request-001",
+        status=FinancialResearchStatus.REQUESTED,
+        questions=("What local coverage exists for SPY?",),
+        source_classes=("local-market-data",),
+        symbols=("SPY",),
+        time_window_start="2020-01-01",
+        time_window_end="2026-07-27",
+        sufficiency_criteria=("Coverage dates are known.",),
+    )
+    plan = coverage_analysis_plan(event)
+    dataset = DerivedDatasetReceipt(
+        **financial_common(event.event_id),
+        dataset_id="dataset-001",
+        schema_fields=("symbol", "coverage_days"),
+        source_hashes=("a" * 64,),
+        transform_sha256="b" * 64,
+        cache_key_sha256="c" * 64,
+        coverage_start="2020-01-01",
+        coverage_end="2026-07-27",
+        lineage_ids=(plan.plan_id, plan.nodes[1].node_id),
+        validation_evidence=artifact(),
+    )
+    gap = FinancialGapAssessment(
+        **financial_common(event.event_id),
+        assessment_id="gap-001",
+        status=FinancialResearchStatus.COMPLETE,
+        supported_claims=("SPY coverage is available.",),
+        unresolved_gaps=(),
+        contradiction_state="none",
+        confidence=0.9,
+        next_action="stop",
+        loop_budget_used=0,
+    )
+
+    assert decision.workflow == "analysis-only"
+    assert request.symbols == event.symbols
+    assert plan.nodes[1].depends_on == (plan.nodes[0].node_id,)
+    assert dataset.lineage_ids[0] == plan.plan_id
+    assert gap.next_action == "stop"
+
+
+def test_financial_event_variants_require_their_expected_metrics():
+    direct_payload = direct_financial_event().model_dump()
+    direct_payload["observed_metric"] = 0.01
+    direct_payload["threshold"] = 0.02
+    with pytest.raises(ValidationError, match="direct requests forbid metrics"):
+        FinancialEventEnvelope.model_validate(direct_payload)
+
+    weak_payload = direct_financial_event().model_dump()
+    weak_payload["event_type"] = FinancialEventType.WEAK_MODEL_RESULT
+    with pytest.raises(ValidationError, match="weak model results require metrics"):
+        FinancialEventEnvelope.model_validate(weak_payload)
+
+
+def test_derived_dataset_requires_complete_reproducibility_receipt():
+    payload = {
+        **financial_common(),
+        "dataset_id": "dataset-001",
+        "schema_fields": (),
+        "source_hashes": (),
+        "transform_sha256": "b" * 64,
+        "cache_key_sha256": "c" * 64,
+        "coverage_start": "2020-01-01",
+        "coverage_end": "2026-07-27",
+        "lineage_ids": (),
+        "validation_evidence": artifact(),
+    }
+
+    with pytest.raises(ValidationError):
+        DerivedDatasetReceipt.model_validate(payload)
+
+
+def test_financial_recommendation_requires_non_authority_statement():
+    payload = valid_recommendation().model_dump()
+    payload["non_authority"] = ""
+    with pytest.raises(ValidationError):
+        FinancialRecommendation.model_validate(payload)
 
 
 def test_contracts_serialize_to_stable_json_and_round_trip():

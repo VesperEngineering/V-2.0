@@ -155,6 +155,147 @@ class RunContract(ContractModel):
         return value.astimezone(timezone.utc)
 
 
+class FinancialEventType(StrEnum):
+    DIRECT_REQUEST = "direct-request"
+    WEAK_MODEL_RESULT = "weak-model-result"
+
+
+class FinancialResearchStatus(StrEnum):
+    REQUESTED = "requested"
+    PLANNED = "planned"
+    COMPLETE = "complete"
+    NEEDS_RESEARCH = "needs-research"
+    NEEDS_ANALYSIS = "needs-analysis"
+    STOPPED = "stopped"
+
+
+class FinancialResearchContract(RunContract):
+    event_id: NonEmptyStr
+    non_authority: NonEmptyStr
+
+
+class FinancialEventEnvelope(FinancialResearchContract):
+    event_type: FinancialEventType
+    occurred_at: AwareDatetime
+    observed_at: AwareDatetime
+    symbols: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    origin: NonEmptyStr
+    deduplication_key: NonEmptyStr
+    payload_sha256: Sha256
+    summary: NonEmptyStr
+    observed_metric: float | None = None
+    threshold: float | None = None
+
+    @field_validator("occurred_at", "observed_at")
+    @classmethod
+    def require_event_utc(cls, value: datetime) -> datetime:
+        return RunContract.require_utc(value)
+
+    @model_validator(mode="after")
+    def validate_event_metrics(self) -> FinancialEventEnvelope:
+        has_metrics = self.observed_metric is not None and self.threshold is not None
+        if self.event_type is FinancialEventType.WEAK_MODEL_RESULT and not has_metrics:
+            raise ValueError("weak model results require metrics")
+        if self.event_type is FinancialEventType.DIRECT_REQUEST and (
+            self.observed_metric is not None or self.threshold is not None
+        ):
+            raise ValueError("direct requests forbid metrics")
+        return self
+
+
+class FinancialTriggerDecision(FinancialResearchContract):
+    triggered: bool
+    status: FinancialResearchStatus
+    reason: NonEmptyStr
+    workflow: Literal["analysis-only"]
+    resource_budget: NonEmptyStr
+
+
+class FinancialResearchRequest(FinancialResearchContract):
+    request_id: NonEmptyStr
+    status: FinancialResearchStatus
+    questions: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    source_classes: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    symbols: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    time_window_start: NonEmptyStr
+    time_window_end: NonEmptyStr
+    sufficiency_criteria: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    prior_attempt_ids: tuple[NonEmptyStr, ...] = ()
+
+
+class AnalysisNode(FinancialResearchContract):
+    node_id: NonEmptyStr
+    kind: NonEmptyStr
+    depends_on: tuple[NonEmptyStr, ...] = ()
+    output_schema: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    transform_sha256: Sha256
+
+
+class FinancialAnalysisPlan(FinancialResearchContract):
+    plan_id: NonEmptyStr
+    status: FinancialResearchStatus
+    nodes: Annotated[tuple[AnalysisNode, ...], Field(min_length=1)]
+    acceptance_checks: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_nodes(self) -> FinancialAnalysisPlan:
+        node_ids = {node.node_id for node in self.nodes}
+        if len(node_ids) != len(self.nodes):
+            raise ValueError("analysis plan node IDs must be unique")
+        for node in self.nodes:
+            if (
+                node.run_id != self.run_id
+                or node.task_id != self.task_id
+                or node.repository_revision != self.repository_revision
+                or node.event_id != self.event_id
+            ):
+                raise ValueError("analysis node authority must match its plan")
+            if node.node_id in node.depends_on or not set(node.depends_on).issubset(node_ids):
+                raise ValueError("analysis node dependencies must reference other plan nodes")
+        return self
+
+
+class DerivedDatasetReceipt(FinancialResearchContract):
+    dataset_id: NonEmptyStr
+    schema_fields: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    source_hashes: Annotated[tuple[Sha256, ...], Field(min_length=1)]
+    transform_sha256: Sha256
+    cache_key_sha256: Sha256
+    coverage_start: NonEmptyStr
+    coverage_end: NonEmptyStr
+    lineage_ids: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    validation_evidence: EvidenceArtifactRef
+
+    @model_validator(mode="after")
+    def validation_evidence_matches_authority(self) -> DerivedDatasetReceipt:
+        _evidence_matches_authority(self, (self.validation_evidence,))
+        return self
+
+
+class FinancialGapAssessment(FinancialResearchContract):
+    assessment_id: NonEmptyStr
+    status: FinancialResearchStatus
+    supported_claims: tuple[NonEmptyStr, ...] = ()
+    unresolved_gaps: tuple[NonEmptyStr, ...] = ()
+    contradiction_state: NonEmptyStr
+    confidence: Annotated[float, Field(ge=0, le=1)]
+    next_action: Literal["request-research", "repair-analysis", "stop"]
+    loop_budget_used: Annotated[int, Field(ge=0)]
+
+
+class FinancialRecommendation(FinancialResearchContract):
+    recommendation_id: NonEmptyStr
+    status: FinancialResearchStatus
+    conclusions: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    uncertainty: NonEmptyStr
+    evidence: Annotated[tuple[EvidenceArtifactRef, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def evidence_matches_authority(self) -> FinancialRecommendation:
+        _evidence_matches_authority(self, self.evidence)
+        return self
+
+
 class PermissionSet(ContractModel):
     sandbox: SandboxMode
     read_paths: tuple[RelativePath, ...] = ()
