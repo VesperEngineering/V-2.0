@@ -18,7 +18,9 @@ from .contracts import (
     KnowledgeContext,
     KnowledgeDocument,
     KnowledgeKind,
+    KnowledgeRetention,
     KnowledgeScope,
+    KnowledgeTier,
     SpecialistRole,
     TaskRequest,
 )
@@ -344,11 +346,15 @@ def _load_note(
             knowledge_id=metadata["vesper_id"],
             kind=KnowledgeKind(metadata["vesper_kind"]),
             scope=KnowledgeScope(metadata["vesper_scope"]),
+            approval_status="approved",
+            tier=KnowledgeTier.ACTIVE,
+            retention=KnowledgeRetention.ADAPTIVE,
             title=metadata["title"],
             tags=tuple(tags),
             content=body,
             source_path=relative,
             source_sha256=hashlib.sha256(source).hexdigest(),
+            source_line_count=len(lines),
         )
     except (ValidationError, TypeError, ValueError) as exc:
         raise KnowledgeSyncError(f"{relative}: approved note metadata is invalid: {exc}") from exc

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vesper.platform.contracts import SpecialistRole, TaskRequest
+from vesper.platform.contracts import KnowledgeRetention, KnowledgeTier, SpecialistRole, TaskRequest
 from vesper.platform.persistence import PlatformPaths, open_persistence
 
 
@@ -66,10 +66,14 @@ def test_approved_memory_note_becomes_typed_document_with_source_provenance(tmp_
     assert document.knowledge_id == "split-adjustment-policy"
     assert document.kind.value == "memory"
     assert document.scope.value == "shared"
+    assert document.approval_status == "approved"
+    assert document.tier is KnowledgeTier.ACTIVE
+    assert document.retention is KnowledgeRetention.ADAPTIVE
     assert document.title == "Split adjustment policy"
     assert document.tags == ("prices", "splits")
     assert document.source_path == "memory/split-adjustments.md"
     assert document.source_sha256 == hashlib.sha256(note.read_bytes()).hexdigest()
+    assert document.source_line_count == len(note.read_text(encoding="utf-8").splitlines())
     assert document.content == (
         "# Split adjustment policy\n\nRaw prices must be split-adjusted before feature computation."
     )
