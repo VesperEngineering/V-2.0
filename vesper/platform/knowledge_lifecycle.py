@@ -152,11 +152,12 @@ class KnowledgeLifecycleService:
             for stored in self._store.search(USAGE_NAMESPACE, limit=10_000):
                 knowledge_id, state = _stored_usage(stored)
                 structured_refs = {_selection_ref(selection) for selection in state["selections"]}
-                selected_refs = {
-                    _selection_ref(selection)
+                selected_selections = [
+                    selection
                     for selection in state["selections"]
                     if selection["run_id"] == task.run_id and selection["task_id"] == task.task_id
-                }
+                ]
+                selected_refs = {_selection_ref(selection) for selection in selected_selections}
                 selected_refs.update(
                     reference
                     for reference in state["selection_refs"]
@@ -173,6 +174,7 @@ class KnowledgeLifecycleService:
                     successful_runs[task.run_id] = {
                         "run_id": task.run_id,
                         "accepted_at": accepted_at,
+                        "tiers": sorted({selection["tier"] for selection in selected_selections}),
                     }
                     changed = True
                 if changed:
@@ -624,22 +626,29 @@ def _stored_selection(value: object) -> dict[str, str]:
     return {"run_id": run_id, "task_id": task_id, "role": role, "tier": tier}
 
 
-def _stored_successful_run(value: object) -> dict[str, str | None]:
+def _stored_successful_run(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise KnowledgeLifecycleError("stored usage state is invalid")
     run_id = value.get("run_id")
     accepted_at = value.get("accepted_at")
+    tiers = value.get("tiers", [])
     if not isinstance(run_id, str) or not run_id:
         raise KnowledgeLifecycleError("stored usage state is invalid")
     if accepted_at is not None and not isinstance(accepted_at, str):
         raise KnowledgeLifecycleError("stored usage state is invalid")
-    return {"run_id": run_id, "accepted_at": accepted_at}
+    if (
+        not isinstance(tiers, list)
+        or not all(isinstance(tier, str) for tier in tiers)
+        or not set(tiers).issubset({item.value for item in KnowledgeTier})
+    ):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    return {"run_id": run_id, "accepted_at": accepted_at, "tiers": sorted(set(tiers))}
 
 
 def _legacy_successful_runs(
     successful_refs: list[object],
     last_successful_use: object,
-) -> list[dict[str, str | None]]:
+) -> list[dict[str, object]]:
     run_ids = {
         run_id
         for reference in successful_refs
@@ -648,7 +657,9 @@ def _legacy_successful_runs(
         if run_id is not None
     }
     accepted_at = last_successful_use if isinstance(last_successful_use, str) else None
-    return [{"run_id": run_id, "accepted_at": accepted_at} for run_id in sorted(run_ids)]
+    return [
+        {"run_id": run_id, "accepted_at": accepted_at, "tiers": []} for run_id in sorted(run_ids)
+    ]
 
 
 def _selection_key(selection: Mapping[str, object]) -> tuple[str, str, str, str]:
@@ -678,20 +689,15 @@ def _archived_usage(
     usage: Mapping[str, object],
     state: Mapping[str, object],
 ) -> dict[str, object]:
-    selections = state["selections"]
-    if not isinstance(selections, list):
-        raise KnowledgeLifecycleError("stored usage state is invalid")
-    archived_run_ids = {
-        selection["run_id"]
-        for selection in selections
-        if isinstance(selection, Mapping) and selection.get("tier") == KnowledgeTier.ARCHIVE.value
-    }
     archived_usage = dict(usage)
     successful_runs = state["successful_runs"]
     if not isinstance(successful_runs, list):
         raise KnowledgeLifecycleError("stored usage state is invalid")
-    successful_run_ids = {item["run_id"] for item in successful_runs if isinstance(item, Mapping)}
-    archived_successes = archived_run_ids & successful_run_ids
+    archived_successes = {
+        item["run_id"]
+        for item in successful_runs
+        if isinstance(item, Mapping) and KnowledgeTier.ARCHIVE.value in item.get("tiers", [])
+    }
     archived_usage["successful_run_count"] = len(archived_successes)
     archived_usage["last_successful_use"] = _latest_successful_use(
         successful_runs,

@@ -833,6 +833,42 @@ def test_reactivation_ignores_successes_selected_while_note_was_active(tmp_path)
     assert service.reactivation_plan()["entries"] == []
 
 
+def test_post_acceptance_archive_selections_cannot_reclassify_success(tmp_path):
+    store = DictStore()
+    vault = tmp_path / "knowledge"
+    service = _lifecycle_module().KnowledgeLifecycleService(
+        vault_root=vault,
+        store=store,
+        clock=lambda: NOW,
+    )
+    _write_note(
+        vault, "archive/memory/archived-id.md", knowledge_id="archived-id", status="archived"
+    )
+    for index in range(3):
+        run_id = f"run-{index}"
+        service.record_selections(
+            (knowledge_context("archived-id", KnowledgeTier.ACTIVE, run_id=run_id),)
+        )
+        service.accept_run(task(run_id=run_id), receipts=())
+
+    for index in range(3):
+        run_id = f"run-{index}"
+        service.record_selections(
+            (knowledge_context("archived-id", KnowledgeTier.ARCHIVE, run_id=run_id),)
+        )
+        service.accept_run(task(run_id=run_id), receipts=())
+
+    assert service.usage("archived-id")["successful_run_count"] == 3
+    usage = store.get(_lifecycle_module().USAGE_NAMESPACE, "archived-id")
+    assert usage is not None
+    assert [item["tiers"] for item in usage["successful_runs"]] == [
+        ["active"],
+        ["active"],
+        ["active"],
+    ]
+    assert service.reactivation_plan()["entries"] == []
+
+
 def test_concurrent_observations_preserve_every_distinct_source(tmp_path):
     class CoordinatedStore(DictStore):
         def __init__(self) -> None:
