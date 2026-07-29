@@ -3,7 +3,7 @@
 - Recorded: 2026-07-29
 - Environment: Windows, Python 3.11, `uv run --locked`
 - Baseline: `62df959795691b894e3b3ed8d5dc5403bb2c50b0`
-- Verified implementation head: `188d361fce6b250830368292d571e1e3049e401e`
+- Verified implementation head: `8425c0689f5bb204d7c5a03fc979a1383316ce76`
 - Result: all focused, static, full-suite, import, lock, CLI, and diff gates passed
 
 ## Implementation commits
@@ -24,6 +24,8 @@
   `10782ad0fe24b0c110ebd5c757cf10d3f23f1ef7`,
   `48947d9ddc74bc4bf2eb19ca36fa0a0b1f0a8191`
 - Task 9 required formatting: `188d361fce6b250830368292d571e1e3049e401e`
+- Final-review lifecycle repair: `8e5c2c1` and `8425c06`
+- Final-review synchronization repair: `936cde0`
 
 ## Fresh verification
 
@@ -43,7 +45,7 @@ uv run --locked python -m pytest `
   -q --basetemp (Join-Path $adaptiveTestRoot "focused")
 ```
 
-Result: exit 0; `238 passed, 1 skipped in 30.44s`.
+Result: exit 0; `246 passed, 1 skipped in 46.32s`.
 
 After the required locked formatter changed two files mechanically, the directly
 affected contract suite was rerun:
@@ -113,7 +115,7 @@ uv run --locked python -m compileall -q vesper scripts tests
 Results:
 
 ```text
-14 files already formatted
+15 files already formatted
 All checks passed!
 compileall: exit 0; no output
 ```
@@ -127,7 +129,7 @@ uv run --locked python -m pytest tests -q `
   --basetemp (Join-Path $adaptiveFullRoot "pytest")
 ```
 
-Result: exit 0; `734 passed, 5 skipped in 84.64s`.
+Result: exit 0; `742 passed, 5 skipped in 123.49s`.
 
 ```powershell
 $adaptiveImportRoot = Join-Path $env:LOCALAPPDATA "Temp\v20-adaptive-imports-$PID"
@@ -136,7 +138,7 @@ uv run --locked python -m pytest tests/test_imports.py -q `
   --basetemp (Join-Path $adaptiveImportRoot "pytest")
 ```
 
-Result: exit 0; `66 passed in 27.12s`.
+Result: exit 0; `66 passed in 41.18s`.
 
 This isolated worktree intentionally has neither `vesper/data/massive/` nor
 `vesper/data/model_research/`. The SDD ledger records the earlier baseline as
@@ -150,7 +152,11 @@ failures.
 ```powershell
 uv lock --check
 uv run --locked vesper-agent --help
-uv run --locked vesper-agent knowledge-status
+uv run --locked vesper-agent `
+  --state-db .superpowers/sdd/final-status.sqlite3 `
+  --evidence-root .superpowers/sdd/final-evidence `
+  --knowledge-root knowledge `
+  knowledge-status
 git diff --check
 git status --short
 ```
@@ -158,7 +164,7 @@ git status --short
 Results:
 
 ```text
-uv lock --check: exit 0; Resolved 79 packages in 0.95ms
+uv lock --check: exit 0; Resolved 79 packages in 1ms
 vesper-agent --help: exit 0; all three governed lifecycle commands listed
 git diff --check: exit 0; no output
 git status --short: exit 0; no output before receipt creation
@@ -179,11 +185,11 @@ active_line_limit: 3000
 
 ## Scope and authority boundary
 
-The baseline-to-verified-head range contains 28 tracked files with `3,024`
-insertions and `88` deletions. It is limited to the adaptive knowledge contracts,
+The baseline-to-verified-head range contains 32 tracked files with `3,747`
+insertions and `106` deletions. It is limited to the adaptive knowledge contracts,
 corpus and retrieval, lifecycle service, composition/workflow/service wiring,
 governed CLI, focused tests, vault templates and guidance, ADR/runbook, and the
-required mechanical formatting.
+required mechanical formatting and final-review repairs.
 
 No protected data, `config/settings.yaml` risk or trading setting, model
 artifact, script or scheduler configuration, credential, dependency, external
