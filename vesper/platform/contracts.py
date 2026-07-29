@@ -211,6 +211,10 @@ class FinancialTriggerDecision(FinancialResearchContract):
     workflow: Literal["analysis-only"]
     resource_budget: NonEmptyStr
 
+    @property
+    def should_research(self) -> bool:
+        return self.triggered
+
 
 class FinancialResearchRequest(FinancialResearchContract):
     request_id: NonEmptyStr
