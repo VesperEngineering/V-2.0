@@ -27,6 +27,7 @@ from .knowledge import (
     KnowledgeCorpus,
     KnowledgeStorePort,
     KnowledgeSyncError,
+    load_knowledge_inventory,
     load_knowledge_corpus,
 )
 
@@ -159,13 +160,16 @@ class KnowledgeLifecycleService:
         """Produce a deterministic review proposal without moving any knowledge files."""
         if isinstance(target_lines, bool) or not 0 <= target_lines <= _MAX_ACTIVE_LINES:
             raise KnowledgeLifecycleError("target lines must be between 0 and 3000")
-        corpus = self._load_corpus()
+        corpus = self._load_corpus(planning=True)
         active = () if corpus is None else corpus.active
         active_lines = 0 if corpus is None else corpus.active_lines
+        superseded_ids = {
+            knowledge_id for document in active for knowledge_id in document.supersedes
+        }
         candidates = [
             document for document in active if document.retention is KnowledgeRetention.ADAPTIVE
         ]
-        candidates.sort(key=self._compaction_rank)
+        candidates.sort(key=lambda document: self._compaction_rank(document, superseded_ids))
 
         projected_active_lines = active_lines
         entries = []
@@ -173,7 +177,13 @@ class KnowledgeLifecycleService:
             if projected_active_lines <= target_lines:
                 break
             usage = self.usage(document.knowledge_id)
-            entries.append(self._proposal_entry(document, usage))
+            entries.append(
+                self._proposal_entry(
+                    document,
+                    usage,
+                    superseded=document.knowledge_id in superseded_ids,
+                )
+            )
             projected_active_lines -= document.source_line_count
 
         proposal = {
@@ -186,7 +196,7 @@ class KnowledgeLifecycleService:
 
     def reactivation_plan(self) -> dict[str, object]:
         """Produce a deterministic review proposal for frequently used archived notes."""
-        corpus = self._load_corpus()
+        corpus = self._load_corpus(planning=True)
         active_lines = 0 if corpus is None else corpus.active_lines
         archived = () if corpus is None else corpus.archived
         eligible = []
@@ -231,10 +241,14 @@ class KnowledgeLifecycleService:
             raise KnowledgeLifecycleError("stored usage state is invalid")
         return state
 
-    def _compaction_rank(self, document: KnowledgeDocument) -> tuple[object, ...]:
+    def _compaction_rank(
+        self,
+        document: KnowledgeDocument,
+        superseded_ids: set[str],
+    ) -> tuple[object, ...]:
         usage = self.usage(document.knowledge_id)
         return (
-            not document.supersedes,
+            document.knowledge_id not in superseded_ids,
             not _is_overdue(document.review_after, self._clock().date()),
             not document.contested,
             int(usage["successful_run_count"]),
@@ -247,6 +261,8 @@ class KnowledgeLifecycleService:
         self,
         document: KnowledgeDocument,
         usage: Mapping[str, object],
+        *,
+        superseded: bool = False,
     ) -> dict[str, object]:
         return {
             "knowledge_id": document.knowledge_id,
@@ -256,7 +272,7 @@ class KnowledgeLifecycleService:
             "selection_count": usage["selection_count"],
             "successful_run_count": usage["successful_run_count"],
             "last_successful_use": usage["last_successful_use"],
-            "reasons": _compaction_reasons(document, self._clock().date()),
+            "reasons": _compaction_reasons(document, self._clock().date(), superseded=superseded),
         }
 
     def _validate_observation(self, observation: KnowledgeObservation) -> None:
@@ -351,11 +367,12 @@ class KnowledgeLifecycleService:
         status = "candidate-updated" if existing is not None else "candidate-created"
         return _result(status, observation.concept_key, count)
 
-    def _load_corpus(self) -> KnowledgeCorpus | None:
+    def _load_corpus(self, *, planning: bool = False) -> KnowledgeCorpus | None:
         if not self._vault_root.exists():
             return None
         try:
-            return load_knowledge_corpus(self._vault_root)
+            loader = load_knowledge_inventory if planning else load_knowledge_corpus
+            return loader(self._vault_root)
         except KnowledgeSyncError as exc:
             raise KnowledgeLifecycleError(str(exc)) from exc
 
@@ -551,8 +568,13 @@ def _reactivation_timestamp(value: object) -> tuple[int, float]:
     return (-rank[0], -rank[1].timestamp())
 
 
-def _compaction_reasons(document: KnowledgeDocument, today: date) -> list[str]:
-    if document.supersedes:
+def _compaction_reasons(
+    document: KnowledgeDocument,
+    today: date,
+    *,
+    superseded: bool,
+) -> list[str]:
+    if superseded:
         return ["superseded"]
     if _is_overdue(document.review_after, today):
         return ["review-overdue"]

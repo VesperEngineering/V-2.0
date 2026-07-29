@@ -330,6 +330,20 @@ def load_approved_documents(vault_root: Path) -> tuple[KnowledgeDocument, ...]:
 
 def load_knowledge_corpus(vault_root: Path) -> KnowledgeCorpus:
     """Validate the complete canonical corpus before exposing active notes."""
+    corpus = load_knowledge_inventory(vault_root)
+    if corpus.active_lines > _MAX_ACTIVE_LINES:
+        per_note_counts = ", ".join(
+            f"{item.source_path}={item.source_line_count}" for item in corpus.active
+        )
+        raise KnowledgeSyncError(
+            f"active corpus exceeds {_MAX_ACTIVE_LINES:,} active lines: total={corpus.active_lines}, "
+            f"overage={corpus.active_lines - _MAX_ACTIVE_LINES}, notes={per_note_counts}"
+        )
+    return corpus
+
+
+def load_knowledge_inventory(vault_root: Path) -> KnowledgeCorpus:
+    """Validate and inventory the complete corpus without applying the active admission limit."""
     vault = vault_root.resolve()
     if not vault_root.exists() or not vault_root.is_dir():
         raise KnowledgeSyncError(f"knowledge vault does not exist: {vault_root}")
@@ -363,14 +377,6 @@ def load_knowledge_corpus(vault_root: Path) -> KnowledgeCorpus:
     active = tuple(sorted(active, key=lambda item: item.knowledge_id))
     archived = tuple(sorted(archived, key=lambda item: item.knowledge_id))
     active_lines = sum(item.source_line_count for item in active)
-    if active_lines > _MAX_ACTIVE_LINES:
-        per_note_counts = ", ".join(
-            f"{item.source_path}={item.source_line_count}" for item in active
-        )
-        raise KnowledgeSyncError(
-            f"active corpus exceeds {_MAX_ACTIVE_LINES:,} active lines: total={active_lines}, "
-            f"overage={active_lines - _MAX_ACTIVE_LINES}, notes={per_note_counts}"
-        )
     return KnowledgeCorpus(active=active, archived=archived, active_lines=active_lines)
 
 

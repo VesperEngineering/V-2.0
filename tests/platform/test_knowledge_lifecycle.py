@@ -192,6 +192,7 @@ def _write_note(
     supersedes: tuple[str, ...] = (),
     review_after: date | None = None,
     contested: bool = False,
+    body: str = "Existing body.",
 ) -> Path:
     path = vault / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,7 +211,7 @@ def _write_note(
         metadata.append(f"vesper_review_after: {review_after.isoformat()}")
     if contested:
         metadata.append("vesper_contested: true")
-    path.write_text("\n".join((*metadata, "---", "Existing body.", "")), encoding="utf-8")
+    path.write_text("\n".join((*metadata, "---", body, "")), encoding="utf-8")
     return path
 
 
@@ -648,13 +649,30 @@ def test_compaction_rejects_invalid_targets_without_mutation(tmp_path):
     assert note.read_bytes() == before
 
 
-def test_compaction_ranks_superseded_over_overdue_contested_and_low_use(tmp_path):
+def test_compaction_plans_a_valid_active_corpus_over_the_hard_admission_limit(tmp_path):
     service, vault = lifecycle_service(tmp_path)
     _write_note(
         vault,
-        "memory/superseded.md",
-        knowledge_id="superseded",
-        supersedes=("old-note",),
+        "memory/over-budget.md",
+        knowledge_id="over-budget",
+        body="\n".join("line" for _ in range(3_000)),
+    )
+
+    proposal = service.compaction_plan()
+
+    assert proposal["active_lines"] > 3_000
+    assert proposal["projected_active_lines"] == 0
+    assert [item["knowledge_id"] for item in proposal["entries"]] == ["over-budget"]
+
+
+def test_compaction_ranks_superseded_over_overdue_contested_and_low_use(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    _write_note(vault, "memory/legacy-policy.md", knowledge_id="legacy-policy")
+    _write_note(
+        vault,
+        "memory/current-policy.md",
+        knowledge_id="current-policy",
+        supersedes=("legacy-policy",),
     )
     _write_note(
         vault,
@@ -667,13 +685,15 @@ def test_compaction_ranks_superseded_over_overdue_contested_and_low_use(tmp_path
     proposal = service.compaction_plan(target_lines=0)
 
     assert [item["knowledge_id"] for item in proposal["entries"]] == [
-        "superseded",
+        "legacy-policy",
         "overdue",
         "contested",
+        "current-policy",
     ]
     assert proposal["entries"][0]["reasons"] == ["superseded"]
     assert proposal["entries"][1]["reasons"] == ["review-overdue"]
     assert proposal["entries"][2]["reasons"] == ["contested"]
+    assert proposal["entries"][3]["reasons"] == ["low-success-use"]
 
 
 def test_compaction_proposal_hashes_and_line_impacts_are_deterministic(tmp_path):

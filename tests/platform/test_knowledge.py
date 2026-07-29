@@ -177,6 +177,17 @@ def test_active_corpus_over_3000_lines_fails_before_sync_mutates_store(tmp_path)
         assert service.status()["documents"] == 0
 
 
+def test_planning_inventory_validates_over_budget_corpus_without_relaxing_admission(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(vault, "memory/too-large.md", body="\n".join("line" for _ in range(3_000)))
+
+    inventory = _knowledge_module().load_knowledge_inventory(vault)
+
+    assert inventory.active_lines > 3_000
+    with pytest.raises(_knowledge_module().KnowledgeSyncError, match=r"3,000.*active lines"):
+        _knowledge_module().load_approved_documents(vault)
+
+
 def test_active_corpus_at_3000_lines_is_admitted(tmp_path):
     vault = tmp_path / "knowledge"
     note = _write_note(
