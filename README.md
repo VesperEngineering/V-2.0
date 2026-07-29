@@ -35,7 +35,9 @@ are not needed for setup or verification.
 
 The native platform command tree currently exposes `create`, `status`,
 `resume`, `receipts`, `evidence`, `approvals`, `active`, `approve`, `reject`,
-`cancel`, `knowledge-sync`, `knowledge-search`, and `knowledge-status`.
+`cancel`, `knowledge-sync`, `knowledge-search`, `knowledge-status`,
+`knowledge-observe`, `knowledge-compaction-plan`, and
+`knowledge-reactivation-plan`.
 Approval, rejection, and cancellation require explicit arguments.
 Only `create` and a resumed specialist turn may invoke an explicitly selected
 model runtime; no command connects to a trading runtime. See
@@ -91,10 +93,12 @@ an operator cancellation request.
 The repository-local [`knowledge/`](knowledge/README.md) directory is the
 canonical Obsidian-compatible source for approved agent memories and procedures.
 Obsidian is optional: the runtime reads ordinary Markdown directly. Approved
-notes synchronize into LangGraph Store and a rebuildable local SQLite FTS5
-index; every production run receives an immutable, bounded, role-scoped snapshot
-before Product executes. Specialists cannot access the vault directly, and
-retrieved knowledge is context rather than evidence or authority.
+active notes synchronize into LangGraph Store and a rebuildable local SQLite FTS5
+index. The active corpus is capped at 3,000 complete Markdown source lines,
+including frontmatter; archived notes do not consume that budget. Every production
+run receives an immutable, bounded, role-scoped snapshot before Product executes.
+Specialists cannot access the vault directly, and retrieved knowledge is context
+rather than evidence or authority.
 
 From the repository root:
 
@@ -102,12 +106,22 @@ From the repository root:
 uv run --locked vesper-agent knowledge-sync
 uv run --locked vesper-agent knowledge-status
 uv run --locked vesper-agent knowledge-search --query "split adjustment" --role v20-development
+uv run --locked vesper-agent knowledge-compaction-plan --target-lines 2800
+uv run --locked vesper-agent knowledge-reactivation-plan
 ```
 
+Use `knowledge-observe` to submit an explicit durable observation or to record a
+recurring durable concept. It creates a candidate after `--explicit` or three
+distinct observation sources; it cannot approve or move files. Candidate review
+and every promotion, archival, reactivation, retention change, or deletion remain
+manual operator work in Obsidian or a text editor. The controller has no delete
+or file-movement command. Search may include no more than two temporary archive
+documents within the existing five-document/8,000-character context cap.
+
 See the [knowledge operator runbook](docs/runbooks/obsidian-knowledge.md) for
-frontmatter, review, promotion, retrieval, and recovery rules. The default vault
-is `knowledge/`; use global `--knowledge-root <path>` only for another approved
-repository-local vault.
+frontmatter, review, promotion, compaction, retrieval, and recovery rules. The
+default vault is `knowledge/`; use global `--knowledge-root <path>` only for
+another approved repository-local vault.
 
 For a normal code task across an entire clone, the additional
 `--allow-repository-root-workspace` flag is required. It is accepted only for OpenCode

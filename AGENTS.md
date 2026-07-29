@@ -152,7 +152,8 @@ The following require explicit human approval. Do not attempt them:
 
 - If you are leaving work incomplete, state exactly what was done, what remains, and what the next agent should do first.
 - Do not claim work is verified or complete when a required check was skipped, failed, or was not available. State the open gate precisely.
-- When a separately authorized workflow calls for it, propose durable facts, user preferences, and stable conventions as drafts under `knowledge/inbox/` using the V20 knowledge templates. Only human-reviewed notes moved to `knowledge/memory/` or `knowledge/skills/` with `vesper_status: approved` enter runtime knowledge. Do not record task progress, session outcomes, temporary TODO state, credentials, or secrets.
+- When the operator explicitly asks to remember a durable fact or preference, submit one explicit knowledge observation. For a non-explicit durable pattern, submit the same stable concept key across distinct tasks; the controller creates a candidate at three.
+- Never include transcript text, secrets, temporary state, or unsupported authority. Never move, approve, archive, reactivate, or delete knowledge files. Do not record task progress, session outcomes, temporary TODO state, credentials, or secrets as durable knowledge.
 
 ## 8. Worker Heartbeats
 
