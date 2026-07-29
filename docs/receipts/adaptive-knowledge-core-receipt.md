@@ -3,7 +3,7 @@
 - Recorded: 2026-07-29
 - Environment: Windows, Python 3.11, `uv run --locked`
 - Baseline: `62df959795691b894e3b3ed8d5dc5403bb2c50b0`
-- Verified implementation head: `4ad29c69599df9af4f0a3ec84ba6d4e99bd505a0`
+- Verified implementation head: `c348aa07e6902bb97abe82ff6d68adc6f7b696d2`
 - Result: all focused, static, full-suite, import, lock, CLI, and diff gates passed
 
 ## Implementation commits
@@ -24,7 +24,7 @@
   `10782ad0fe24b0c110ebd5c757cf10d3f23f1ef7`,
   `48947d9ddc74bc4bf2eb19ca36fa0a0b1f0a8191`
 - Task 9 required formatting: `188d361fce6b250830368292d571e1e3049e401e`
-- Final-review lifecycle repair: `8e5c2c1` and `8425c06`
+- Final-review lifecycle repair: `8e5c2c1`, `8425c06`, and `c348aa0`
 - Final-review synchronization repair: `936cde0`, `b3d9202`, and `4ad29c6`
 
 ## Fresh verification
@@ -45,7 +45,7 @@ uv run --locked python -m pytest `
   -q --basetemp (Join-Path $adaptiveTestRoot "focused")
 ```
 
-Result: exit 0; `248 passed, 1 skipped in 51.09s`.
+Result: exit 0; `252 passed, 1 skipped in 58.51s`.
 
 After the required locked formatter changed two files mechanically, the directly
 affected contract suite was rerun:
@@ -129,7 +129,7 @@ uv run --locked python -m pytest tests -q `
   --basetemp (Join-Path $adaptiveFullRoot "pytest")
 ```
 
-Result: exit 0; `744 passed, 5 skipped in 122.80s`.
+Result: exit 0; `748 passed, 5 skipped in 126.81s`.
 
 ```powershell
 $adaptiveImportRoot = Join-Path $env:LOCALAPPDATA "Temp\v20-adaptive-imports-$PID"
@@ -138,7 +138,7 @@ uv run --locked python -m pytest tests/test_imports.py -q `
   --basetemp (Join-Path $adaptiveImportRoot "pytest")
 ```
 
-Result: exit 0; `66 passed in 41.43s`.
+Result: exit 0; `66 passed in 36.94s`.
 
 This isolated worktree intentionally has neither `vesper/data/massive/` nor
 `vesper/data/model_research/`. The SDD ledger records the earlier baseline as
@@ -185,7 +185,7 @@ active_line_limit: 3000
 
 ## Scope and authority boundary
 
-The baseline-to-verified-head range contains 32 tracked files with `3,902`
+The baseline-to-verified-head range contains 32 tracked files with `4,005`
 insertions and `110` deletions. It is limited to the adaptive knowledge contracts,
 corpus and retrieval, lifecycle service, composition/workflow/service wiring,
 governed CLI, focused tests, vault templates and guidance, ADR/runbook, and the
