@@ -165,6 +165,8 @@ class FinancialResearchStatus(StrEnum):
     REQUESTED = "requested"
     PLANNED = "planned"
     COMPLETE = "complete"
+    COMPLETED = "completed"
+    IGNORED = "ignored"
     NEEDS_RESEARCH = "needs-research"
     NEEDS_ANALYSIS = "needs-analysis"
     STOPPED = "stopped"

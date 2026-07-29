@@ -144,9 +144,10 @@ def test_direct_request_and_weak_result_below_threshold_trigger_research():
 
 
 def test_weak_result_at_or_above_threshold_is_ignored():
-    assert (
-        decide_financial_trigger(weak_event(observed=0.03, threshold=0.03)).should_research is False
-    )
+    decision = decide_financial_trigger(weak_event(observed=0.03, threshold=0.03))
+
+    assert decision.should_research is False
+    assert decision.status is FinancialResearchStatus.IGNORED
 
 
 def test_coverage_request_and_plan_have_static_deterministic_order():

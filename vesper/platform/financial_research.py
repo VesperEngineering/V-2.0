@@ -77,7 +77,7 @@ def decide_financial_trigger(event: FinancialEventEnvelope) -> FinancialTriggerD
         non_authority=event.non_authority,
         triggered=triggered,
         status=(
-            FinancialResearchStatus.REQUESTED if triggered else FinancialResearchStatus.STOPPED
+            FinancialResearchStatus.REQUESTED if triggered else FinancialResearchStatus.IGNORED
         ),
         reason=reason,
         workflow="analysis-only",
