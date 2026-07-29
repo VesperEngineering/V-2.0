@@ -1,7 +1,12 @@
-from datetime import datetime, timezone
+import hashlib
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
+import vesper.platform.financial_research as financial_research
 from vesper.platform.contracts import (
     AnalysisNode,
     FinancialAnalysisPlan,
@@ -9,8 +14,10 @@ from vesper.platform.contracts import (
     FinancialEventType,
     FinancialResearchStatus,
 )
+from vesper.platform.evidence import FilesystemEvidenceStore
 from vesper.platform.financial_research import (
     FinancialResearchError,
+    LocalFinancialResearchExecutor,
     build_coverage_analysis_plan,
     build_coverage_research_request,
     decide_financial_trigger,
@@ -33,7 +40,7 @@ def direct_event() -> FinancialEventEnvelope:
     return FinancialEventEnvelope(
         **COMMON,
         event_type=FinancialEventType.DIRECT_REQUEST,
-        occurred_at=NOW,
+        occurred_at=NOW - timedelta(days=2),
         observed_at=NOW,
         symbols=("SPY",),
         origin="operator",
@@ -57,6 +64,42 @@ def weak_event(*, observed: float, threshold: float) -> FinancialEventEnvelope:
         observed_metric=observed,
         threshold=threshold,
     )
+
+
+def market_database(massive_root: Path, *, null_close: bool = False) -> Path:
+    database = massive_root / "sp500" / "sp500_ohlcv.sqlite"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE sp500_ohlcv "
+            "(ticker TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL)"
+        )
+        connection.executemany(
+            "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                ("SPY", "2026-07-27", 1.0, 1.0, 1.0, 1.0, 1.0),
+                ("SPY", "2026-07-28", 2.0, 2.0, 2.0, None if null_close else 2.0, 2.0),
+                ("SPY", "2026-07-29", 3.0, 3.0, 3.0, 3.0, 3.0),
+                ("SPY", "2026-07-30", 4.0, 4.0, 4.0, 4.0, 4.0),
+                ("QQQ", "2026-07-28", 5.0, 5.0, 5.0, 5.0, 5.0),
+            ),
+        )
+    return database
+
+
+def executor(tmp_path: Path, *, derived_root: Path | None = None):
+    return LocalFinancialResearchExecutor(
+        massive_root=tmp_path / "massive",
+        derived_root=derived_root or tmp_path / "derived",
+        evidence=FilesystemEvidenceStore(tmp_path / "evidence"),
+        clock=lambda: NOW,
+    )
+
+
+def execution_inputs():
+    event = direct_event()
+    request = build_coverage_research_request(event, decide_financial_trigger(event))
+    return event, request, build_coverage_analysis_plan(request)
 
 
 def cyclic_plan() -> FinancialAnalysisPlan:
@@ -156,3 +199,202 @@ def test_plan_validator_rejects_unsupported_operations_and_schemas(kind, output_
 
     with pytest.raises(FinancialResearchError):
         validate_financial_analysis_plan(plan)
+
+
+def test_executor_reads_market_database_without_mutating_source(tmp_path):
+    database = market_database(tmp_path / "massive")
+    before = database.read_bytes()
+    source_files = tuple(sorted(path.relative_to(tmp_path / "massive") for path in (tmp_path / "massive").rglob("*")))
+
+    dataset, gap, report = executor(tmp_path).execute(*execution_inputs())
+
+    assert database.read_bytes() == before
+    assert tuple(
+        sorted(path.relative_to(tmp_path / "massive") for path in (tmp_path / "massive").rglob("*"))
+    ) == source_files
+    assert dataset.row_count == 3
+    assert dataset.ticker_count == 1
+    assert dataset.coverage_start == "2026-07-27"
+    assert dataset.coverage_end == "2026-07-29"
+    assert gap.status is FinancialResearchStatus.COMPLETE
+    assert report.non_authority.startswith("Research evidence only")
+
+
+def test_executor_opens_sqlite_read_only_and_binds_request_values(tmp_path, monkeypatch):
+    market_database(tmp_path / "massive")
+    original_connect = financial_research.sqlite3.connect
+    connect_calls = []
+    aggregate_calls = []
+
+    class RecordingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, statement, parameters=()):
+            if statement.lstrip().startswith("SELECT"):
+                aggregate_calls.append((statement, parameters))
+            return self.connection.execute(statement, parameters)
+
+        def close(self):
+            self.connection.close()
+
+    def recording_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        return RecordingConnection(original_connect(*args, **kwargs))
+
+    monkeypatch.setattr(financial_research.sqlite3, "connect", recording_connect)
+
+    executor(tmp_path).execute(*execution_inputs())
+
+    assert "mode=ro" in connect_calls[0][0][0]
+    assert connect_calls[0][1]["uri"] is True
+    statement, parameters = aggregate_calls[0]
+    assert "SPY" not in statement
+    assert "2026-07-27" not in statement
+    assert parameters == ("SPY", "2026-07-27", "2026-07-29")
+
+
+def test_executor_rejects_derived_root_inside_repository_or_protected_data(tmp_path):
+    repository = Path(__file__).resolve().parents[2]
+
+    for derived_root in (
+        repository / "derived",
+        repository / "vesper" / "data" / "massive" / "derived",
+        repository / "vesper" / "data" / "model_research" / "derived",
+        tmp_path / "massive" / "derived",
+    ):
+        with pytest.raises(FinancialResearchError, match="derived root"):
+            executor(tmp_path, derived_root=derived_root)
+
+
+@pytest.mark.parametrize("source_state", ("missing", "malformed"))
+def test_executor_rejects_missing_or_malformed_market_database(tmp_path, source_state):
+    if source_state == "malformed":
+        database = tmp_path / "massive" / "sp500" / "sp500_ohlcv.sqlite"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"not-a-sqlite-database")
+
+    with pytest.raises(FinancialResearchError, match="market database"):
+        executor(tmp_path).execute(*execution_inputs())
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    (("2026-02-30", "2026-07-29"), ("2026-07-29", "2026-07-27")),
+)
+def test_executor_rejects_invalid_request_dates_before_writing(tmp_path, start, end):
+    market_database(tmp_path / "massive")
+    event, request, plan = execution_inputs()
+    invalid = request.model_copy(
+        update={"time_window_start": start, "time_window_end": end}
+    )
+
+    with pytest.raises(FinancialResearchError, match="date"):
+        executor(tmp_path).execute(event, invalid, plan)
+
+    assert not (tmp_path / "derived").exists()
+
+
+def test_executor_rejects_symlinked_market_source(tmp_path):
+    actual = tmp_path / "actual-massive"
+    database = market_database(actual)
+    linked = tmp_path / "massive"
+    try:
+        linked.symlink_to(actual, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    before = database.read_bytes()
+
+    with pytest.raises(FinancialResearchError, match="unsafe"):
+        executor(tmp_path).execute(*execution_inputs())
+
+    assert database.read_bytes() == before
+
+
+def test_executor_replay_is_byte_and_hash_stable(tmp_path):
+    market_database(tmp_path / "massive")
+    research = executor(tmp_path)
+    first, first_gap, first_report = research.execute(*execution_inputs())
+    output = research.derived_root.joinpath(*first.derived_output_path.split("/"))
+    first_bytes = output.read_bytes()
+
+    second, second_gap, second_report = research.execute(*execution_inputs())
+
+    assert output.read_bytes() == first_bytes
+    assert hashlib.sha256(first_bytes).hexdigest() == first.validation_evidence.sha256
+    assert second == first
+    assert second_gap == first_gap
+    assert second_report == first_report
+    payload = json.loads(first_bytes)
+    assert set(payload) == {
+        "cache_key_sha256",
+        "coverage_end",
+        "coverage_start",
+        "dataset_id",
+        "event_id",
+        "lineage_ids",
+        "null_close_count",
+        "plan_sha256",
+        "repository_revision",
+        "row_count",
+        "run_id",
+        "source_sha256",
+        "symbols",
+        "task_id",
+        "ticker_count",
+        "time_window_end",
+        "time_window_start",
+        "transform_sha256",
+    }
+
+
+def test_executor_rejects_mismatched_existing_immutable_output(tmp_path):
+    market_database(tmp_path / "massive")
+    research = executor(tmp_path)
+    dataset, _, _ = research.execute(*execution_inputs())
+    output = research.derived_root.joinpath(*dataset.derived_output_path.split("/"))
+    output.write_bytes(b"mismatched")
+
+    with pytest.raises(FinancialResearchError, match="different content"):
+        research.execute(*execution_inputs())
+
+
+def test_executor_rejects_unsafe_run_id_before_creating_output_directory(tmp_path):
+    market_database(tmp_path / "massive")
+    event, request, plan = execution_inputs()
+    event = event.model_copy(update={"run_id": "../escape"})
+    request = request.model_copy(update={"run_id": "../escape"})
+    plan = plan.model_copy(
+        update={
+            "run_id": "../escape",
+            "nodes": tuple(node.model_copy(update={"run_id": "../escape"}) for node in plan.nodes),
+        }
+    )
+
+    with pytest.raises(FinancialResearchError, match="run ID"):
+        executor(tmp_path).execute(event, request, plan)
+
+    assert not (tmp_path / "escape").exists()
+
+
+def test_executor_translates_mismatched_evidence_copy_to_financial_error(tmp_path):
+    market_database(tmp_path / "massive")
+    research = executor(tmp_path)
+    dataset, _, _ = research.execute(*execution_inputs())
+    evidence_path = research.evidence.root / dataset.validation_evidence.relative_path
+    evidence_path.write_bytes(b"mismatched")
+
+    with pytest.raises(FinancialResearchError, match="evidence copy"):
+        research.execute(*execution_inputs())
+
+
+def test_null_close_count_stops_recommendation_acceptance(tmp_path):
+    market_database(tmp_path / "massive", null_close=True)
+
+    dataset, gap, report = executor(tmp_path).execute(*execution_inputs())
+
+    assert dataset.null_close_count == 1
+    assert gap.status is FinancialResearchStatus.NEEDS_ANALYSIS
+    assert gap.supported_claims == ()
+    assert gap.unresolved_gaps
+    assert report.status is FinancialResearchStatus.STOPPED
