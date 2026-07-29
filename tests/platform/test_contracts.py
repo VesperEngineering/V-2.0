@@ -363,7 +363,9 @@ def test_specialist_outputs_allow_at_most_one_knowledge_observation(model, paylo
     )
 
     assert model(**payload).knowledge_observations == ()
-    assert model(**payload, knowledge_observations=(observation,)).knowledge_observations == (observation,)
+    assert model(**payload, knowledge_observations=(observation,)).knowledge_observations == (
+        observation,
+    )
     with pytest.raises(ValidationError):
         model(**payload, knowledge_observations=(observation, observation))
 

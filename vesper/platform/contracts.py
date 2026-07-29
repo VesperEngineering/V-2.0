@@ -290,7 +290,9 @@ class ProductSpecialistOutput(RunContract):
     development_instructions: NonEmptyStr
     acceptance_checks: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
     memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
-    knowledge_observations: Annotated[tuple[KnowledgeObservationProposal, ...], Field(max_length=1)] = ()
+    knowledge_observations: Annotated[
+        tuple[KnowledgeObservationProposal, ...], Field(max_length=1)
+    ] = ()
 
 
 class DevelopmentSpecialistOutput(RunContract):
@@ -301,7 +303,9 @@ class DevelopmentSpecialistOutput(RunContract):
     verification_commands: tuple[NonEmptyStr, ...] = ()
     residual_risks: tuple[NonEmptyStr, ...] = ()
     memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
-    knowledge_observations: Annotated[tuple[KnowledgeObservationProposal, ...], Field(max_length=1)] = ()
+    knowledge_observations: Annotated[
+        tuple[KnowledgeObservationProposal, ...], Field(max_length=1)
+    ] = ()
 
 
 class RiskSpecialistOutput(RunContract):
@@ -315,7 +319,9 @@ class RiskSpecialistOutput(RunContract):
     prohibited_actions_compliant: bool
     residual_risks: tuple[NonEmptyStr, ...] = ()
     memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
-    knowledge_observations: Annotated[tuple[KnowledgeObservationProposal, ...], Field(max_length=1)] = ()
+    knowledge_observations: Annotated[
+        tuple[KnowledgeObservationProposal, ...], Field(max_length=1)
+    ] = ()
 
 
 SpecialistOutput = Annotated[
