@@ -11,18 +11,28 @@ from vesper.platform.contracts import (
     CodexExecutionReceipt,
     CorrectionAttempt,
     DataResearchResult,
+    DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
     ExecutionStatus,
     GraphState,
     HumanApprovalDecision,
     HumanApprovalRequest,
+    KnowledgeDocument,
+    KnowledgeKind,
+    KnowledgeObservation,
+    KnowledgeObservationProposal,
+    KnowledgeRetention,
+    KnowledgeScope,
+    KnowledgeTier,
     MemoryCandidate,
     MemoryRecord,
     MemoryType,
     ModelEvaluationResult,
     PermissionSet,
+    ProductSpecialistOutput,
     RiskDecision,
     RiskReviewDecision,
+    RiskSpecialistOutput,
     RunStatus,
     SandboxMode,
     SpecialistInput,
@@ -237,6 +247,125 @@ def test_contracts_reject_non_utc_and_naive_timestamps():
                 repository_root=".",
                 acceptance_checks=("pytest",),
             )
+
+
+def _knowledge_document_payload(**overrides):
+    return {
+        "knowledge_id": "brief-writing",
+        "kind": KnowledgeKind.MEMORY,
+        "scope": KnowledgeScope.SHARED,
+        "approval_status": "approved",
+        "tier": KnowledgeTier.ACTIVE,
+        "retention": KnowledgeRetention.ADAPTIVE,
+        "title": "Brief writing",
+        "content": "Prefer brief wording.",
+        "source_path": "memory/brief-writing.md",
+        "source_sha256": "a" * 64,
+        "source_line_count": 10,
+        **overrides,
+    }
+
+
+def test_knowledge_document_requires_consistent_tier_status_and_retention():
+    with pytest.raises(ValidationError, match="archived knowledge must use archived status"):
+        KnowledgeDocument(**_knowledge_document_payload(tier=KnowledgeTier.ARCHIVE))
+
+    with pytest.raises(ValidationError, match="archived knowledge must use adaptive retention"):
+        KnowledgeDocument(
+            **_knowledge_document_payload(
+                approval_status="archived",
+                tier=KnowledgeTier.ARCHIVE,
+                retention=KnowledgeRetention.PINNED,
+            )
+        )
+
+
+def test_observation_proposal_rejects_non_slug_key_and_long_summary():
+    with pytest.raises(ValidationError):
+        KnowledgeObservationProposal(
+            concept_key="Not A Stable Key",
+            title="Brief writing",
+            kind=KnowledgeKind.MEMORY,
+            scope=KnowledgeScope.SHARED,
+            summary="x" * 601,
+        )
+
+
+def test_observation_requires_utc_timestamp_and_rejects_unknown_fields():
+    with pytest.raises(ValidationError, match="observation timestamps must use UTC"):
+        KnowledgeObservation(
+            concept_key="brief-writing",
+            title="Brief writing",
+            kind=KnowledgeKind.MEMORY,
+            scope=KnowledgeScope.SHARED,
+            summary="Prefer brief wording.",
+            source_ref="task-001",
+            observed_at=datetime.fromisoformat("2026-07-27T16:00:00+01:00"),
+        )
+
+    with pytest.raises(ValidationError):
+        KnowledgeObservationProposal(
+            concept_key="brief-writing",
+            title="Brief writing",
+            kind=KnowledgeKind.MEMORY,
+            scope=KnowledgeScope.SHARED,
+            summary="Prefer brief wording.",
+            unknown=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "model,payload",
+    [
+        (
+            ProductSpecialistOutput,
+            {
+                **COMMON,
+                "role": SpecialistRole.PRODUCT,
+                "attempt": 1,
+                "route": SpecialistRole.DEVELOPMENT,
+                "summary": "A bounded contract task.",
+                "development_instructions": "Implement only the requested contracts.",
+                "acceptance_checks": ("pytest",),
+            },
+        ),
+        (
+            DevelopmentSpecialistOutput,
+            {
+                **COMMON,
+                "role": SpecialistRole.DEVELOPMENT,
+                "attempt": 1,
+                "summary": "Implemented the bounded contract task.",
+            },
+        ),
+        (
+            RiskSpecialistOutput,
+            {
+                **COMMON,
+                "role": SpecialistRole.RISK_REVIEW,
+                "attempt": 1,
+                "decision": RiskDecision.APPROVE,
+                "rationale": "The bounded contract change is in scope.",
+                "scope_compliant": True,
+                "evidence_owned": True,
+                "prohibited_actions_compliant": True,
+            },
+        ),
+    ],
+)
+def test_specialist_outputs_allow_at_most_one_knowledge_observation(model, payload):
+    observation = KnowledgeObservationProposal(
+        concept_key="brief-writing",
+        title="Brief writing",
+        kind=KnowledgeKind.MEMORY,
+        scope=KnowledgeScope.SHARED,
+        summary="Prefer brief wording.",
+    )
+
+    assert model(**payload).knowledge_observations == ()
+    assert model(**payload, knowledge_observations=(observation,)).knowledge_observations == (observation,)
+    with pytest.raises(ValidationError):
+        model(**payload, knowledge_observations=(observation, observation))
 
 
 def test_contracts_reject_unknown_and_secret_like_fields():

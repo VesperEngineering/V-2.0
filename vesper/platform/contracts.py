@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -102,8 +102,42 @@ class KnowledgeScope(StrEnum):
     RISK_REVIEW = "v20-risk-review"
 
 
+class KnowledgeTier(StrEnum):
+    ACTIVE = "active"
+    ARCHIVE = "archive"
+
+
+class KnowledgeRetention(StrEnum):
+    PINNED = "pinned"
+    ADAPTIVE = "adaptive"
+
+
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class KnowledgeObservationProposal(ContractModel):
+    concept_key: Annotated[
+        str,
+        Field(min_length=1, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$"),
+    ]
+    title: Annotated[str, Field(min_length=1, max_length=120)]
+    kind: KnowledgeKind
+    scope: KnowledgeScope
+    summary: Annotated[str, Field(min_length=1, max_length=600)]
+    explicit: bool = False
+
+
+class KnowledgeObservation(KnowledgeObservationProposal):
+    source_ref: Annotated[str, Field(min_length=1, max_length=200)]
+    observed_at: AwareDatetime
+
+    @field_validator("observed_at")
+    @classmethod
+    def require_utc(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
+            raise ValueError("observation timestamps must use UTC")
+        return value.astimezone(timezone.utc)
 
 
 class RunContract(ContractModel):
@@ -256,6 +290,7 @@ class ProductSpecialistOutput(RunContract):
     development_instructions: NonEmptyStr
     acceptance_checks: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
     memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
+    knowledge_observations: Annotated[tuple[KnowledgeObservationProposal, ...], Field(max_length=1)] = ()
 
 
 class DevelopmentSpecialistOutput(RunContract):
@@ -266,6 +301,7 @@ class DevelopmentSpecialistOutput(RunContract):
     verification_commands: tuple[NonEmptyStr, ...] = ()
     residual_risks: tuple[NonEmptyStr, ...] = ()
     memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
+    knowledge_observations: Annotated[tuple[KnowledgeObservationProposal, ...], Field(max_length=1)] = ()
 
 
 class RiskSpecialistOutput(RunContract):
@@ -279,6 +315,7 @@ class RiskSpecialistOutput(RunContract):
     prohibited_actions_compliant: bool
     residual_risks: tuple[NonEmptyStr, ...] = ()
     memory: Annotated[tuple[MemoryProposal, ...], Field(max_length=1)] = ()
+    knowledge_observations: Annotated[tuple[KnowledgeObservationProposal, ...], Field(max_length=1)] = ()
 
 
 SpecialistOutput = Annotated[
@@ -492,12 +529,28 @@ class KnowledgeDocument(ContractModel):
     knowledge_id: NonEmptyStr
     kind: KnowledgeKind
     scope: KnowledgeScope
-    approval_status: Literal["approved"] = "approved"
+    approval_status: Literal["approved", "archived"]
+    tier: KnowledgeTier
+    retention: KnowledgeRetention
     title: NonEmptyStr
     tags: tuple[NonEmptyStr, ...] = ()
     content: NonEmptyStr
     source_path: RelativePath
     source_sha256: Sha256
+    source_line_count: Annotated[int, Field(ge=1)]
+    supersedes: tuple[NonEmptyStr, ...] = ()
+    review_after: date | None = None
+    contested: bool = False
+
+    @model_validator(mode="after")
+    def tier_matches_status_and_retention(self) -> KnowledgeDocument:
+        if self.tier is KnowledgeTier.ACTIVE and self.approval_status != "approved":
+            raise ValueError("active knowledge must use approved status")
+        if self.tier is KnowledgeTier.ARCHIVE and self.approval_status != "archived":
+            raise ValueError("archived knowledge must use archived status")
+        if self.tier is KnowledgeTier.ARCHIVE and self.retention is KnowledgeRetention.PINNED:
+            raise ValueError("archived knowledge must use adaptive retention")
+        return self
 
 
 class KnowledgeContext(RunContract):

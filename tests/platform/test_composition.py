@@ -23,7 +23,9 @@ from vesper.platform.contracts import (
     KnowledgeContext,
     KnowledgeDocument,
     KnowledgeKind,
+    KnowledgeRetention,
     KnowledgeScope,
+    KnowledgeTier,
     PermissionSet,
     ProductSpecialistOutput,
     RiskDecision,
@@ -226,6 +228,9 @@ def test_specialist_prompt_includes_only_controller_snapshot_with_provenance(tmp
                 knowledge_id="approved-procedure",
                 kind=KnowledgeKind.SKILL,
                 scope=KnowledgeScope.SHARED,
+                approval_status="approved",
+                tier=KnowledgeTier.ACTIVE,
+                retention=KnowledgeRetention.ADAPTIVE,
                 title="Approved procedure",
                 tags=("evidence",),
                 content=(
@@ -234,6 +239,7 @@ def test_specialist_prompt_includes_only_controller_snapshot_with_provenance(tmp
                 ),
                 source_path="skills/approved-procedure.md",
                 source_sha256="a" * 64,
+                source_line_count=2,
             ),
         ),
     )
