@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import stat
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -126,6 +128,94 @@ def test_three_distinct_observations_create_one_candidate_and_replay_is_idempote
     assert _metadata(candidate)["vesper_observation_count"] == 3
     assert _metadata(candidate)["vesper_confidence"] == "medium"
     assert _metadata(candidate)["vesper_source_refs"] == ["task-0", "task-1", "task-2"]
+
+
+def test_replaying_an_unchanged_candidate_does_not_replace_its_file(tmp_path, monkeypatch):
+    service, _ = lifecycle_service(tmp_path)
+    for index in range(3):
+        service.observe(observation(source_ref=f"task-{index}"))
+
+    def unexpected_replace(_path: Path, _target: Path):
+        raise AssertionError("unchanged candidate was replaced")
+
+    monkeypatch.setattr(Path, "replace", unexpected_replace)
+
+    result = service.observe(observation(source_ref="task-2"))
+
+    assert result["status"] == "candidate-unchanged"
+
+
+def test_model_copied_concept_key_cannot_escape_vault_or_reach_store(tmp_path):
+    vault = tmp_path / "knowledge"
+    store = DictStore()
+    service = _lifecycle_module().KnowledgeLifecycleService(vault_root=vault, store=store)
+    unsafe = observation(explicit=True).model_copy(update={"concept_key": "../../escaped"})
+
+    with pytest.raises(_lifecycle_module().KnowledgeLifecycleError, match="concept key"):
+        service.observe(unsafe)
+
+    assert store.values == {}
+    assert not (tmp_path / "escaped.md").exists()
+
+
+@pytest.mark.parametrize("linked_path", ("knowledge", "knowledge/inbox"))
+def test_linked_or_reparse_vault_components_fail_before_store_access(
+    tmp_path, monkeypatch, linked_path
+):
+    vault = tmp_path / "knowledge"
+    target = tmp_path / linked_path
+    target.mkdir(parents=True)
+    store = DictStore()
+    service = _lifecycle_module().KnowledgeLifecycleService(vault_root=vault, store=store)
+    original_lstat = Path.lstat
+
+    def lstat_with_reparse_point(path: Path, *args, **kwargs):
+        if path == target:
+            return SimpleNamespace(
+                st_mode=0,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_reparse_point)
+
+    with pytest.raises(_lifecycle_module().KnowledgeLifecycleError, match="linked knowledge path"):
+        service.observe(observation(explicit=True))
+
+    assert store.values == {}
+
+
+def test_fractional_timestamps_are_compared_as_utc_datetimes(tmp_path):
+    vault = tmp_path / "knowledge"
+    store = DictStore()
+    store.put(
+        ("knowledge", "adaptive", "observations"),
+        "brief-writing",
+        {
+            "source_refs": ["task-0"],
+            "first_observed_at": "2026-07-28T12:00:00Z",
+            "last_observed_at": "2026-07-28T12:00:00Z",
+            "title": "Brief writing guidance",
+            "kind": "memory",
+            "scope": "v20-development",
+            "summary": "Write the task brief before changing implementation code.",
+            "explicit": False,
+        },
+    )
+    service = _lifecycle_module().KnowledgeLifecycleService(vault_root=vault, store=store)
+
+    result = service.observe(
+        observation(
+            source_ref="task-1",
+            observed_at=datetime(2026, 7, 28, 12, 0, 0, 100000, tzinfo=timezone.utc),
+            explicit=True,
+        )
+    )
+
+    metadata = _metadata(vault / "inbox" / "brief-writing.md")
+    assert result["status"] == "candidate-created"
+    assert metadata["vesper_first_observed_at"] == "2026-07-28T12:00:00Z"
+    assert metadata["vesper_last_observed_at"] == "2026-07-28T12:00:00.100000Z"
 
 
 def test_fewer_than_three_distinct_nonexplicit_observations_are_recorded_only(tmp_path):

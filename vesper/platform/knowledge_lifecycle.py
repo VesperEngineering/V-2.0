@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from .knowledge import (
 
 OBSERVATION_NAMESPACE = ("knowledge", "adaptive", "observations")
 _CANDIDATE_THRESHOLD = 3
+_CONCEPT_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(?:api[_-]?key|password|secret|token|credential)\s*[:=]\s*\S+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
@@ -47,12 +49,13 @@ class KnowledgeLifecycleService:
         store: KnowledgeStorePort,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
-        self._vault_root = vault_root.resolve()
+        self._vault_root = vault_root if vault_root.is_absolute() else Path.cwd() / vault_root
         self._store = store
         self._clock = clock
 
     def observe(self, observation: KnowledgeObservation) -> dict[str, object]:
         self._validate_observation(observation)
+        self._validated_inbox()
         state, changed = self._merge_observation(observation)
         if changed:
             self._store.put(OBSERVATION_NAMESPACE, observation.concept_key, state)
@@ -66,6 +69,8 @@ class KnowledgeLifecycleService:
                 raise KnowledgeLifecycleError("prohibited content in observation")
             if any(pattern.search(value) for pattern in _SECRET_PATTERNS):
                 raise KnowledgeLifecycleError("prohibited content in observation")
+        if not _CONCEPT_KEY_PATTERN.fullmatch(observation.concept_key):
+            raise KnowledgeLifecycleError("concept key is invalid")
 
     def _merge_observation(
         self,
@@ -79,13 +84,16 @@ class KnowledgeLifecycleService:
         ):
             raise KnowledgeLifecycleError("stored observation state is invalid")
 
-        observed_at = _format_timestamp(observation.observed_at)
         is_new_source = observation.source_ref not in source_refs
         first_observed_at = _earliest_timestamp(
-            existing_state.get("first_observed_at"), observed_at, include=is_new_source
+            existing_state.get("first_observed_at"),
+            observation.observed_at,
+            include=is_new_source,
         )
         last_observed_at = _latest_timestamp(
-            existing_state.get("last_observed_at"), observed_at, include=is_new_source
+            existing_state.get("last_observed_at"),
+            observation.observed_at,
+            include=is_new_source,
         )
         state: dict[str, object] = {
             "source_refs": sorted({*source_refs, observation.source_ref}),
@@ -120,7 +128,7 @@ class KnowledgeLifecycleService:
             ):
                 return _result("archived-observed", observation.concept_key, count)
 
-        candidate = self._vault_root / "inbox" / f"{observation.concept_key}.md"
+        candidate = self._candidate_path(observation.concept_key)
         existing_candidates = self._inventory_inbox_candidates()
         existing = existing_candidates.get(observation.concept_key)
         if existing is not None and existing != candidate:
@@ -135,11 +143,11 @@ class KnowledgeLifecycleService:
             metadata = _candidate_metadata(existing)
             if metadata.get("vesper_status") != "candidate":
                 raise KnowledgeLifecycleError("candidate path collision")
+            if not changed:
+                return _result("candidate-unchanged", observation.concept_key, count)
 
         self._write_candidate(candidate, state)
         status = "candidate-updated" if existing is not None else "candidate-created"
-        if existing is not None and not changed:
-            status = "candidate-unchanged"
         return _result(status, observation.concept_key, count)
 
     def _load_corpus(self) -> KnowledgeCorpus | None:
@@ -151,11 +159,9 @@ class KnowledgeLifecycleService:
             raise KnowledgeLifecycleError(str(exc)) from exc
 
     def _inventory_inbox_candidates(self) -> dict[str, Path]:
-        inbox = self._vault_root / "inbox"
+        inbox = self._validated_inbox()
         if not inbox.exists():
             return {}
-        if not inbox.is_dir() or inbox.is_symlink():
-            raise KnowledgeLifecycleError("inbox must be a directory")
 
         candidates: dict[str, Path] = {}
         for path in sorted(inbox.rglob("*.md")):
@@ -170,8 +176,33 @@ class KnowledgeLifecycleService:
             candidates[knowledge_id] = path
         return candidates
 
+    def _validated_inbox(self) -> Path:
+        if _first_link_component(self._vault_root) is not None:
+            raise KnowledgeLifecycleError("linked knowledge path is not allowed")
+        if self._vault_root.exists() and not self._vault_root.is_dir():
+            raise KnowledgeLifecycleError("knowledge vault must be a directory")
+
+        inbox = self._vault_root / "inbox"
+        if _first_link_component(inbox) is not None:
+            raise KnowledgeLifecycleError("linked knowledge path is not allowed")
+        if inbox.exists() and not inbox.is_dir():
+            raise KnowledgeLifecycleError("inbox must be a directory")
+
+        vault = self._vault_root.resolve()
+        if not inbox.resolve().is_relative_to(vault):
+            raise KnowledgeLifecycleError("inbox escapes knowledge vault")
+        return inbox
+
+    def _candidate_path(self, concept_key: str) -> Path:
+        inbox = self._validated_inbox()
+        candidate = inbox / f"{concept_key}.md"
+        if _is_link_like(candidate) or not candidate.resolve().is_relative_to(inbox.resolve()):
+            raise KnowledgeLifecycleError("candidate escapes knowledge inbox")
+        return candidate
+
     def _write_candidate(self, candidate: Path, state: Mapping[str, object]) -> None:
         candidate.parent.mkdir(parents=True, exist_ok=True)
+        self._candidate_path(candidate.stem)
         metadata = {
             "vesper_id": candidate.stem,
             "vesper_kind": state["kind"],
@@ -212,20 +243,30 @@ def _format_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _earliest_timestamp(existing: object, observed_at: str, *, include: bool) -> str:
+def _earliest_timestamp(existing: object, observed_at: datetime, *, include: bool) -> str:
     if existing is None:
-        return observed_at
-    if not isinstance(existing, str):
-        raise KnowledgeLifecycleError("stored observation state is invalid")
-    return min(existing, observed_at) if include else existing
+        return _format_timestamp(observed_at)
+    current = _parse_timestamp(existing)
+    return _format_timestamp(min(current, observed_at) if include else current)
 
 
-def _latest_timestamp(existing: object, observed_at: str, *, include: bool) -> str:
+def _latest_timestamp(existing: object, observed_at: datetime, *, include: bool) -> str:
     if existing is None:
-        return observed_at
-    if not isinstance(existing, str):
+        return _format_timestamp(observed_at)
+    current = _parse_timestamp(existing)
+    return _format_timestamp(max(current, observed_at) if include else current)
+
+
+def _parse_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
         raise KnowledgeLifecycleError("stored observation state is invalid")
-    return max(existing, observed_at) if include else existing
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise KnowledgeLifecycleError("stored observation state is invalid") from exc
+    if timestamp.utcoffset() is None or timestamp.utcoffset().total_seconds() != 0:
+        raise KnowledgeLifecycleError("stored observation state is invalid")
+    return timestamp.astimezone(timezone.utc)
 
 
 def _source_refs(state: Mapping[str, object]) -> list[str]:
@@ -242,7 +283,7 @@ def _confidence(state: Mapping[str, object]) -> str:
 
 
 def _candidate_metadata(path: Path) -> Mapping[str, object]:
-    if path.is_symlink():
+    if _is_link_like(path):
         raise KnowledgeLifecycleError("linked inbox candidates are not allowed")
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -266,3 +307,26 @@ def _result(status: str, concept_key: str, observation_count: int) -> dict[str, 
         "concept_key": concept_key,
         "observation_count": observation_count,
     }
+
+
+def _is_link_like(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & reparse_flag
+    )
+
+
+def _first_link_component(path: Path) -> Path | None:
+    current = Path(path.anchor)
+    parts = path.parts[1:] if path.anchor else path.parts
+    for part in parts:
+        current = current / part
+        if _is_link_like(current):
+            return current
+    return None
