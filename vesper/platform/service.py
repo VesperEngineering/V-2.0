@@ -651,6 +651,7 @@ class LocalPlatformService:
             return WorkflowController(
                 graph=graph,
                 store=persistence.store,
+                knowledge_lifecycle=knowledge_lifecycle,
                 evidence_reader=persistence.evidence.read_verified,
                 clock=self._clock,
                 id_factory=self._id_factory,

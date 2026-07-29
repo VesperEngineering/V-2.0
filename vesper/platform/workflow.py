@@ -47,6 +47,7 @@ from langgraph.types import Command, interrupt  # noqa: E402
 
 APPROVAL_REQUEST_NAMESPACE = ("system", "approval-requests")
 APPROVAL_DECISION_NAMESPACE = ("system", "approval-decisions")
+APPROVAL_LIFECYCLE_NAMESPACE = ("system", "approval-lifecycle")
 
 
 class WorkflowError(RuntimeError):
@@ -682,9 +683,20 @@ def build_workflow(
         ):
             raise PendingApprovalError("operator decision authority fields do not match the run")
         if decision.decision is ApprovalDecision.APPROVE and knowledge_lifecycle is not None:
+            lifecycle_state = {
+                "status": "pending",
+                "request_id": decision.request_id,
+                "approval_id": decision.approval_id,
+            }
+            store.put(APPROVAL_LIFECYCLE_NAMESPACE, request.run_id, lifecycle_state)
             knowledge_lifecycle.accept_run(
                 request,
                 tuple(_parse(SpecialistReceipt, item) for item in state["receipts"]),
+            )
+            store.put(
+                APPROVAL_LIFECYCLE_NAMESPACE,
+                request.run_id,
+                {**lifecycle_state, "status": "complete"},
             )
         status = (
             RunStatus.ACCEPTED
@@ -782,6 +794,7 @@ class WorkflowController:
         *,
         graph,
         store: StorePort,
+        knowledge_lifecycle: KnowledgeLifecycleService | None = None,
         workspace_hasher: Callable[[Path], str] = _workspace_sha256,
         evidence_reader: Callable[[EvidenceArtifactRef], bytes] | None = None,
         clock: Callable[[], datetime] = _utc_now,
@@ -789,6 +802,7 @@ class WorkflowController:
     ) -> None:
         self.graph = graph
         self.store = store
+        self.knowledge_lifecycle = knowledge_lifecycle
         self.workspace_hasher = workspace_hasher
         self.evidence_reader = evidence_reader
         self.clock = clock
@@ -877,7 +891,7 @@ class WorkflowController:
             self.graph.invoke(None, self._config(run_id))
             return self.inspect(run_id)
         if view.pending_approval is None:
-            raise PendingApprovalError("run is missing its approval checkpoint")
+            return self._recover_approved_lifecycle(view)
         raw = self.store.get(APPROVAL_DECISION_NAMESPACE, run_id)
         if raw is None:
             raise PendingApprovalError("no persisted operator decision exists")
@@ -891,6 +905,50 @@ class WorkflowController:
             raise PendingApprovalError("persisted operator decision is stale")
         self.graph.invoke(Command(resume=_dump(decision)), self._config(run_id))
         return self.inspect(run_id)
+
+    def _recover_approved_lifecycle(self, view: WorkflowView) -> WorkflowView:
+        task = view.state.task
+        if task is None or self.knowledge_lifecycle is None:
+            raise PendingApprovalError("run is missing its approval checkpoint")
+        raw_lifecycle = self.store.get(APPROVAL_LIFECYCLE_NAMESPACE, task.run_id)
+        raw_request = self.store.get(APPROVAL_REQUEST_NAMESPACE, task.run_id)
+        raw_decision = self.store.get(APPROVAL_DECISION_NAMESPACE, task.run_id)
+        if raw_lifecycle is None or raw_request is None or raw_decision is None:
+            raise PendingApprovalError("run is missing its approval checkpoint")
+        request = _parse(HumanApprovalRequest, raw_request)
+        decision = _parse(HumanApprovalDecision, raw_decision)
+        if (
+            raw_lifecycle.get("status") not in {"pending", "complete"}
+            or raw_lifecycle.get("request_id") != request.request_id
+            or raw_lifecycle.get("approval_id") != decision.approval_id
+            or decision.decision is not ApprovalDecision.APPROVE
+            or decision.request_id != request.request_id
+            or decision.checkpoint_id != request.checkpoint_id
+            or request.run_id != task.run_id
+            or request.task_id != task.task_id
+            or request.repository_revision != task.repository_revision
+            or decision.run_id != task.run_id
+            or decision.task_id != task.task_id
+            or decision.repository_revision != task.repository_revision
+        ):
+            raise PendingApprovalError("approval lifecycle recovery state is invalid")
+        self._verify_approval_integrity(task, request)
+        if raw_lifecycle["status"] == "pending":
+            self.knowledge_lifecycle.accept_run(task, view.state.receipts)
+            self.store.put(
+                APPROVAL_LIFECYCLE_NAMESPACE,
+                task.run_id,
+                {**raw_lifecycle, "status": "complete"},
+            )
+        self.graph.update_state(
+            self._config(task.run_id),
+            {
+                "status": RunStatus.ACCEPTED.value,
+                "approval": _dump(decision),
+                "terminal_reason": None,
+            },
+        )
+        return self.inspect(task.run_id)
 
     def cancel(self, run_id: str, reason: str) -> WorkflowView:
         view = self.inspect(run_id)

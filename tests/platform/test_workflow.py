@@ -29,6 +29,11 @@ from vesper.platform.contracts import (
     ValidationResult,
 )
 from vesper.platform.persistence import PlatformPaths, open_persistence
+from vesper.platform.knowledge_lifecycle import (
+    ACCEPTED_RUN_NAMESPACE,
+    USAGE_NAMESPACE,
+    KnowledgeLifecycleService,
+)
 from vesper.platform.workflow import (
     PendingApprovalError,
     WorkflowController,
@@ -235,6 +240,19 @@ class FakeKnowledgeLifecycle:
             raise self.error
 
 
+class FailAfterDurableAcceptOnce:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.calls = 0
+
+    def accept_run(self, request, receipts):
+        self.calls += 1
+        result = self.delegate.accept_run(request, receipts)
+        if self.calls == 1:
+            raise RuntimeError("lifecycle failed")
+        return result
+
+
 def controller(
     persistence,
     *,
@@ -269,6 +287,7 @@ def controller(
         WorkflowController(
             graph=graph,
             store=persistence.store,
+            knowledge_lifecycle=knowledge_lifecycle,
             workspace_hasher=workspace_hasher,
             evidence_reader=evidence_reader,
             clock=lambda: NOW,
@@ -569,9 +588,24 @@ def test_operator_rejection_never_consolidates_knowledge_observations(tmp_path):
     assert lifecycle.accepted_runs == []
 
 
-def test_lifecycle_failure_does_not_bypass_acceptance_or_create_approval(tmp_path):
-    lifecycle = FakeKnowledgeLifecycle(RuntimeError("lifecycle failed"))
+def test_lifecycle_failure_replays_approved_acceptance_exactly_once(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        delegate = KnowledgeLifecycleService(
+            vault_root=tmp_path / "knowledge",
+            store=persistence.store,
+            clock=lambda: NOW,
+        )
+        lifecycle = FailAfterDurableAcceptOnce(delegate)
+        persistence.store.put(
+            USAGE_NAMESPACE,
+            "selected-doc",
+            {
+                "knowledge_id": "selected-doc",
+                "selection_refs": ["run-001:v20-product"],
+                "successful_refs": [],
+                "last_successful_use": None,
+            },
+        )
         workflow, _, _, _ = controller(persistence, knowledge_lifecycle=lifecycle)
         pending = workflow.start(task(tmp_path))
         workflow.record_decision("run-001", approval_decision(pending))
@@ -579,11 +613,23 @@ def test_lifecycle_failure_does_not_bypass_acceptance_or_create_approval(tmp_pat
         with pytest.raises(RuntimeError, match="lifecycle failed"):
             workflow.resume("run-001")
         still_pending = workflow.inspect("run-001")
+        accepted = workflow.resume("run-001")
+        usage = delegate.usage("selected-doc")
+        accepted_lifecycle = persistence.store.get(ACCEPTED_RUN_NAMESPACE, "run-001")
 
     assert still_pending.state.status is RunStatus.AWAITING_APPROVAL
     assert still_pending.state.approval is None
     assert still_pending.pending_approval is None
-    assert lifecycle.accepted_runs == [("run-001", 2)]
+    assert accepted.state.status is RunStatus.ACCEPTED
+    assert accepted.state.approval.approval_id == "approval-001"
+    assert lifecycle.calls == 2
+    assert usage == {
+        "knowledge_id": "selected-doc",
+        "selection_count": 1,
+        "successful_run_count": 1,
+        "last_successful_use": "2026-07-27T16:00:00Z",
+    }
+    assert accepted_lifecycle is not None
 
 
 def test_rejection_at_approval_boundary_cannot_accept(tmp_path):
