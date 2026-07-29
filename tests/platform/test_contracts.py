@@ -246,6 +246,7 @@ def test_phase_one_financial_contract_chain_is_typed():
         coverage_start="2020-01-01",
         coverage_end="2026-07-27",
         lineage_ids=(plan.plan_id, plan.nodes[1].node_id),
+        derived_output_path="run-001/dataset-001.json",
         validation_evidence=artifact(),
     )
     gap = FinancialGapAssessment(
@@ -258,6 +259,8 @@ def test_phase_one_financial_contract_chain_is_typed():
         confidence=0.9,
         next_action="stop",
         loop_budget_used=0,
+        content_hashes=("a" * 64,),
+        evidence=(artifact(),),
     )
 
     assert decision.workflow == "analysis-only"
@@ -291,11 +294,59 @@ def test_derived_dataset_requires_complete_reproducibility_receipt():
         "coverage_start": "2020-01-01",
         "coverage_end": "2026-07-27",
         "lineage_ids": (),
+        "derived_output_path": "other-run/dataset-001.json",
         "validation_evidence": artifact(),
     }
 
     with pytest.raises(ValidationError):
         DerivedDatasetReceipt.model_validate(payload)
+
+
+@pytest.mark.parametrize("output_path", ("other-run/dataset-001.json", "run-001/../escape"))
+def test_derived_dataset_output_path_is_scoped_to_its_run(output_path):
+    payload = {
+        **financial_common(),
+        "dataset_id": "dataset-001",
+        "schema_fields": ("symbol",),
+        "source_hashes": ("a" * 64,),
+        "transform_sha256": "b" * 64,
+        "cache_key_sha256": "c" * 64,
+        "coverage_start": "2020-01-01",
+        "coverage_end": "2026-07-27",
+        "lineage_ids": ("plan-001",),
+        "derived_output_path": output_path,
+        "validation_evidence": artifact(),
+    }
+
+    with pytest.raises(ValidationError, match="derived output path"):
+        DerivedDatasetReceipt.model_validate(payload)
+
+
+def test_claim_bearing_gap_requires_owned_evidence_and_content_hashes():
+    payload = {
+        **financial_common(),
+        "assessment_id": "gap-001",
+        "status": FinancialResearchStatus.COMPLETE,
+        "supported_claims": ("SPY coverage is available.",),
+        "unresolved_gaps": (),
+        "contradiction_state": "none",
+        "confidence": 0.9,
+        "next_action": "stop",
+        "loop_budget_used": 0,
+    }
+
+    with pytest.raises(ValidationError, match="claims require evidence and content hashes"):
+        FinancialGapAssessment.model_validate(payload)
+
+    foreign = artifact().model_copy(update={"run_id": "other-run"})
+    with pytest.raises(ValidationError, match="evidence authority"):
+        FinancialGapAssessment.model_validate(
+            {
+                **payload,
+                "content_hashes": ("a" * 64,),
+                "evidence": (foreign,),
+            }
+        )
 
 
 def test_financial_recommendation_requires_non_authority_statement():

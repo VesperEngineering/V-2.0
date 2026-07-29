@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from enum import StrEnum
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -264,10 +265,23 @@ class DerivedDatasetReceipt(FinancialResearchContract):
     coverage_start: NonEmptyStr
     coverage_end: NonEmptyStr
     lineage_ids: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    derived_output_path: RelativePath
     validation_evidence: EvidenceArtifactRef
 
     @model_validator(mode="after")
     def validation_evidence_matches_authority(self) -> DerivedDatasetReceipt:
+        output_path = self.derived_output_path
+        posix_path = PurePosixPath(output_path)
+        windows_path = PureWindowsPath(output_path)
+        if (
+            "\\" in output_path
+            or posix_path.is_absolute()
+            or windows_path.is_absolute()
+            or ".." in posix_path.parts
+            or len(posix_path.parts) < 2
+            or posix_path.parts[0] != self.run_id
+        ):
+            raise ValueError("derived output path must be relative and scoped to its run")
         _evidence_matches_authority(self, (self.validation_evidence,))
         return self
 
@@ -281,6 +295,15 @@ class FinancialGapAssessment(FinancialResearchContract):
     confidence: Annotated[float, Field(ge=0, le=1)]
     next_action: Literal["request-research", "repair-analysis", "stop"]
     loop_budget_used: Annotated[int, Field(ge=0)]
+    content_hashes: tuple[Sha256, ...] = ()
+    evidence: tuple[EvidenceArtifactRef, ...] = ()
+
+    @model_validator(mode="after")
+    def claims_are_evidence_bound(self) -> FinancialGapAssessment:
+        if self.supported_claims and (not self.content_hashes or not self.evidence):
+            raise ValueError("claims require evidence and content hashes")
+        _evidence_matches_authority(self, self.evidence)
+        return self
 
 
 class FinancialRecommendation(FinancialResearchContract):
