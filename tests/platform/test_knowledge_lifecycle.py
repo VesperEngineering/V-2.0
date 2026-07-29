@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import stat
 from types import SimpleNamespace
@@ -9,9 +9,19 @@ import pytest
 import yaml
 
 from vesper.platform.contracts import (
+    DevelopmentSpecialistOutput,
+    ExecutionStatus,
     KnowledgeKind,
     KnowledgeObservation,
+    KnowledgeObservationProposal,
+    KnowledgeRetention,
     KnowledgeScope,
+    KnowledgeTier,
+    KnowledgeContext,
+    KnowledgeDocument,
+    SpecialistReceipt,
+    SpecialistRole,
+    TaskRequest,
 )
 
 
@@ -30,7 +40,11 @@ class DictStore:
         return None if value is None else dict(value)
 
     def search(self, namespace, *, limit=10):
-        return ()
+        return tuple(
+            dict(value)
+            for (stored_namespace, _), value in self.values.items()
+            if stored_namespace == namespace
+        )[:limit]
 
     def delete(self, namespace, key) -> None:
         self.values.pop((namespace, key), None)
@@ -44,7 +58,105 @@ def _lifecycle_module():
 
 def lifecycle_service(tmp_path: Path):
     vault = tmp_path / "knowledge"
-    return _lifecycle_module().KnowledgeLifecycleService(vault_root=vault, store=DictStore()), vault
+    return (
+        _lifecycle_module().KnowledgeLifecycleService(
+            vault_root=vault,
+            store=DictStore(),
+            clock=lambda: NOW,
+        ),
+        vault,
+    )
+
+
+def task(*, run_id: str = "run-001") -> TaskRequest:
+    return TaskRequest(
+        run_id=run_id,
+        task_id="task-001",
+        repository_revision="abc1234",
+        created_at=NOW,
+        objective="Record adaptive knowledge usage.",
+        repository_root=".",
+        acceptance_checks=("python -m pytest tests/platform",),
+    )
+
+
+def knowledge_document(
+    knowledge_id: str,
+    tier: KnowledgeTier,
+    *,
+    retention: KnowledgeRetention = KnowledgeRetention.ADAPTIVE,
+    lines: int = 10,
+    supersedes: tuple[str, ...] = (),
+    review_after: date | None = None,
+    contested: bool = False,
+) -> KnowledgeDocument:
+    return KnowledgeDocument(
+        knowledge_id=knowledge_id,
+        kind=KnowledgeKind.MEMORY,
+        scope=KnowledgeScope.DEVELOPMENT,
+        approval_status="approved" if tier is KnowledgeTier.ACTIVE else "archived",
+        tier=tier,
+        retention=retention,
+        title=f"{knowledge_id} note",
+        content="Knowledge body.",
+        source_path=("memory" if tier is KnowledgeTier.ACTIVE else "archive/memory")
+        + f"/{knowledge_id}.md",
+        source_sha256=(knowledge_id[0] * 64) if knowledge_id[0] in "abcdef" else "a" * 64,
+        source_line_count=lines,
+        supersedes=supersedes,
+        review_after=review_after,
+        contested=contested,
+    )
+
+
+def knowledge_context(
+    knowledge_id: str,
+    tier: KnowledgeTier,
+    *,
+    run_id: str = "run-001",
+    role: SpecialistRole = SpecialistRole.DEVELOPMENT,
+) -> KnowledgeContext:
+    return KnowledgeContext(
+        run_id=run_id,
+        task_id="task-001",
+        repository_revision="abc1234",
+        created_at=NOW,
+        role=role,
+        documents=(knowledge_document(knowledge_id, tier),),
+    )
+
+
+def receipt_with_observation(*, run_id: str = "run-001") -> SpecialistReceipt:
+    output = DevelopmentSpecialistOutput(
+        run_id=run_id,
+        task_id="task-001",
+        repository_revision="abc1234",
+        created_at=NOW,
+        role=SpecialistRole.DEVELOPMENT,
+        attempt=1,
+        summary="Implemented the bounded change.",
+        knowledge_observations=(
+            KnowledgeObservationProposal(
+                concept_key="accepted-observation",
+                title="Accepted observation",
+                kind=KnowledgeKind.MEMORY,
+                scope=KnowledgeScope.DEVELOPMENT,
+                summary="Only accepted runs materialize this observation.",
+                explicit=True,
+            ),
+        ),
+    )
+    return SpecialistReceipt(
+        run_id=run_id,
+        task_id="task-001",
+        repository_revision="abc1234",
+        created_at=NOW,
+        receipt_id="receipt-001",
+        role=SpecialistRole.DEVELOPMENT,
+        attempt=1,
+        status=ExecutionStatus.COMPLETED,
+        output=output,
+    )
 
 
 def observation(
@@ -77,26 +189,28 @@ def _write_note(
     kind: str = "memory",
     status: str = "approved",
     retention: str = "adaptive",
+    supersedes: tuple[str, ...] = (),
+    review_after: date | None = None,
+    contested: bool = False,
 ) -> Path:
     path = vault / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            (
-                "---",
-                f"vesper_id: {knowledge_id}",
-                f"vesper_kind: {kind}",
-                f"vesper_status: {status}",
-                f"vesper_retention: {retention}",
-                "vesper_scope: v20-development",
-                "title: Existing note",
-                "---",
-                "Existing body.",
-                "",
-            )
-        ),
-        encoding="utf-8",
-    )
+    metadata = [
+        "---",
+        f"vesper_id: {knowledge_id}",
+        f"vesper_kind: {kind}",
+        f"vesper_status: {status}",
+        f"vesper_retention: {retention}",
+        "vesper_scope: v20-development",
+        "title: Existing note",
+    ]
+    if supersedes:
+        metadata.append(f"vesper_supersedes: {list(supersedes)}")
+    if review_after is not None:
+        metadata.append(f"vesper_review_after: {review_after.isoformat()}")
+    if contested:
+        metadata.append("vesper_contested: true")
+    path.write_text("\n".join((*metadata, "---", "Existing body.", "")), encoding="utf-8")
     return path
 
 
@@ -466,3 +580,140 @@ def test_candidate_yaml_is_stably_ordered_and_five_sources_are_high_confidence(t
     assert metadata["vesper_first_observed_at"] == "2026-07-28T12:00:00Z"
     assert metadata["vesper_last_observed_at"] == "2026-07-28T12:04:00Z"
     assert metadata["tags"] == ["agent-observed"]
+
+
+def test_recording_selections_does_not_credit_success_or_mutate_notes(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    _write_note(vault, "memory/active-id.md", knowledge_id="active-id")
+    context = knowledge_context("active-id", KnowledgeTier.ACTIVE)
+    before = (vault / "memory" / "active-id.md").read_bytes()
+
+    service.record_selections((context, context))
+
+    usage = service.usage("active-id")
+    assert usage["selection_count"] == 1
+    assert usage["successful_run_count"] == 0
+    assert (vault / "memory" / "active-id.md").read_bytes() == before
+
+
+def test_accepted_run_credits_selected_documents_once_and_records_observations(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    context = knowledge_context("active-id", KnowledgeTier.ACTIVE)
+    service.record_selections((context,))
+
+    first = service.accept_run(task(), receipts=(receipt_with_observation(),))
+    replay = service.accept_run(task(), receipts=(receipt_with_observation(),))
+
+    usage = service.usage("active-id")
+    assert usage["selection_count"] == 1
+    assert usage["successful_run_count"] == 1
+    assert first == replay
+    assert first["knowledge_ids"] == ["active-id"]
+    assert first["observations"][0]["concept_key"] == "accepted-observation"
+    assert (vault / "inbox" / "accepted-observation.md").is_file()
+
+
+def test_unaccepted_work_never_creates_success_credit_or_observations(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    service.record_selections((knowledge_context("active-id", KnowledgeTier.ACTIVE),))
+
+    usage = service.usage("active-id")
+
+    assert usage["successful_run_count"] == 0
+    assert not (vault / "inbox").exists()
+
+
+def test_compaction_excludes_pinned_notes_and_never_moves_files(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    _write_note(vault, "memory/pinned-policy.md", knowledge_id="pinned-policy", retention="pinned")
+    _write_note(vault, "memory/review-note.md", knowledge_id="review-note")
+    before = sorted(path.relative_to(vault) for path in vault.rglob("*.md"))
+
+    proposal = service.compaction_plan(target_lines=0)
+
+    assert "pinned-policy" not in {item["knowledge_id"] for item in proposal["entries"]}
+    assert proposal["projected_active_lines"] == 9
+    assert sorted(path.relative_to(vault) for path in vault.rglob("*.md")) == before
+
+
+def test_compaction_rejects_invalid_targets_without_mutation(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    note = _write_note(vault, "memory/active-id.md", knowledge_id="active-id")
+    before = note.read_bytes()
+
+    for target in (-1, 3001):
+        with pytest.raises(_lifecycle_module().KnowledgeLifecycleError, match="target lines"):
+            service.compaction_plan(target_lines=target)
+
+    assert note.read_bytes() == before
+
+
+def test_compaction_ranks_superseded_over_overdue_contested_and_low_use(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    _write_note(
+        vault,
+        "memory/superseded.md",
+        knowledge_id="superseded",
+        supersedes=("old-note",),
+    )
+    _write_note(
+        vault,
+        "memory/overdue.md",
+        knowledge_id="overdue",
+        review_after=NOW.date() - timedelta(days=1),
+    )
+    _write_note(vault, "memory/contested.md", knowledge_id="contested", contested=True)
+
+    proposal = service.compaction_plan(target_lines=0)
+
+    assert [item["knowledge_id"] for item in proposal["entries"]] == [
+        "superseded",
+        "overdue",
+        "contested",
+    ]
+    assert proposal["entries"][0]["reasons"] == ["superseded"]
+    assert proposal["entries"][1]["reasons"] == ["review-overdue"]
+    assert proposal["entries"][2]["reasons"] == ["contested"]
+
+
+def test_compaction_proposal_hashes_and_line_impacts_are_deterministic(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    _write_note(vault, "memory/active-id.md", knowledge_id="active-id")
+
+    first = service.compaction_plan(target_lines=0)
+    second = service.compaction_plan(target_lines=0)
+
+    assert first["proposal_id"] == second["proposal_id"]
+    assert first["entries"] == second["entries"]
+    assert first["entries"][0]["source_path"] == "memory/active-id.md"
+    assert first["entries"][0]["source_sha256"]
+    assert first["entries"][0]["lines_released"] == 9
+
+
+def test_reactivation_proposal_credits_repeated_archived_use_without_file_moves(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    archived = knowledge_document("archived-id", KnowledgeTier.ARCHIVE, lines=12)
+    _write_note(
+        vault, "archive/memory/archived-id.md", knowledge_id="archived-id", status="archived"
+    )
+    before = sorted(path.relative_to(vault) for path in vault.rglob("*.md"))
+
+    for index in range(3):
+        run_id = f"run-{index}"
+        context = KnowledgeContext(
+            run_id=run_id,
+            task_id="task-001",
+            repository_revision="abc1234",
+            created_at=NOW + timedelta(minutes=index),
+            role=SpecialistRole.DEVELOPMENT,
+            documents=(archived,),
+        )
+        service.record_selections((context,))
+        service.accept_run(task(run_id=run_id), receipts=())
+
+    proposal = service.reactivation_plan()
+
+    assert proposal["entries"][0]["knowledge_id"] == "archived-id"
+    assert proposal["entries"][0]["successful_run_count"] == 3
+    assert proposal["entries"][0]["fits_without_displacement"] is True
+    assert sorted(path.relative_to(vault) for path in vault.rglob("*.md")) == before

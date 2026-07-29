@@ -7,12 +7,22 @@ import re
 import stat
 import tempfile
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from hashlib import sha256
+import json
 from pathlib import Path
 
 import yaml
 
-from .contracts import KnowledgeObservation, KnowledgeRetention, KnowledgeTier
+from .contracts import (
+    KnowledgeContext,
+    KnowledgeDocument,
+    KnowledgeObservation,
+    KnowledgeRetention,
+    KnowledgeTier,
+    SpecialistReceipt,
+    TaskRequest,
+)
 from .knowledge import (
     KnowledgeCorpus,
     KnowledgeStorePort,
@@ -22,7 +32,10 @@ from .knowledge import (
 
 
 OBSERVATION_NAMESPACE = ("knowledge", "adaptive", "observations")
+USAGE_NAMESPACE = ("knowledge", "adaptive", "usage")
+ACCEPTED_RUN_NAMESPACE = ("knowledge", "adaptive", "accepted-runs")
 _CANDIDATE_THRESHOLD = 3
+_MAX_ACTIVE_LINES = 3_000
 _CONCEPT_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(?:api[_-]?key|password|secret|token|credential)\s*[:=]\s*\S+"),
@@ -60,6 +73,191 @@ class KnowledgeLifecycleService:
         if changed:
             self._store.put(OBSERVATION_NAMESPACE, observation.concept_key, state)
         return self._materialize_candidate(observation, state, changed=changed)
+
+    def record_selections(self, contexts: tuple[KnowledgeContext, ...]) -> None:
+        """Persist selected knowledge references without treating selection as success."""
+        for context in contexts:
+            selection_ref = f"{context.run_id}:{context.role.value}"
+            for document in context.documents:
+                state = self._usage_state(document.knowledge_id)
+                selection_refs = set(state["selection_refs"])
+                if selection_ref in selection_refs:
+                    continue
+                selection_refs.add(selection_ref)
+                state["selection_refs"] = sorted(selection_refs)
+                self._store.put(USAGE_NAMESPACE, document.knowledge_id, state)
+
+    def usage(self, knowledge_id: str) -> dict[str, object]:
+        """Return persisted selection and accepted-run usage for one document."""
+        state = self._usage_state(knowledge_id)
+        return {
+            "knowledge_id": knowledge_id,
+            "selection_count": len(state["selection_refs"]),
+            "successful_run_count": len(state["successful_refs"]),
+            "last_successful_use": state["last_successful_use"],
+        }
+
+    def accept_run(
+        self,
+        task: TaskRequest,
+        receipts: tuple[SpecialistReceipt, ...],
+    ) -> dict[str, object]:
+        """Credit selected knowledge and materialize accepted-run observations once."""
+        accepted = self._store.get(ACCEPTED_RUN_NAMESPACE, task.run_id)
+        if accepted is not None:
+            return dict(accepted)
+
+        observed_at = self._clock()
+        observation_results = []
+        for receipt in sorted(receipts, key=lambda item: (item.role.value, item.attempt)):
+            if receipt.output is None:
+                continue
+            for proposal in receipt.output.knowledge_observations:
+                observation_results.append(
+                    self.observe(
+                        KnowledgeObservation(
+                            concept_key=proposal.concept_key,
+                            title=proposal.title,
+                            kind=proposal.kind,
+                            scope=proposal.scope,
+                            summary=proposal.summary,
+                            explicit=proposal.explicit,
+                            source_ref=f"{task.run_id}:{receipt.role.value}:{receipt.attempt}",
+                            observed_at=observed_at,
+                        )
+                    )
+                )
+
+        selected_ref_prefix = f"{task.run_id}:"
+        knowledge_ids = []
+        for stored in self._store.search(USAGE_NAMESPACE, limit=10_000):
+            knowledge_id, state = _stored_usage(stored)
+            selected_refs = {
+                reference
+                for reference in state["selection_refs"]
+                if reference.startswith(selected_ref_prefix)
+            }
+            if not selected_refs:
+                continue
+            successful_refs = set(state["successful_refs"])
+            if not selected_refs.issubset(successful_refs):
+                successful_refs.update(selected_refs)
+                state["successful_refs"] = sorted(successful_refs)
+                state["last_successful_use"] = _format_timestamp(observed_at)
+                self._store.put(USAGE_NAMESPACE, knowledge_id, state)
+            knowledge_ids.append(knowledge_id)
+
+        result = {
+            "accepted_at": _format_timestamp(observed_at),
+            "knowledge_ids": sorted(knowledge_ids),
+            "observations": observation_results,
+        }
+        self._store.put(ACCEPTED_RUN_NAMESPACE, task.run_id, result)
+        return result
+
+    def compaction_plan(self, target_lines: int = _MAX_ACTIVE_LINES) -> dict[str, object]:
+        """Produce a deterministic review proposal without moving any knowledge files."""
+        if isinstance(target_lines, bool) or not 0 <= target_lines <= _MAX_ACTIVE_LINES:
+            raise KnowledgeLifecycleError("target lines must be between 0 and 3000")
+        corpus = self._load_corpus()
+        active = () if corpus is None else corpus.active
+        active_lines = 0 if corpus is None else corpus.active_lines
+        candidates = [
+            document for document in active if document.retention is KnowledgeRetention.ADAPTIVE
+        ]
+        candidates.sort(key=self._compaction_rank)
+
+        projected_active_lines = active_lines
+        entries = []
+        for document in candidates:
+            if projected_active_lines <= target_lines:
+                break
+            usage = self.usage(document.knowledge_id)
+            entries.append(self._proposal_entry(document, usage))
+            projected_active_lines -= document.source_line_count
+
+        proposal = {
+            "target_lines": target_lines,
+            "active_lines": active_lines,
+            "projected_active_lines": projected_active_lines,
+            "entries": entries,
+        }
+        return {"proposal_id": _proposal_hash(proposal), **proposal}
+
+    def reactivation_plan(self) -> dict[str, object]:
+        """Produce a deterministic review proposal for frequently used archived notes."""
+        corpus = self._load_corpus()
+        active_lines = 0 if corpus is None else corpus.active_lines
+        archived = () if corpus is None else corpus.archived
+        eligible = []
+        for document in archived:
+            usage = self.usage(document.knowledge_id)
+            if usage["successful_run_count"] >= 3:
+                eligible.append((document, usage))
+        eligible.sort(
+            key=lambda item: (
+                -int(item[1]["successful_run_count"]),
+                _reactivation_timestamp(item[1]["last_successful_use"]),
+                item[0].knowledge_id,
+            )
+        )
+
+        entries = []
+        for document, usage in eligible:
+            fits = active_lines + document.source_line_count <= _MAX_ACTIVE_LINES
+            entry = {
+                **self._proposal_entry(document, usage),
+                "fits_without_displacement": fits,
+            }
+            if not fits:
+                entry["compaction_plan"] = self.compaction_plan(
+                    target_lines=max(0, _MAX_ACTIVE_LINES - document.source_line_count)
+                )
+            entries.append(entry)
+        proposal = {"active_lines": active_lines, "entries": entries}
+        return {"proposal_id": _proposal_hash(proposal), **proposal}
+
+    def _usage_state(self, knowledge_id: str) -> dict[str, object]:
+        stored = self._store.get(USAGE_NAMESPACE, knowledge_id)
+        if stored is None:
+            return {
+                "knowledge_id": knowledge_id,
+                "selection_refs": [],
+                "successful_refs": [],
+                "last_successful_use": None,
+            }
+        stored_id, state = _stored_usage(stored)
+        if stored_id != knowledge_id:
+            raise KnowledgeLifecycleError("stored usage state is invalid")
+        return state
+
+    def _compaction_rank(self, document: KnowledgeDocument) -> tuple[object, ...]:
+        usage = self.usage(document.knowledge_id)
+        return (
+            not document.supersedes,
+            not _is_overdue(document.review_after, self._clock().date()),
+            not document.contested,
+            int(usage["successful_run_count"]),
+            _last_use_rank(usage["last_successful_use"]),
+            -document.source_line_count,
+            document.knowledge_id,
+        )
+
+    def _proposal_entry(
+        self,
+        document: KnowledgeDocument,
+        usage: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {
+            "knowledge_id": document.knowledge_id,
+            "source_path": document.source_path,
+            "source_sha256": document.source_sha256,
+            "lines_released": document.source_line_count,
+            "selection_count": usage["selection_count"],
+            "successful_run_count": usage["successful_run_count"],
+            "last_successful_use": usage["last_successful_use"],
+            "reasons": _compaction_reasons(document, self._clock().date()),
+        }
 
     def _validate_observation(self, observation: KnowledgeObservation) -> None:
         for value in observation.model_dump(mode="json").values():
@@ -312,6 +510,60 @@ def _result(status: str, concept_key: str, observation_count: int) -> dict[str, 
         "concept_key": concept_key,
         "observation_count": observation_count,
     }
+
+
+def _stored_usage(stored: Mapping[str, object]) -> tuple[str, dict[str, object]]:
+    knowledge_id = stored.get("knowledge_id")
+    selection_refs = stored.get("selection_refs")
+    successful_refs = stored.get("successful_refs")
+    last_successful_use = stored.get("last_successful_use")
+    if (
+        not isinstance(knowledge_id, str)
+        or not isinstance(selection_refs, list)
+        or not isinstance(successful_refs, list)
+        or not all(isinstance(reference, str) for reference in selection_refs)
+        or not all(isinstance(reference, str) for reference in successful_refs)
+        or (last_successful_use is not None and not isinstance(last_successful_use, str))
+    ):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    return knowledge_id, {
+        "knowledge_id": knowledge_id,
+        "selection_refs": sorted(set(selection_refs)),
+        "successful_refs": sorted(set(successful_refs)),
+        "last_successful_use": last_successful_use,
+    }
+
+
+def _is_overdue(review_after: date | None, today: date) -> bool:
+    return review_after is not None and review_after < today
+
+
+def _last_use_rank(value: object) -> tuple[int, datetime]:
+    if value is None:
+        return (0, datetime.min.replace(tzinfo=timezone.utc))
+    if not isinstance(value, str):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    return (1, _parse_timestamp(value))
+
+
+def _reactivation_timestamp(value: object) -> tuple[int, float]:
+    rank = _last_use_rank(value)
+    return (-rank[0], -rank[1].timestamp())
+
+
+def _compaction_reasons(document: KnowledgeDocument, today: date) -> list[str]:
+    if document.supersedes:
+        return ["superseded"]
+    if _is_overdue(document.review_after, today):
+        return ["review-overdue"]
+    if document.contested:
+        return ["contested"]
+    return ["low-success-use"]
+
+
+def _proposal_hash(proposal: Mapping[str, object]) -> str:
+    canonical = json.dumps(proposal, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _is_link_like(path: Path) -> bool:
