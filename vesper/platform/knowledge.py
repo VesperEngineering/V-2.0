@@ -50,6 +50,7 @@ _SEARCH_CANDIDATE_LIMIT = 25
 _MAX_ARCHIVE_RESULTS = 2
 _MAX_CONTEXT_DOCUMENTS = 5
 _MAX_CONTEXT_CHARACTERS = 8_000
+_KnowledgeIndexRow = tuple[object, object, object, object, object, object, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +111,7 @@ class SqliteKnowledgeIndex:
             )
 
     def rebuild(self, documents: tuple[KnowledgeDocument, ...]) -> None:
-        rows = (
+        rows = tuple(
             (
                 item.knowledge_id,
                 item.kind.value,
@@ -122,6 +123,17 @@ class SqliteKnowledgeIndex:
             )
             for item in documents
         )
+        self.restore(rows)
+
+    def snapshot(self) -> tuple[_KnowledgeIndexRow, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT knowledge_id, kind, scope, tier, title, tags, content "
+                "FROM v20_knowledge_fts ORDER BY rowid"
+            ).fetchall()
+        return tuple(tuple(row) for row in rows)
+
+    def restore(self, rows: tuple[_KnowledgeIndexRow, ...]) -> None:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -199,6 +211,7 @@ class ObsidianKnowledgeService:
             item = _parse_document(raw)
             existing_values[item.knowledge_id] = dict(raw)
             existing[item.knowledge_id] = item
+        existing_index_rows = self._index.snapshot()
         added = current.keys() - existing.keys()
         deleted = existing.keys() - current.keys()
         updated = {key for key in current.keys() & existing.keys() if current[key] != existing[key]}
@@ -214,7 +227,7 @@ class ObsidianKnowledgeService:
             except Exception as exc:
                 rollback_errors.append(f"Store rollback failed: {exc}")
             try:
-                self._index.rebuild(tuple(existing[key] for key in sorted(existing)))
+                self._index.restore(existing_index_rows)
             except Exception as exc:
                 rollback_errors.append(f"FTS rollback failed: {exc}")
             if rollback_errors:

@@ -591,6 +591,61 @@ def test_fts_rebuild_failure_restores_previous_store_and_fts_corpora(tmp_path):
         assert service.search(SpecialistRole.PRODUCT, "replacement") == ()
 
 
+def test_fts_failure_restores_divergent_prior_fts_corpus_exactly(tmp_path):
+    vault = tmp_path / "knowledge"
+    original = _write_note(
+        vault,
+        "memory/original.md",
+        knowledge_id="stable",
+        body="Original stable policy token.",
+    )
+    divergent_vault = tmp_path / "divergent-knowledge"
+    _write_note(
+        divergent_vault,
+        "archive/memory/fts-only.md",
+        knowledge_id="fts-only",
+        status="archived",
+        title="Independent FTS sentinel",
+        tags=("fts-marker",),
+        body="Divergent searchable corpus token.",
+    )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        service = _service(vault, persistence)
+        service.sync()
+        persistence.knowledge_index.rebuild(
+            _knowledge_module().load_knowledge_corpus(divergent_vault).documents
+        )
+        previous_store = persistence.store.search(
+            ("knowledge", "obsidian", "documents"), limit=100_000
+        )
+        previous_fts_rows = persistence.knowledge_index.snapshot()
+        scopes = (KnowledgeScope.SHARED.value,)
+        queries = ("independent sentinel", "fts marker", "divergent corpus", "original stable")
+        previous_fts = {
+            query: persistence.knowledge_index.search(query, scopes=scopes, limit=25)
+            for query in queries
+        }
+        original.write_text(
+            original.read_text(encoding="utf-8").replace("Original", "Replacement"),
+            encoding="utf-8",
+        )
+        service._index = _FailOnceAfterIndexRebuild(persistence.knowledge_index)
+
+        with pytest.raises(RuntimeError, match="injected FTS rebuild failure"):
+            service.sync()
+
+        assert (
+            persistence.store.search(("knowledge", "obsidian", "documents"), limit=100_000)
+            == previous_store
+        )
+        assert persistence.knowledge_index.snapshot() == previous_fts_rows
+        assert {
+            query: persistence.knowledge_index.search(query, scopes=scopes, limit=25)
+            for query in queries
+        } == previous_fts
+
+
 def test_search_combines_shared_and_role_scope_without_cross_role_leakage(tmp_path):
     vault = tmp_path / "knowledge"
     _write_note(
