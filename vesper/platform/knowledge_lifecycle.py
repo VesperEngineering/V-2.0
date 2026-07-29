@@ -143,10 +143,13 @@ class KnowledgeLifecycleService:
             metadata = _candidate_metadata(existing)
             if metadata.get("vesper_status") != "candidate":
                 raise KnowledgeLifecycleError("candidate path collision")
-            if not changed:
+            content = self._render_candidate(candidate, state)
+            if not changed and candidate.read_bytes() == content.encode("utf-8"):
                 return _result("candidate-unchanged", observation.concept_key, count)
+        else:
+            content = self._render_candidate(candidate, state)
 
-        self._write_candidate(candidate, state)
+        self._write_candidate(candidate, content)
         status = "candidate-updated" if existing is not None else "candidate-created"
         return _result(status, observation.concept_key, count)
 
@@ -200,9 +203,7 @@ class KnowledgeLifecycleService:
             raise KnowledgeLifecycleError("candidate escapes knowledge inbox")
         return candidate
 
-    def _write_candidate(self, candidate: Path, state: Mapping[str, object]) -> None:
-        candidate.parent.mkdir(parents=True, exist_ok=True)
-        self._candidate_path(candidate.stem)
+    def _render_candidate(self, candidate: Path, state: Mapping[str, object]) -> str:
         metadata = {
             "vesper_id": candidate.stem,
             "vesper_kind": state["kind"],
@@ -217,7 +218,11 @@ class KnowledgeLifecycleService:
             "vesper_confidence": _confidence(state),
             "vesper_source_refs": _source_refs(state),
         }
-        content = f"---\n{yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True)}---\n{state['summary']}\n"
+        return f"---\n{yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True)}---\n{state['summary']}\n"
+
+    def _write_candidate(self, candidate: Path, content: str) -> None:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        self._candidate_path(candidate.stem)
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(

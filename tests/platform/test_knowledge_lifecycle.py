@@ -394,6 +394,43 @@ def test_atomic_replacement_failure_preserves_existing_candidate(tmp_path, monke
     assert not list(candidate.parent.glob("*.tmp"))
 
 
+def test_identical_retry_repairs_candidate_after_failed_replacement(tmp_path, monkeypatch):
+    service, vault = lifecycle_service(tmp_path)
+    for index in range(3):
+        service.observe(observation(source_ref=f"task-{index}"))
+    candidate = vault / "inbox" / "brief-writing.md"
+    original_replace = Path.replace
+    replacement_attempts = 0
+
+    def fail_first_replace(path: Path, target: Path):
+        nonlocal replacement_attempts
+        if target == candidate:
+            replacement_attempts += 1
+            if replacement_attempts == 1:
+                raise OSError("replace failed")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_first_replace)
+    updated = observation(title="Updated title", source_ref="task-2")
+
+    with pytest.raises(OSError, match="replace failed"):
+        service.observe(updated)
+
+    repaired = service.observe(updated)
+
+    assert repaired["status"] == "candidate-updated"
+    assert _metadata(candidate)["title"] == "Updated title"
+
+    def unexpected_replace(_path: Path, _target: Path):
+        raise AssertionError("byte-identical candidate was replaced")
+
+    monkeypatch.setattr(Path, "replace", unexpected_replace)
+
+    replay = service.observe(updated)
+
+    assert replay["status"] == "candidate-unchanged"
+
+
 def test_candidate_yaml_is_stably_ordered_and_five_sources_are_high_confidence(tmp_path):
     service, vault = lifecycle_service(tmp_path)
     for index in range(5):
