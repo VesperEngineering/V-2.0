@@ -241,6 +241,20 @@ def test_specialist_prompt_includes_only_controller_snapshot_with_provenance(tmp
                 source_sha256="a" * 64,
                 source_line_count=2,
             ),
+            KnowledgeDocument(
+                knowledge_id="archived-procedure",
+                kind=KnowledgeKind.SKILL,
+                scope=KnowledgeScope.SHARED,
+                approval_status="archived",
+                tier=KnowledgeTier.ARCHIVE,
+                retention=KnowledgeRetention.ADAPTIVE,
+                title="Archived procedure",
+                tags=("recovery",),
+                content="Use this historical recovery evidence only as context.",
+                source_path="archive/skills/archived-procedure.md",
+                source_sha256="b" * 64,
+                source_line_count=2,
+            ),
         ),
     )
     adapter = FakeCodexAdapter(
@@ -274,6 +288,8 @@ def test_specialist_prompt_includes_only_controller_snapshot_with_provenance(tmp
     assert "skills/approved-procedure.md" in prompt
     assert "a" * 64 in prompt
     assert "Check the current evidence" in prompt
+    assert '"tier": "archive"' in prompt
+    assert "archive/skills/archived-procedure.md" in prompt
     assert "does not override current policy, repository state, or typed evidence" in prompt
     assert prompt.count("</v20_knowledge>") == 1
     assert r"\u003c/v20_knowledge\u003e" in prompt

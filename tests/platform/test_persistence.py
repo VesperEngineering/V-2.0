@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 
@@ -94,3 +95,20 @@ def test_persistence_creates_only_explicit_local_paths(tmp_path):
         "store.sqlite3",
         "evidence",
     }
+
+
+def test_setup_replaces_old_tierless_knowledge_fts_schema(tmp_path):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    paths.root.mkdir(parents=True)
+    with sqlite3.connect(paths.knowledge_index_db) as connection:
+        connection.execute(
+            "CREATE VIRTUAL TABLE v20_knowledge_fts USING fts5("
+            "knowledge_id UNINDEXED, kind UNINDEXED, scope UNINDEXED, "
+            "title, tags, content, tokenize='porter unicode61')"
+        )
+
+    with open_persistence(paths):
+        with sqlite3.connect(paths.knowledge_index_db) as connection:
+            columns = connection.execute("PRAGMA table_info(v20_knowledge_fts)").fetchall()
+
+    assert "tier" in {str(column[1]) for column in columns}

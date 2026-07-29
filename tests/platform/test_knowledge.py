@@ -9,7 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from vesper.platform.contracts import KnowledgeRetention, KnowledgeTier, SpecialistRole, TaskRequest
+from vesper.platform.contracts import (
+    KnowledgeRetention,
+    KnowledgeScope,
+    KnowledgeTier,
+    SpecialistRole,
+    TaskRequest,
+)
 from vesper.platform.persistence import PlatformPaths, open_persistence
 
 
@@ -449,7 +455,15 @@ def test_repeated_sync_is_idempotent_and_changed_or_deleted_notes_are_reconciled
             "unchanged": 0,
             "deleted": 1,
         }
-        assert service.status() == {"documents": 1, "memory": 1, "skill": 0}
+        assert service.status() == {
+            "documents": 1,
+            "active": 1,
+            "archived": 0,
+            "memory": 1,
+            "skill": 0,
+            "active_lines": len(changed.read_text(encoding="utf-8").splitlines()),
+            "active_line_limit": 3_000,
+        }
         assert service.search(SpecialistRole.PRODUCT, "obsolete procedure") == ()
         assert service.search(SpecialistRole.PRODUCT, "unique correction")[0].content.endswith(
             "adjusted prices."
@@ -504,6 +518,107 @@ def test_search_combines_shared_and_role_scope_without_cross_role_leakage(tmp_pa
     assert risk_ids == {"shared-evidence", "risk-evidence"}
 
 
+def test_search_returns_active_and_archive_hits_in_deterministic_tier_order(tmp_path):
+    vault = tmp_path / "knowledge"
+    for knowledge_id in ("active-b", "active-a"):
+        _write_note(
+            vault,
+            f"memory/{knowledge_id}.md",
+            knowledge_id=knowledge_id,
+            title="Recovery evidence",
+            body="Rare recovery evidence.",
+        )
+    for knowledge_id in ("archive-b", "archive-a"):
+        _write_note(
+            vault,
+            f"archive/memory/{knowledge_id}.md",
+            knowledge_id=knowledge_id,
+            status="archived",
+            title="Recovery evidence",
+            body="Rare recovery evidence.",
+        )
+    paths = PlatformPaths.below(tmp_path / "platform")
+
+    with open_persistence(paths) as persistence:
+        service = _service(vault, persistence)
+        service.sync()
+        hits = persistence.knowledge_index.search(
+            "rare recovery evidence",
+            scopes=(KnowledgeScope.SHARED.value,),
+            limit=25,
+        )
+        documents = service.search(
+            SpecialistRole.DEVELOPMENT,
+            "rare recovery evidence",
+        )
+        status = service.status()
+
+    assert [(hit.knowledge_id, hit.tier) for hit in hits] == [
+        ("active-a", KnowledgeTier.ACTIVE),
+        ("active-b", KnowledgeTier.ACTIVE),
+        ("archive-a", KnowledgeTier.ARCHIVE),
+        ("archive-b", KnowledgeTier.ARCHIVE),
+    ]
+    assert all(isinstance(hit.score, float) for hit in hits)
+    assert [item.knowledge_id for item in documents] == [
+        "active-a",
+        "active-b",
+        "archive-a",
+        "archive-b",
+    ]
+    assert status == {
+        "documents": 4,
+        "active": 2,
+        "archived": 2,
+        "memory": 4,
+        "skill": 0,
+        "active_lines": sum(
+            len((vault / "memory" / f"{knowledge_id}.md").read_text(encoding="utf-8").splitlines())
+            for knowledge_id in ("active-a", "active-b")
+        ),
+        "active_line_limit": 3_000,
+    }
+
+
+def test_archive_search_never_crosses_role_scope(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(
+        vault,
+        "archive/memory/shared.md",
+        knowledge_id="archive-shared",
+        status="archived",
+        body="Archived recovery evidence.",
+    )
+    _write_note(
+        vault,
+        "archive/memory/development.md",
+        knowledge_id="archive-development",
+        status="archived",
+        scope="v20-development",
+        body="Archived recovery evidence.",
+    )
+    _write_note(
+        vault,
+        "archive/memory/risk.md",
+        knowledge_id="archive-risk",
+        status="archived",
+        scope="v20-risk-review",
+        body="Archived recovery evidence.",
+    )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        service = _service(vault, persistence)
+        service.sync()
+        development = service.search(SpecialistRole.DEVELOPMENT, "archived recovery evidence")
+        product = service.search(SpecialistRole.PRODUCT, "archived recovery evidence")
+
+    assert {item.knowledge_id for item in development} == {
+        "archive-development",
+        "archive-shared",
+    }
+    assert [item.knowledge_id for item in product] == ["archive-shared"]
+
+
 def test_punctuation_only_search_returns_no_documents(tmp_path):
     vault = tmp_path / "knowledge"
     _write_note(vault, "memory/splits.md")
@@ -518,7 +633,7 @@ def test_punctuation_only_search_returns_no_documents(tmp_path):
 
 def test_failed_duplicate_sync_leaves_previous_store_and_index_unchanged(tmp_path):
     vault = tmp_path / "knowledge"
-    _write_note(vault, "memory/original.md", knowledge_id="stable")
+    original = _write_note(vault, "memory/original.md", knowledge_id="stable")
     paths = PlatformPaths.below(tmp_path / "platform")
 
     with open_persistence(paths) as persistence:
@@ -529,7 +644,15 @@ def test_failed_duplicate_sync_leaves_previous_store_and_index_unchanged(tmp_pat
         with pytest.raises(_knowledge_module().KnowledgeSyncError, match="duplicate vesper_id"):
             service.sync()
 
-        assert service.status() == {"documents": 1, "memory": 1, "skill": 0}
+        assert service.status() == {
+            "documents": 1,
+            "active": 1,
+            "archived": 0,
+            "memory": 1,
+            "skill": 0,
+            "active_lines": len(original.read_text(encoding="utf-8").splitlines()),
+            "active_line_limit": 3_000,
+        }
         assert service.search(SpecialistRole.PRODUCT, "split adjustment")[0].knowledge_id == (
             "stable"
         )
@@ -592,6 +715,68 @@ def test_snapshot_is_immutable_when_vault_and_search_index_change_later(tmp_path
     assert context is not None
     assert context.documents[0].content.endswith("Original evidence guidance.")
     assert current[0].content.endswith("Replacement evidence guidance.")
+
+
+def test_snapshot_allows_at_most_two_archived_documents_inside_existing_bounds(tmp_path):
+    vault = tmp_path / "knowledge"
+    for index in range(4):
+        _write_note(
+            vault,
+            f"archive/memory/archive-{index}.md",
+            knowledge_id=f"archive-{index}",
+            status="archived",
+            retention="adaptive",
+            body=f"rare recovery evidence {index} " + ("archive " * 100),
+        )
+    _write_note(
+        vault,
+        "memory/active.md",
+        knowledge_id="active",
+        body="recovery evidence",
+    )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        service = _service(vault, persistence)
+        service.sync()
+        service.snapshot(_task(objective="rare recovery evidence"))
+        context = service.context("run-knowledge", SpecialistRole.DEVELOPMENT)
+
+    assert context is not None
+    assert "active" in {item.knowledge_id for item in context.documents}
+    assert sum(item.tier is KnowledgeTier.ARCHIVE for item in context.documents) == 2
+    assert len(context.documents) <= 5
+    assert sum(len(item.content) for item in context.documents) <= 8_000
+
+
+def test_archived_snapshot_is_immutable_when_archive_changes_later(tmp_path):
+    vault = tmp_path / "knowledge"
+    note = _write_note(
+        vault,
+        "archive/memory/original.md",
+        knowledge_id="stable-archive-snapshot",
+        status="archived",
+        body="Original archived recovery guidance.",
+    )
+    paths = PlatformPaths.below(tmp_path / "platform")
+    task = _task(objective="archived recovery guidance")
+
+    with open_persistence(paths) as persistence:
+        service = _service(vault, persistence)
+        service.sync()
+        service.snapshot(task)
+        note.write_text(
+            note.read_text(encoding="utf-8").replace("Original", "Replacement"),
+            encoding="utf-8",
+        )
+        service.sync()
+
+        context = service.context(task.run_id, SpecialistRole.PRODUCT)
+        current = service.search(SpecialistRole.PRODUCT, "replacement recovery")
+
+    assert context is not None
+    assert context.documents[0].tier is KnowledgeTier.ARCHIVE
+    assert context.documents[0].content.endswith("Original archived recovery guidance.")
+    assert current[0].content.endswith("Replacement archived recovery guidance.")
 
 
 def test_historical_run_without_snapshot_does_not_read_current_vault(tmp_path):

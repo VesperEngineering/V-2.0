@@ -46,6 +46,8 @@ _REQUIRED_FIELDS = (
     "title",
 )
 _DOCUMENT_NAMESPACE = ("knowledge", "obsidian", "documents")
+_SEARCH_CANDIDATE_LIMIT = 25
+_MAX_ARCHIVE_RESULTS = 2
 _MAX_CONTEXT_DOCUMENTS = 5
 _MAX_CONTEXT_CHARACTERS = 8_000
 
@@ -59,6 +61,13 @@ class KnowledgeCorpus:
     @property
     def documents(self) -> tuple[KnowledgeDocument, ...]:
         return self.active + self.archived
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSearchHit:
+    knowledge_id: str
+    tier: KnowledgeTier
+    score: float
 
 
 class KnowledgeStorePort(Protocol):
@@ -85,9 +94,12 @@ class SqliteKnowledgeIndex:
 
     def setup(self) -> None:
         with self._lock:
+            columns = self._connection.execute("PRAGMA table_info(v20_knowledge_fts)").fetchall()
+            if columns and "tier" not in {str(column[1]) for column in columns}:
+                self._connection.execute("DROP TABLE v20_knowledge_fts")
             self._connection.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS v20_knowledge_fts USING fts5("
-                "knowledge_id UNINDEXED, kind UNINDEXED, scope UNINDEXED, "
+                "knowledge_id UNINDEXED, kind UNINDEXED, scope UNINDEXED, tier UNINDEXED, "
                 "title, tags, content, tokenize='porter unicode61')"
             )
 
@@ -97,6 +109,7 @@ class SqliteKnowledgeIndex:
                 item.knowledge_id,
                 item.kind.value,
                 item.scope.value,
+                item.tier.value,
                 item.title,
                 " ".join(item.tags),
                 item.content,
@@ -109,8 +122,8 @@ class SqliteKnowledgeIndex:
                 self._connection.execute("DELETE FROM v20_knowledge_fts")
                 self._connection.executemany(
                     "INSERT INTO v20_knowledge_fts "
-                    "(knowledge_id, kind, scope, title, tags, content) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(knowledge_id, kind, scope, tier, title, tags, content) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     rows,
                 )
             except Exception:
@@ -124,24 +137,33 @@ class SqliteKnowledgeIndex:
         *,
         scopes: tuple[str, ...],
         limit: int = 5,
-    ) -> tuple[str, ...]:
+    ) -> tuple[KnowledgeSearchHit, ...]:
         tokens = tuple(re.findall(r"[A-Za-z0-9_]+", query.casefold()))
         if not tokens:
             return ()
         expression = " OR ".join(f'"{token}"' for token in tokens)
         scope_parameters = ", ".join("?" for _ in scopes)
         statement = (
-            "SELECT knowledge_id FROM v20_knowledge_fts "
+            "SELECT knowledge_id, tier, "
+            "bm25(v20_knowledge_fts, 0.0, 0.0, 0.0, 0.0, 5.0, 2.0, 1.0) "
+            "FROM v20_knowledge_fts "
             f"WHERE v20_knowledge_fts MATCH ? AND scope IN ({scope_parameters}) "
-            "ORDER BY bm25(v20_knowledge_fts, 0.0, 0.0, 0.0, 5.0, 2.0, 1.0), "
-            "knowledge_id LIMIT ?"
+            "ORDER BY bm25(v20_knowledge_fts, 0.0, 0.0, 0.0, 0.0, 5.0, 2.0, 1.0), "
+            "CASE tier WHEN 'active' THEN 0 ELSE 1 END, knowledge_id LIMIT ?"
         )
         with self._lock:
             rows = self._connection.execute(
                 statement,
                 (expression, *scopes, limit),
             ).fetchall()
-        return tuple(str(row[0]) for row in rows)
+        return tuple(
+            KnowledgeSearchHit(
+                knowledge_id=str(row[0]),
+                tier=KnowledgeTier(row[1]),
+                score=float(row[2]),
+            )
+            for row in rows
+        )
 
     def close(self) -> None:
         self._connection.close()
@@ -162,7 +184,8 @@ class ObsidianKnowledgeService:
         self._index = index
 
     def sync(self) -> dict[str, int]:
-        documents = load_approved_documents(self._vault_root)
+        corpus = load_knowledge_corpus(self._vault_root)
+        documents = corpus.documents
         current = {item.knowledge_id: item for item in documents}
         existing = {
             item.knowledge_id: item
@@ -198,16 +221,24 @@ class ObsidianKnowledgeService:
         *,
         limit: int = 5,
     ) -> tuple[KnowledgeDocument, ...]:
-        identifiers = self._index.search(
+        hits = self._index.search(
             query,
             scopes=(KnowledgeScope.SHARED.value, role.value),
-            limit=limit,
+            limit=_SEARCH_CANDIDATE_LIMIT,
         )
         documents = []
-        for identifier in identifiers:
-            raw = self._store.get(_DOCUMENT_NAMESPACE, identifier)
+        archive_count = 0
+        for hit in hits:
+            if len(documents) >= limit:
+                break
+            raw = self._store.get(_DOCUMENT_NAMESPACE, hit.knowledge_id)
             if raw is not None:
-                documents.append(_parse_document(raw))
+                document = _parse_document(raw)
+                if document.tier is KnowledgeTier.ARCHIVE:
+                    if archive_count >= _MAX_ARCHIVE_RESULTS:
+                        continue
+                    archive_count += 1
+                documents.append(document)
         return tuple(documents)
 
     def status(self) -> dict[str, int]:
@@ -216,8 +247,14 @@ class ObsidianKnowledgeService:
         )
         return {
             "documents": len(documents),
+            "active": sum(item.tier is KnowledgeTier.ACTIVE for item in documents),
+            "archived": sum(item.tier is KnowledgeTier.ARCHIVE for item in documents),
             "memory": sum(item.kind is KnowledgeKind.MEMORY for item in documents),
             "skill": sum(item.kind is KnowledgeKind.SKILL for item in documents),
+            "active_lines": sum(
+                item.source_line_count for item in documents if item.tier is KnowledgeTier.ACTIVE
+            ),
+            "active_line_limit": _MAX_ACTIVE_LINES,
         }
 
     def snapshot(self, task: TaskRequest) -> tuple[KnowledgeContext, ...]:
