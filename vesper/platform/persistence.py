@@ -16,6 +16,7 @@ from .runtime_env import enforce_offline_runtime_environment
 enforce_offline_runtime_environment()
 
 from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
+from langgraph.store.base import PutOp  # noqa: E402
 from langgraph.store.sqlite import SqliteStore  # noqa: E402
 
 
@@ -58,6 +59,21 @@ class LangGraphStoreAdapter:
     def delete(self, namespace: tuple[str, ...], key: str) -> None:
         with self._lock:
             self._store.delete(namespace, key)
+
+    def replace(
+        self,
+        namespace: tuple[str, ...],
+        values: Mapping[str, Mapping[str, object]],
+    ) -> None:
+        with self._lock:
+            existing_keys = {item.key for item in self._store.search(namespace, limit=100_000)}
+            operations = [
+                PutOp(namespace, key, dict(value)) for key, value in sorted(values.items())
+            ]
+            operations.extend(
+                PutOp(namespace, key, None) for key in sorted(existing_keys - values.keys())
+            )
+            self._store.batch(operations)
 
     def search(
         self,

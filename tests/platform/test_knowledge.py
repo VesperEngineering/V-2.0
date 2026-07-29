@@ -394,6 +394,42 @@ def _service(vault: Path, persistence):
     )
 
 
+class _FailOnceAfterStoreMutation:
+    def __init__(self, store) -> None:
+        self._store = store
+        self._failed = False
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+    def put(self, namespace, key, value) -> None:
+        self._store.put(namespace, key, value)
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("injected Store mutation failure")
+
+    def replace(self, namespace, values) -> None:
+        self._store.replace(namespace, values)
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("injected Store mutation failure")
+
+
+class _FailOnceAfterIndexRebuild:
+    def __init__(self, index) -> None:
+        self._index = index
+        self._failed = False
+
+    def __getattr__(self, name):
+        return getattr(self._index, name)
+
+    def rebuild(self, documents) -> None:
+        self._index.rebuild(documents)
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("injected FTS rebuild failure")
+
+
 def _task(*, objective: str = "Review evidence and split adjustment policy") -> TaskRequest:
     return TaskRequest(
         run_id="run-knowledge",
@@ -479,6 +515,80 @@ def test_repeated_sync_is_idempotent_and_changed_or_deleted_notes_are_reconciled
         assert service.search(SpecialistRole.PRODUCT, "unique correction")[0].content.endswith(
             "adjusted prices."
         )
+
+
+def test_store_mutation_failure_restores_previous_store_and_fts_corpora(tmp_path):
+    vault = tmp_path / "knowledge"
+    original = _write_note(
+        vault,
+        "memory/original.md",
+        knowledge_id="stable",
+        body="Original stable policy token.",
+    )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        service = _service(vault, persistence)
+        service.sync()
+        previous_store = persistence.store.search(
+            ("knowledge", "obsidian", "documents"), limit=100_000
+        )
+        original.write_text(
+            original.read_text(encoding="utf-8").replace("Original", "Replacement"),
+            encoding="utf-8",
+        )
+        _write_note(
+            vault,
+            "memory/added.md",
+            knowledge_id="added",
+            body="Newly added policy token.",
+        )
+        service._store = _FailOnceAfterStoreMutation(persistence.store)
+
+        with pytest.raises(RuntimeError, match="injected Store mutation failure"):
+            service.sync()
+
+        assert (
+            persistence.store.search(("knowledge", "obsidian", "documents"), limit=100_000)
+            == previous_store
+        )
+        assert [
+            item.knowledge_id for item in service.search(SpecialistRole.PRODUCT, "original stable")
+        ] == ["stable"]
+        assert service.search(SpecialistRole.PRODUCT, "replacement newly") == ()
+
+
+def test_fts_rebuild_failure_restores_previous_store_and_fts_corpora(tmp_path):
+    vault = tmp_path / "knowledge"
+    original = _write_note(
+        vault,
+        "memory/original.md",
+        knowledge_id="stable",
+        body="Original stable policy token.",
+    )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        service = _service(vault, persistence)
+        service.sync()
+        previous_store = persistence.store.search(
+            ("knowledge", "obsidian", "documents"), limit=100_000
+        )
+        original.write_text(
+            original.read_text(encoding="utf-8").replace("Original", "Replacement"),
+            encoding="utf-8",
+        )
+        service._index = _FailOnceAfterIndexRebuild(persistence.knowledge_index)
+
+        with pytest.raises(RuntimeError, match="injected FTS rebuild failure"):
+            service.sync()
+
+        assert (
+            persistence.store.search(("knowledge", "obsidian", "documents"), limit=100_000)
+            == previous_store
+        )
+        assert [
+            item.knowledge_id for item in service.search(SpecialistRole.PRODUCT, "original stable")
+        ] == ["stable"]
+        assert service.search(SpecialistRole.PRODUCT, "replacement") == ()
 
 
 def test_search_combines_shared_and_role_scope_without_cross_role_leakage(tmp_path):

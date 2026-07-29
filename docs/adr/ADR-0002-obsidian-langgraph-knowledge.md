@@ -36,6 +36,8 @@ The controller synchronizes approved documents into LangGraph Store and rebuilds
 a dedicated SQLite FTS5 index. Both are derived local state. Deletion from the
 canonical vault removes the derived Store record on the next successful sync.
 Malformed or duplicate approved notes fail synchronization before mutations.
+If a Store mutation or FTS rebuild fails, synchronization restores both derived
+corpora to their complete previous state before returning the failure.
 
 At run creation, the controller retrieves at most five matching documents and
 8,000 content characters per specialist role, then persists an immutable

@@ -109,8 +109,8 @@ directory inside the active repository for production run creation.
 - Duplicate approved ID: fail without partially replacing the previous corpus.
 - Malformed approved frontmatter: fail with the relative note path.
 - Invalid UTF-8 or source link/junction: fail.
-- Store/index interruption: the next synchronization rebuilds the FTS index from
-  the successfully parsed source set and repairs Store records idempotently.
+- Store/index interruption: fail the synchronization and restore the complete
+  previous Store and FTS corpora; a later synchronization remains idempotent.
 - Missing snapshot on a historical run: inject no Obsidian context; never read the
   current vault as an implicit replacement.
 

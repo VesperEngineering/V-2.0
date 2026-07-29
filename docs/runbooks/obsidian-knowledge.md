@@ -74,6 +74,8 @@ run creation rejects a vault outside the approved clone.
 state, reconciles additions, updates, and deletions in LangGraph Store, then
 rebuilds the FTS5 index. An invalid approved note, duplicate ID, kind/directory
 mismatch, symlinked vault, or invalid UTF-8 fails closed.
+If Store reconciliation or the FTS rebuild fails, the previous Store and FTS
+corpora are restored together and the synchronization reports the failure.
 
 The active `memory/` and `skills/` corpus cannot exceed 3,000 complete Markdown
 source lines. The count includes frontmatter and Markdown content of active notes;

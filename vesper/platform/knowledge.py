@@ -84,6 +84,12 @@ class KnowledgeStorePort(Protocol):
 
     def delete(self, namespace: tuple[str, ...], key: str) -> None: ...
 
+    def replace(
+        self,
+        namespace: tuple[str, ...],
+        values: Mapping[str, Mapping[str, object]],
+    ) -> None: ...
+
 
 class SqliteKnowledgeIndex:
     """Disposable local FTS5 index over Store-backed knowledge documents."""
@@ -187,26 +193,36 @@ class ObsidianKnowledgeService:
         corpus = load_knowledge_corpus(self._vault_root)
         documents = corpus.documents
         current = {item.knowledge_id: item for item in documents}
-        existing = {
-            item.knowledge_id: item
-            for item in (
-                _parse_document(raw)
-                for raw in self._store.search(_DOCUMENT_NAMESPACE, limit=100_000)
-            )
-        }
+        existing_values = {}
+        existing = {}
+        for raw in self._store.search(_DOCUMENT_NAMESPACE, limit=100_000):
+            item = _parse_document(raw)
+            existing_values[item.knowledge_id] = dict(raw)
+            existing[item.knowledge_id] = item
         added = current.keys() - existing.keys()
         deleted = existing.keys() - current.keys()
         updated = {key for key in current.keys() & existing.keys() if current[key] != existing[key]}
         unchanged = current.keys() & existing.keys() - updated
-        for key in sorted(added | updated):
-            self._store.put(
-                _DOCUMENT_NAMESPACE,
-                key,
-                current[key].model_dump(mode="json"),
-            )
-        for key in sorted(deleted):
-            self._store.delete(_DOCUMENT_NAMESPACE, key)
-        self._index.rebuild(documents)
+        current_values = {key: item.model_dump(mode="json") for key, item in current.items()}
+        try:
+            self._store.replace(_DOCUMENT_NAMESPACE, current_values)
+            self._index.rebuild(documents)
+        except Exception as sync_error:
+            rollback_errors = []
+            try:
+                self._store.replace(_DOCUMENT_NAMESPACE, existing_values)
+            except Exception as exc:
+                rollback_errors.append(f"Store rollback failed: {exc}")
+            try:
+                self._index.rebuild(tuple(existing[key] for key in sorted(existing)))
+            except Exception as exc:
+                rollback_errors.append(f"FTS rollback failed: {exc}")
+            if rollback_errors:
+                detail = "; ".join(rollback_errors)
+                raise KnowledgeSyncError(
+                    f"knowledge sync failed and could not restore the previous corpus: {detail}"
+                ) from sync_error
+            raise
         return {
             "added": len(added),
             "updated": len(updated),
