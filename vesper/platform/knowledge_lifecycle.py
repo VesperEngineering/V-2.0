@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timezone
 from hashlib import sha256
@@ -21,6 +22,7 @@ from .contracts import (
     KnowledgeRetention,
     KnowledgeTier,
     SpecialistReceipt,
+    SpecialistRole,
     TaskRequest,
 )
 from .knowledge import (
@@ -45,6 +47,7 @@ _SECRET_PATTERNS = (
     re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 )
+_LIFECYCLE_MUTATION_LOCK = threading.RLock()
 
 
 class KnowledgeLifecycleError(RuntimeError):
@@ -68,25 +71,39 @@ class KnowledgeLifecycleService:
         self._clock = clock
 
     def observe(self, observation: KnowledgeObservation) -> dict[str, object]:
-        self._validate_observation(observation)
-        self._validated_inbox()
-        state, changed = self._merge_observation(observation)
-        if changed:
-            self._store.put(OBSERVATION_NAMESPACE, observation.concept_key, state)
-        return self._materialize_candidate(observation, state, changed=changed)
+        with _LIFECYCLE_MUTATION_LOCK:
+            self._validate_observation(observation)
+            self._validated_inbox()
+            state, changed = self._merge_observation(observation)
+            if changed:
+                self._store.put(OBSERVATION_NAMESPACE, observation.concept_key, state)
+            return self._materialize_candidate(observation, state, changed=changed)
 
     def record_selections(self, contexts: tuple[KnowledgeContext, ...]) -> None:
         """Persist selected knowledge references without treating selection as success."""
-        for context in contexts:
-            selection_ref = f"{context.run_id}:{context.role.value}"
-            for document in context.documents:
-                state = self._usage_state(document.knowledge_id)
-                selection_refs = set(state["selection_refs"])
-                if selection_ref in selection_refs:
-                    continue
-                selection_refs.add(selection_ref)
-                state["selection_refs"] = sorted(selection_refs)
-                self._store.put(USAGE_NAMESPACE, document.knowledge_id, state)
+        with _LIFECYCLE_MUTATION_LOCK:
+            for context in contexts:
+                selection_ref = f"{context.run_id}:{context.role.value}"
+                selection = {
+                    "run_id": context.run_id,
+                    "task_id": context.task_id,
+                    "role": context.role.value,
+                    "tier": None,
+                }
+                for document in context.documents:
+                    state = self._usage_state(document.knowledge_id)
+                    original_refs = set(state["selection_refs"])
+                    selection_refs = set(state["selection_refs"])
+                    selection_refs.add(selection_ref)
+                    state["selection_refs"] = sorted(selection_refs)
+                    selection["tier"] = document.tier.value
+                    selections = {_selection_key(item): item for item in state["selections"]}
+                    selections[_selection_key(selection)] = dict(selection)
+                    updated = sorted(selections.values(), key=_selection_key)
+                    if updated == state["selections"] and selection_refs == original_refs:
+                        continue
+                    state["selections"] = updated
+                    self._store.put(USAGE_NAMESPACE, document.knowledge_id, state)
 
     def usage(self, knowledge_id: str) -> dict[str, object]:
         """Return persisted selection and accepted-run usage for one document."""
@@ -94,7 +111,7 @@ class KnowledgeLifecycleService:
         return {
             "knowledge_id": knowledge_id,
             "selection_count": len(state["selection_refs"]),
-            "successful_run_count": len(state["successful_refs"]),
+            "successful_run_count": len(state["successful_runs"]),
             "last_successful_use": state["last_successful_use"],
         }
 
@@ -104,57 +121,76 @@ class KnowledgeLifecycleService:
         receipts: tuple[SpecialistReceipt, ...],
     ) -> dict[str, object]:
         """Credit selected knowledge and materialize accepted-run observations once."""
-        accepted = self._store.get(ACCEPTED_RUN_NAMESPACE, task.run_id)
-        if accepted is not None:
-            return dict(accepted)
+        with _LIFECYCLE_MUTATION_LOCK:
+            accepted = self._store.get(ACCEPTED_RUN_NAMESPACE, task.run_id)
+            if accepted is not None:
+                return dict(accepted)
 
-        observed_at = self._clock()
-        observation_results = []
-        for receipt in sorted(receipts, key=lambda item: (item.role.value, item.attempt)):
-            if receipt.output is None:
-                continue
-            for proposal in receipt.output.knowledge_observations:
-                observation_results.append(
-                    self.observe(
-                        KnowledgeObservation(
-                            concept_key=proposal.concept_key,
-                            title=proposal.title,
-                            kind=proposal.kind,
-                            scope=proposal.scope,
-                            summary=proposal.summary,
-                            explicit=proposal.explicit,
-                            source_ref=f"{task.run_id}:{receipt.role.value}:{receipt.attempt}",
-                            observed_at=observed_at,
+            observed_at = self._clock()
+            accepted_at = _format_timestamp(observed_at)
+            observation_results = []
+            for receipt in sorted(receipts, key=lambda item: (item.role.value, item.attempt)):
+                if receipt.output is None:
+                    continue
+                for proposal in receipt.output.knowledge_observations:
+                    observation_results.append(
+                        self.observe(
+                            KnowledgeObservation(
+                                concept_key=proposal.concept_key,
+                                title=proposal.title,
+                                kind=proposal.kind,
+                                scope=proposal.scope,
+                                summary=proposal.summary,
+                                explicit=proposal.explicit,
+                                source_ref=f"{task.run_id}:{receipt.role.value}:{receipt.attempt}",
+                                observed_at=observed_at,
+                            )
                         )
                     )
+
+            knowledge_ids = []
+            for stored in self._store.search(USAGE_NAMESPACE, limit=10_000):
+                knowledge_id, state = _stored_usage(stored)
+                structured_refs = {_selection_ref(selection) for selection in state["selections"]}
+                selected_refs = {
+                    _selection_ref(selection)
+                    for selection in state["selections"]
+                    if selection["run_id"] == task.run_id and selection["task_id"] == task.task_id
+                }
+                selected_refs.update(
+                    reference
+                    for reference in state["selection_refs"]
+                    if reference not in structured_refs
+                    and _selection_run_id(reference) == task.run_id
                 )
-
-        selected_ref_prefix = f"{task.run_id}:"
-        knowledge_ids = []
-        for stored in self._store.search(USAGE_NAMESPACE, limit=10_000):
-            knowledge_id, state = _stored_usage(stored)
-            selected_refs = {
-                reference
-                for reference in state["selection_refs"]
-                if reference.startswith(selected_ref_prefix)
-            }
-            if not selected_refs:
-                continue
-            successful_refs = set(state["successful_refs"])
-            if not selected_refs.issubset(successful_refs):
+                if not selected_refs:
+                    continue
+                successful_refs = set(state["successful_refs"])
+                successful_runs = {item["run_id"]: item for item in state["successful_runs"]}
+                changed = not selected_refs.issubset(successful_refs)
                 successful_refs.update(selected_refs)
-                state["successful_refs"] = sorted(successful_refs)
-                state["last_successful_use"] = _format_timestamp(observed_at)
-                self._store.put(USAGE_NAMESPACE, knowledge_id, state)
-            knowledge_ids.append(knowledge_id)
+                if task.run_id not in successful_runs:
+                    successful_runs[task.run_id] = {
+                        "run_id": task.run_id,
+                        "accepted_at": accepted_at,
+                    }
+                    changed = True
+                if changed:
+                    state["successful_refs"] = sorted(successful_refs)
+                    state["successful_runs"] = sorted(
+                        successful_runs.values(), key=lambda item: item["run_id"]
+                    )
+                    state["last_successful_use"] = accepted_at
+                    self._store.put(USAGE_NAMESPACE, knowledge_id, state)
+                knowledge_ids.append(knowledge_id)
 
-        result = {
-            "accepted_at": _format_timestamp(observed_at),
-            "knowledge_ids": sorted(knowledge_ids),
-            "observations": observation_results,
-        }
-        self._store.put(ACCEPTED_RUN_NAMESPACE, task.run_id, result)
-        return result
+            result = {
+                "accepted_at": accepted_at,
+                "knowledge_ids": sorted(knowledge_ids),
+                "observations": observation_results,
+            }
+            self._store.put(ACCEPTED_RUN_NAMESPACE, task.run_id, result)
+            return result
 
     def compaction_plan(self, target_lines: int = _MAX_ACTIVE_LINES) -> dict[str, object]:
         """Produce a deterministic review proposal without moving any knowledge files."""
@@ -202,8 +238,9 @@ class KnowledgeLifecycleService:
         eligible = []
         for document in archived:
             usage = self.usage(document.knowledge_id)
-            if usage["successful_run_count"] >= 3:
-                eligible.append((document, usage))
+            archived_usage = _archived_usage(usage, self._usage_state(document.knowledge_id))
+            if archived_usage["successful_run_count"] >= 3:
+                eligible.append((document, archived_usage))
         eligible.sort(
             key=lambda item: (
                 -int(item[1]["successful_run_count"]),
@@ -233,7 +270,9 @@ class KnowledgeLifecycleService:
             return {
                 "knowledge_id": knowledge_id,
                 "selection_refs": [],
+                "selections": [],
                 "successful_refs": [],
+                "successful_runs": [],
                 "last_successful_use": None,
             }
         stored_id, state = _stored_usage(stored)
@@ -532,23 +571,148 @@ def _result(status: str, concept_key: str, observation_count: int) -> dict[str, 
 def _stored_usage(stored: Mapping[str, object]) -> tuple[str, dict[str, object]]:
     knowledge_id = stored.get("knowledge_id")
     selection_refs = stored.get("selection_refs")
+    selections = stored.get("selections", [])
     successful_refs = stored.get("successful_refs")
+    successful_runs = stored.get("successful_runs")
     last_successful_use = stored.get("last_successful_use")
     if (
         not isinstance(knowledge_id, str)
         or not isinstance(selection_refs, list)
+        or not isinstance(selections, list)
         or not isinstance(successful_refs, list)
+        or (successful_runs is not None and not isinstance(successful_runs, list))
         or not all(isinstance(reference, str) for reference in selection_refs)
         or not all(isinstance(reference, str) for reference in successful_refs)
         or (last_successful_use is not None and not isinstance(last_successful_use, str))
     ):
         raise KnowledgeLifecycleError("stored usage state is invalid")
+    parsed_selections = [_stored_selection(item) for item in selections]
+    parsed_successful_runs = (
+        _legacy_successful_runs(successful_refs, last_successful_use)
+        if successful_runs is None
+        else [_stored_successful_run(item) for item in successful_runs]
+    )
     return knowledge_id, {
         "knowledge_id": knowledge_id,
         "selection_refs": sorted(set(selection_refs)),
+        "selections": sorted(
+            {_selection_key(item): item for item in parsed_selections}.values(),
+            key=_selection_key,
+        ),
         "successful_refs": sorted(set(successful_refs)),
+        "successful_runs": sorted(
+            {item["run_id"]: item for item in parsed_successful_runs}.values(),
+            key=lambda item: item["run_id"],
+        ),
         "last_successful_use": last_successful_use,
     }
+
+
+def _stored_selection(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    run_id = value.get("run_id")
+    task_id = value.get("task_id")
+    role = value.get("role")
+    tier = value.get("tier")
+    if not all(isinstance(item, str) and item for item in (run_id, task_id, role, tier)):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    if role not in {item.value for item in SpecialistRole}:
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    if tier not in {item.value for item in KnowledgeTier}:
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    return {"run_id": run_id, "task_id": task_id, "role": role, "tier": tier}
+
+
+def _stored_successful_run(value: object) -> dict[str, str | None]:
+    if not isinstance(value, Mapping):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    run_id = value.get("run_id")
+    accepted_at = value.get("accepted_at")
+    if not isinstance(run_id, str) or not run_id:
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    if accepted_at is not None and not isinstance(accepted_at, str):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    return {"run_id": run_id, "accepted_at": accepted_at}
+
+
+def _legacy_successful_runs(
+    successful_refs: list[object],
+    last_successful_use: object,
+) -> list[dict[str, str | None]]:
+    run_ids = {
+        run_id
+        for reference in successful_refs
+        if isinstance(reference, str)
+        for run_id in (_selection_run_id(reference),)
+        if run_id is not None
+    }
+    accepted_at = last_successful_use if isinstance(last_successful_use, str) else None
+    return [{"run_id": run_id, "accepted_at": accepted_at} for run_id in sorted(run_ids)]
+
+
+def _selection_key(selection: Mapping[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(selection["run_id"]),
+        str(selection["task_id"]),
+        str(selection["role"]),
+        str(selection["tier"]),
+    )
+
+
+def _selection_ref(selection: Mapping[str, object]) -> str:
+    return f"{selection['run_id']}:{selection['role']}"
+
+
+def _selection_run_id(reference: str) -> str | None:
+    try:
+        run_id, role = reference.rsplit(":", 1)
+    except ValueError:
+        return None
+    if not run_id or role not in {item.value for item in SpecialistRole}:
+        return None
+    return run_id
+
+
+def _archived_usage(
+    usage: Mapping[str, object],
+    state: Mapping[str, object],
+) -> dict[str, object]:
+    selections = state["selections"]
+    if not isinstance(selections, list):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    archived_run_ids = {
+        selection["run_id"]
+        for selection in selections
+        if isinstance(selection, Mapping) and selection.get("tier") == KnowledgeTier.ARCHIVE.value
+    }
+    archived_usage = dict(usage)
+    successful_runs = state["successful_runs"]
+    if not isinstance(successful_runs, list):
+        raise KnowledgeLifecycleError("stored usage state is invalid")
+    successful_run_ids = {item["run_id"] for item in successful_runs if isinstance(item, Mapping)}
+    archived_successes = archived_run_ids & successful_run_ids
+    archived_usage["successful_run_count"] = len(archived_successes)
+    archived_usage["last_successful_use"] = _latest_successful_use(
+        successful_runs,
+        archived_successes,
+    )
+    return archived_usage
+
+
+def _latest_successful_use(
+    successful_runs: list[object],
+    eligible_run_ids: set[object],
+) -> str | None:
+    values = [
+        item.get("accepted_at")
+        for item in successful_runs
+        if isinstance(item, Mapping) and item.get("run_id") in eligible_run_ids
+    ]
+    timestamps = [value for value in values if isinstance(value, str)]
+    if not timestamps:
+        return None
+    return max(timestamps, key=_parse_timestamp)
 
 
 def _is_overdue(review_after: date | None, today: date) -> bool:

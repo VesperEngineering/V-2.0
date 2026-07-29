@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import stat
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -114,11 +116,12 @@ def knowledge_context(
     tier: KnowledgeTier,
     *,
     run_id: str = "run-001",
+    task_id: str = "task-001",
     role: SpecialistRole = SpecialistRole.DEVELOPMENT,
 ) -> KnowledgeContext:
     return KnowledgeContext(
         run_id=run_id,
-        task_id="task-001",
+        task_id=task_id,
         repository_revision="abc1234",
         created_at=NOW,
         role=role,
@@ -614,6 +617,81 @@ def test_accepted_run_credits_selected_documents_once_and_records_observations(t
     assert (vault / "inbox" / "accepted-observation.md").is_file()
 
 
+def test_one_accepted_run_selected_by_three_roles_counts_as_one_success(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    _write_note(
+        vault, "archive/memory/archived-id.md", knowledge_id="archived-id", status="archived"
+    )
+    contexts = tuple(
+        knowledge_context("archived-id", KnowledgeTier.ARCHIVE, role=role)
+        for role in SpecialistRole
+    )
+    service.record_selections(contexts)
+
+    service.accept_run(task(), receipts=())
+
+    usage = service.usage("archived-id")
+    assert usage["selection_count"] == 3
+    assert usage["successful_run_count"] == 1
+    assert service.reactivation_plan()["entries"] == []
+
+
+def test_selection_usage_persists_task_role_and_tier_provenance(tmp_path):
+    store = DictStore()
+    service = _lifecycle_module().KnowledgeLifecycleService(
+        vault_root=tmp_path / "knowledge",
+        store=store,
+        clock=lambda: NOW,
+    )
+    context = knowledge_context(
+        "archived-id",
+        KnowledgeTier.ARCHIVE,
+        run_id="run-archive",
+        task_id="task-archive",
+        role=SpecialistRole.RISK_REVIEW,
+    )
+
+    service.record_selections((context,))
+
+    usage = store.get(_lifecycle_module().USAGE_NAMESPACE, "archived-id")
+    assert usage is not None
+    assert usage["selections"] == [
+        {
+            "run_id": "run-archive",
+            "task_id": "task-archive",
+            "role": "v20-risk-review",
+            "tier": "archive",
+        }
+    ]
+
+
+def test_legacy_role_refs_count_distinct_runs_without_archive_evidence(tmp_path):
+    store = DictStore()
+    vault = tmp_path / "knowledge"
+    service = _lifecycle_module().KnowledgeLifecycleService(
+        vault_root=vault,
+        store=store,
+        clock=lambda: NOW,
+    )
+    refs = [f"run-legacy:{role.value}" for role in SpecialistRole]
+    store.put(
+        _lifecycle_module().USAGE_NAMESPACE,
+        "archived-id",
+        {
+            "knowledge_id": "archived-id",
+            "selection_refs": refs,
+            "successful_refs": refs,
+            "last_successful_use": "2026-07-28T12:00:00Z",
+        },
+    )
+    _write_note(
+        vault, "archive/memory/archived-id.md", knowledge_id="archived-id", status="archived"
+    )
+
+    assert service.usage("archived-id")["successful_run_count"] == 1
+    assert service.reactivation_plan()["entries"] == []
+
+
 def test_unaccepted_work_never_creates_success_credit_or_observations(tmp_path):
     service, vault = lifecycle_service(tmp_path)
     service.record_selections((knowledge_context("active-id", KnowledgeTier.ACTIVE),))
@@ -737,3 +815,75 @@ def test_reactivation_proposal_credits_repeated_archived_use_without_file_moves(
     assert proposal["entries"][0]["successful_run_count"] == 3
     assert proposal["entries"][0]["fits_without_displacement"] is True
     assert sorted(path.relative_to(vault) for path in vault.rglob("*.md")) == before
+
+
+def test_reactivation_ignores_successes_selected_while_note_was_active(tmp_path):
+    service, vault = lifecycle_service(tmp_path)
+    _write_note(
+        vault, "archive/memory/archived-id.md", knowledge_id="archived-id", status="archived"
+    )
+    for index, tier in enumerate(
+        (KnowledgeTier.ACTIVE, KnowledgeTier.ACTIVE, KnowledgeTier.ARCHIVE)
+    ):
+        run_id = f"run-{index}"
+        service.record_selections((knowledge_context("archived-id", tier, run_id=run_id),))
+        service.accept_run(task(run_id=run_id), receipts=())
+
+    assert service.usage("archived-id")["successful_run_count"] == 3
+    assert service.reactivation_plan()["entries"] == []
+
+
+def test_concurrent_observations_preserve_every_distinct_source(tmp_path):
+    class CoordinatedStore(DictStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self._coordination_lock = threading.Lock()
+            self._armed = False
+            self._reads = 0
+            self.first_read = threading.Event()
+            self.second_read = threading.Event()
+            self.release_first = threading.Event()
+
+        def arm(self) -> None:
+            self._armed = True
+
+        def get(self, namespace, key):
+            value = super().get(namespace, key)
+            if not self._armed or namespace != _lifecycle_module().OBSERVATION_NAMESPACE:
+                return value
+            with self._coordination_lock:
+                self._reads += 1
+                read_number = self._reads
+            if read_number == 1:
+                self.first_read.set()
+                assert self.release_first.wait(timeout=5)
+            elif read_number == 2:
+                self.second_read.set()
+            return value
+
+    vault = tmp_path / "knowledge"
+    store = CoordinatedStore()
+    first_service = _lifecycle_module().KnowledgeLifecycleService(
+        vault_root=vault,
+        store=store,
+        clock=lambda: NOW,
+    )
+    second_service = _lifecycle_module().KnowledgeLifecycleService(
+        vault_root=vault,
+        store=store,
+        clock=lambda: NOW,
+    )
+    first_service.observe(observation(source_ref="task-0"))
+    store.arm()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(first_service.observe, observation(source_ref="task-1"))
+        assert store.first_read.wait(timeout=5)
+        second = executor.submit(second_service.observe, observation(source_ref="task-2"))
+        store.second_read.wait(timeout=1)
+        store.release_first.set()
+        first.result(timeout=5)
+        second.result(timeout=5)
+
+    candidate = vault / "inbox" / "brief-writing.md"
+    assert _metadata(candidate)["vesper_source_refs"] == ["task-0", "task-1", "task-2"]
