@@ -9,17 +9,14 @@ import sqlite3
 import stat
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
-from pathlib import Path
-
-from pydantic import Field
-from typing_extensions import Annotated
+from pathlib import Path, PurePosixPath
 
 from vesper.platform.contracts import (
     AnalysisNode,
     DerivedDatasetReceipt,
-    EvidenceArtifactRef,
     FinancialAnalysisPlan,
     FinancialEventEnvelope,
     FinancialEventType,
@@ -43,6 +40,7 @@ _SUPPORTED_OPERATIONS = {
 _TABLE_NAME = "sp500_ohlcv"
 _REQUIRED_COLUMNS = {"ticker", "date", "close"}
 _SHA256_CHUNK_SIZE = 1024 * 1024
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _NON_AUTHORITY = (
     "Research evidence only; no trading, order, capital-allocation, risk, deployment, "
@@ -50,12 +48,12 @@ _NON_AUTHORITY = (
 )
 
 
-class CoverageDatasetReceipt(DerivedDatasetReceipt):
-    """Phase 1 aggregate counts attached to the generic derived-data receipt."""
-
-    row_count: Annotated[int, Field(ge=0)]
-    ticker_count: Annotated[int, Field(ge=0)]
-    null_close_count: Annotated[int, Field(ge=0)]
+@dataclass(frozen=True, slots=True)
+class _SourceIdentity:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
 
 
 def decide_financial_trigger(event: FinancialEventEnvelope) -> FinancialTriggerDecision:
@@ -220,8 +218,14 @@ class LocalFinancialResearchExecutor:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self.massive_root = Path(massive_root).absolute()
-        self.derived_root = _validate_derived_root(Path(derived_root), self.massive_root)
-        self.evidence = evidence
+        resolved_derived = _validate_derived_root(Path(derived_root), self.massive_root)
+        self.evidence = _validate_evidence_store(
+            evidence,
+            massive_root=self.massive_root,
+            derived_root=resolved_derived,
+        )
+        self._evidence_root = self.evidence.root.resolve(strict=True)
+        self.derived_root = resolved_derived
         self.clock = clock
 
     def execute(
@@ -237,17 +241,23 @@ class LocalFinancialResearchExecutor:
             raise FinancialResearchError("research start date must not follow end date")
 
         database = self.massive_root / "sp500" / "sp500_ohlcv.sqlite"
-        if not _is_safe_source_file(self.massive_root, database):
-            raise FinancialResearchError("market database is missing or unsafe")
-        source_sha256 = _stream_sha256(database)
+        _reject_sqlite_sidecars(database)
+        source_identity = _source_identity(self.massive_root, database)
+        source_sha256 = _stream_sha256(database, self.massive_root, source_identity)
+        _reject_sqlite_sidecars(database)
         aggregate = self._coverage_aggregate(
             database,
             request.symbols,
             request.time_window_start,
             request.time_window_end,
+            self.massive_root,
+            source_identity,
         )
-        if _stream_sha256(database) != source_sha256:
+        _reject_sqlite_sidecars(database)
+        _require_source_identity(self.massive_root, database, source_identity)
+        if _stream_sha256(database, self.massive_root, source_identity) != source_sha256:
             raise FinancialResearchError("market database changed during analysis")
+        _reject_sqlite_sidecars(database)
 
         row_count, ticker_count, coverage_start, coverage_end, null_close_count = aggregate
         if row_count == 0 or ticker_count == 0 or coverage_start is None or coverage_end is None:
@@ -304,7 +314,19 @@ class LocalFinancialResearchExecutor:
                 "transform_sha256": transform_sha256,
             }
         )
+        _require_current_evidence_store(
+            self.evidence,
+            expected_root=self._evidence_root,
+            massive_root=self.massive_root,
+            derived_root=self.derived_root,
+        )
         _write_immutable(self.derived_root, relative_output, body)
+        _require_current_evidence_store(
+            self.evidence,
+            expected_root=self._evidence_root,
+            massive_root=self.massive_root,
+            derived_root=self.derived_root,
+        )
         try:
             validation = self.evidence.put_bytes(
                 run_id=event.run_id,
@@ -320,7 +342,7 @@ class LocalFinancialResearchExecutor:
             raise FinancialResearchError(
                 "immutable evidence copy already exists with different content"
             ) from exc
-        dataset = CoverageDatasetReceipt(
+        dataset = DerivedDatasetReceipt(
             run_id=event.run_id,
             task_id=event.task_id,
             repository_revision=event.repository_revision,
@@ -355,36 +377,63 @@ class LocalFinancialResearchExecutor:
         symbols: tuple[str, ...],
         start: str,
         end: str,
+        massive_root: Path,
+        source_identity: _SourceIdentity,
     ) -> tuple[int, int, str | None, str | None, int]:
         placeholders = ", ".join("?" for _ in symbols)
         connection: sqlite3.Connection | None = None
         try:
+            _require_stable_source(massive_root, database, source_identity)
             connection = sqlite3.connect(
                 f"{database.resolve(strict=True).as_uri()}?mode=ro&immutable=1",
                 uri=True,
             )
+            _require_stable_source(massive_root, database, source_identity)
             connection.execute("PRAGMA query_only = ON")
+            _require_stable_source(massive_root, database, source_identity)
             connection.execute("PRAGMA trusted_schema = OFF")
+            _require_stable_source(massive_root, database, source_identity)
             columns = {
                 str(row[1]).casefold()
                 for row in connection.execute(f'PRAGMA table_info("{_TABLE_NAME}")')
             }
+            _require_stable_source(massive_root, database, source_identity)
             if not _REQUIRED_COLUMNS.issubset(columns):
                 raise FinancialResearchError("market database schema is missing required columns")
+            _require_stable_source(massive_root, database, source_identity)
             result = connection.execute(
-                f'''SELECT COUNT(*), COUNT(DISTINCT ticker),
-                           MIN(substr(date, 1, 10)), MAX(substr(date, 1, 10)),
-                           SUM(CASE WHEN close IS NULL THEN 1 ELSE 0 END),
-                           SUM(CASE
-                                 WHEN typeof(date) <> 'text' THEN 1
-                                 WHEN length(CAST(date AS BLOB)) <> 10 THEN 1
-                                 WHEN date(date) IS NULL OR date(date) <> date THEN 1
+                f'''WITH requested AS (
+                        SELECT ticker, date, close,
+                               CASE
+                                 WHEN typeof(date) <> 'text' THEN 0
+                                 WHEN length(CAST(date AS BLOB)) <> 10 THEN 0
+                                 WHEN date NOT GLOB
+                                      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' THEN 0
+                                 WHEN julianday(date) IS NULL THEN 0
+                                 WHEN date(julianday(date)) <> date THEN 0
+                                 ELSE 1
+                               END AS valid_date
+                        FROM "{_TABLE_NAME}"
+                        WHERE ticker IN ({placeholders})
+                    ), classified AS (
+                        SELECT ticker, date, close, valid_date,
+                               CASE
+                                 WHEN valid_date = 1 AND date >= ? AND date <= ? THEN 1
                                  ELSE 0
-                               END)
-                    FROM "{_TABLE_NAME}"
-                    WHERE ticker IN ({placeholders}) AND date >= ? AND date <= ?''',
+                               END AS in_window
+                        FROM requested
+                    )
+                    SELECT COALESCE(SUM(in_window), 0),
+                           COUNT(DISTINCT CASE WHEN in_window = 1 THEN ticker END),
+                           MIN(CASE WHEN in_window = 1 THEN date END),
+                           MAX(CASE WHEN in_window = 1 THEN date END),
+                           COALESCE(SUM(CASE
+                             WHEN in_window = 1 AND close IS NULL THEN 1 ELSE 0 END), 0),
+                           COALESCE(SUM(CASE WHEN valid_date = 0 THEN 1 ELSE 0 END), 0)
+                    FROM classified''',
                 (*symbols, start, end),
             ).fetchone()
+            _require_stable_source(massive_root, database, source_identity)
         except FinancialResearchError:
             raise
         except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
@@ -392,6 +441,7 @@ class LocalFinancialResearchExecutor:
         finally:
             if connection is not None:
                 connection.close()
+        _require_stable_source(massive_root, database, source_identity)
         if result is None or len(result) != 6:
             raise FinancialResearchError("market coverage aggregate is unavailable")
         rows, tickers, coverage_start, coverage_end, nulls, invalid_dates = result
@@ -486,37 +536,190 @@ def _is_safe_source_file(root: Path, path: Path) -> bool:
         return False
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _protected_roots(massive_root: Path) -> tuple[Path, ...]:
+    repository = Path(__file__).resolve().parents[2]
+    return (
+        repository,
+        (repository / "vesper" / "data" / "massive").resolve(),
+        (repository / "vesper" / "data" / "model_research").resolve(),
+        massive_root.resolve(),
+    )
+
+
 def _validate_derived_root(configured: Path, massive_root: Path) -> Path:
     if _has_reparse_component(configured):
         raise FinancialResearchError("derived root must not traverse a symlink or reparse point")
     resolved = configured.resolve()
-    repository = Path(__file__).resolve().parents[2]
-    protected = (
-        repository,
-        repository / "vesper" / "data" / "massive",
-        repository / "vesper" / "data" / "model_research",
-        massive_root.resolve(),
-    )
-    if any(resolved == root.resolve() or resolved.is_relative_to(root.resolve()) for root in protected):
+    if any(_paths_overlap(resolved, root) for root in _protected_roots(massive_root)):
         raise FinancialResearchError("derived root must be outside the repository and protected data")
     return resolved
 
 
-def _stream_sha256(path: Path) -> str:
+def _prepare_derived_root(root: Path) -> Path:
+    parent = root.parent
+    try:
+        if (
+            _has_reparse_component(parent)
+            or parent.resolve(strict=True) != parent
+            or not parent.is_dir()
+        ):
+            raise FinancialResearchError("derived root parent is unsafe")
+        root.mkdir(parents=False, exist_ok=True)
+    except FinancialResearchError:
+        raise
+    except OSError as exc:
+        raise FinancialResearchError("derived root could not be created safely") from exc
+    _require_derived_root(root)
+    return root
+
+
+def _validate_evidence_store(
+    evidence: object,
+    *,
+    massive_root: Path,
+    derived_root: Path,
+) -> FilesystemEvidenceStore:
+    if type(evidence) is not FilesystemEvidenceStore:
+        raise FinancialResearchError("a concrete filesystem evidence store is required")
+    _require_valid_evidence_root(
+        evidence.root,
+        massive_root=massive_root,
+        derived_root=derived_root,
+    )
+    return evidence
+
+
+def _require_valid_evidence_root(
+    root: Path,
+    *,
+    massive_root: Path,
+    derived_root: Path,
+) -> None:
+    try:
+        resolved = root.resolve(strict=True)
+        if (
+            resolved != root
+            or not root.is_dir()
+            or _has_reparse_component(root)
+            or any(_paths_overlap(resolved, protected) for protected in _protected_roots(massive_root))
+            or _paths_overlap(resolved, derived_root)
+        ):
+            raise FinancialResearchError(
+                "evidence root must be a safe directory outside repository and data roots"
+            )
+    except FinancialResearchError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise FinancialResearchError("evidence root is missing or unsafe") from exc
+
+
+def _require_current_evidence_store(
+    evidence: FilesystemEvidenceStore,
+    *,
+    expected_root: Path,
+    massive_root: Path,
+    derived_root: Path,
+) -> None:
+    try:
+        current_root = evidence.root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise FinancialResearchError("evidence root is missing or unsafe") from exc
+    if current_root != expected_root:
+        raise FinancialResearchError("evidence root changed after validation")
+    _require_valid_evidence_root(
+        current_root,
+        massive_root=massive_root,
+        derived_root=derived_root,
+    )
+
+
+def _require_derived_root(root: Path) -> None:
+    try:
+        if (
+            not root.is_dir()
+            or _has_reparse_component(root)
+            or root.resolve(strict=True) != root
+        ):
+            raise FinancialResearchError("derived root changed or is unsafe")
+    except FinancialResearchError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise FinancialResearchError("derived root changed or is unsafe") from exc
+
+
+def _source_identity(root: Path, path: Path) -> _SourceIdentity:
+    if not _is_safe_source_file(root, path):
+        raise FinancialResearchError("market database is missing or unsafe")
+    try:
+        metadata = path.stat()
+    except OSError as exc:
+        raise FinancialResearchError("market database is missing or unsafe") from exc
+    return _SourceIdentity(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        size=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+    )
+
+
+def _require_source_identity(root: Path, path: Path, expected: _SourceIdentity) -> None:
+    if _source_identity(root, path) != expected:
+        raise FinancialResearchError("market database changed during analysis")
+
+
+def _require_stable_source(root: Path, path: Path, expected: _SourceIdentity) -> None:
+    _reject_sqlite_sidecars(path)
+    _require_source_identity(root, path, expected)
+
+
+def _reject_sqlite_sidecars(path: Path) -> None:
+    try:
+        if any(
+            Path(f"{path}{suffix}").exists() or Path(f"{path}{suffix}").is_symlink()
+            for suffix in _SQLITE_SIDECAR_SUFFIXES
+        ):
+            raise FinancialResearchError("market database has an unsafe SQLite sidecar")
+    except FinancialResearchError:
+        raise
+    except OSError as exc:
+        raise FinancialResearchError("market database sidecars could not be checked safely") from exc
+
+
+def _stream_sha256(path: Path, root: Path, expected: _SourceIdentity) -> str:
     digest = sha256()
     try:
+        _require_stable_source(root, path, expected)
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(_SHA256_CHUNK_SIZE), b""):
                 digest.update(chunk)
+        _require_stable_source(root, path, expected)
     except OSError as exc:
         raise FinancialResearchError("market database could not be hashed safely") from exc
     return digest.hexdigest()
 
 
 def _write_immutable(root: Path, relative_path: str, body: bytes) -> None:
-    path = root.joinpath(*relative_path.split("/"))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if _has_reparse_component(path.parent) or not path.parent.resolve().is_relative_to(root):
+    relative = PurePosixPath(relative_path)
+    if relative.is_absolute() or len(relative.parts) != 2 or ".." in relative.parts:
+        raise FinancialResearchError("derived output path is unsafe")
+    _prepare_derived_root(root)
+    path = root.joinpath(*relative.parts)
+    if path.parent.parent != root:
+        raise FinancialResearchError("derived output path is unsafe")
+    try:
+        path.parent.mkdir(parents=False, exist_ok=True)
+    except OSError as exc:
+        raise FinancialResearchError("derived output directory could not be created safely") from exc
+    _require_derived_root(root)
+    if (
+        _has_reparse_component(path.parent)
+        or path.parent.resolve(strict=True).parent != root
+        or not path.parent.is_dir()
+    ):
         raise FinancialResearchError("derived output path is unsafe")
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_file() or path.read_bytes() != body:
@@ -529,6 +732,9 @@ def _write_immutable(root: Path, relative_path: str, body: bytes) -> None:
             handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
+        _require_derived_root(root)
+        if _has_reparse_component(path.parent) or path.parent.resolve(strict=True).parent != root:
+            raise FinancialResearchError("derived output path changed or is unsafe")
         try:
             os.link(temporary, path)
         except FileExistsError:
@@ -536,11 +742,14 @@ def _write_immutable(root: Path, relative_path: str, body: bytes) -> None:
                 raise FinancialResearchError(
                     "immutable derived output already exists with different content"
                 )
+        _require_derived_root(root)
+        if _has_reparse_component(path.parent) or path.parent.resolve(strict=True).parent != root:
+            raise FinancialResearchError("derived output path changed or is unsafe")
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _assess_coverage(dataset: CoverageDatasetReceipt, validation):
+def _assess_coverage(dataset: DerivedDatasetReceipt, validation):
     common = {
         "run_id": dataset.run_id,
         "task_id": dataset.task_id,

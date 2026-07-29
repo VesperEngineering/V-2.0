@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from vesper.platform.contracts import (
     AnalysisNode,
@@ -248,6 +248,9 @@ def test_phase_one_financial_contract_chain_is_typed():
         lineage_ids=(plan.plan_id, plan.nodes[1].node_id),
         derived_output_path="run-001/dataset-001.json",
         validation_evidence=artifact(),
+        row_count=100,
+        ticker_count=1,
+        null_close_count=0,
     )
     gap = FinancialGapAssessment(
         **financial_common(event.event_id),
@@ -296,6 +299,9 @@ def test_derived_dataset_requires_complete_reproducibility_receipt():
         "lineage_ids": (),
         "derived_output_path": "other-run/dataset-001.json",
         "validation_evidence": artifact(),
+        "row_count": 100,
+        "ticker_count": 1,
+        "null_close_count": 0,
     }
 
     with pytest.raises(ValidationError):
@@ -316,10 +322,42 @@ def test_derived_dataset_output_path_is_scoped_to_its_run(output_path):
         "lineage_ids": ("plan-001",),
         "derived_output_path": output_path,
         "validation_evidence": artifact(),
+        "row_count": 100,
+        "ticker_count": 1,
+        "null_close_count": 0,
     }
 
     with pytest.raises(ValidationError, match="derived output path"):
         DerivedDatasetReceipt.model_validate(payload)
+
+
+def test_derived_dataset_counts_survive_base_typed_nested_round_trip():
+    class DatasetEnvelope(BaseModel):
+        dataset: DerivedDatasetReceipt
+
+    dataset = DerivedDatasetReceipt(
+        **financial_common(),
+        dataset_id="dataset-001",
+        schema_fields=("row_count", "ticker_count", "null_close_count"),
+        source_hashes=("a" * 64,),
+        transform_sha256="b" * 64,
+        cache_key_sha256="c" * 64,
+        coverage_start="2020-01-01",
+        coverage_end="2026-07-27",
+        lineage_ids=("plan-001",),
+        derived_output_path="run-001/dataset-001.json",
+        validation_evidence=artifact(),
+        row_count=100,
+        ticker_count=1,
+        null_close_count=0,
+    )
+
+    restored = DatasetEnvelope.model_validate_json(
+        DatasetEnvelope(dataset=dataset).model_dump_json()
+    )
+
+    assert restored.dataset == dataset
+    assert restored.dataset.row_count == 100
 
 
 def test_claim_bearing_gap_requires_owned_evidence_and_content_hashes():

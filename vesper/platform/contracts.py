@@ -263,6 +263,9 @@ class FinancialAnalysisPlan(FinancialResearchContract):
 class DerivedDatasetReceipt(FinancialResearchContract):
     dataset_id: NonEmptyStr
     schema_fields: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    row_count: Annotated[int, Field(ge=0)]
+    ticker_count: Annotated[int, Field(ge=0)]
+    null_close_count: Annotated[int, Field(ge=0)]
     source_hashes: Annotated[tuple[Sha256, ...], Field(min_length=1)]
     transform_sha256: Sha256
     cache_key_sha256: Sha256

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -87,11 +88,18 @@ def market_database(massive_root: Path, *, null_close: bool = False) -> Path:
     return database
 
 
-def executor(tmp_path: Path, *, derived_root: Path | None = None):
+def executor(
+    tmp_path: Path,
+    *,
+    derived_root: Path | None = None,
+    evidence: object | None = None,
+):
     return LocalFinancialResearchExecutor(
         massive_root=tmp_path / "massive",
         derived_root=derived_root or tmp_path / "derived",
-        evidence=FilesystemEvidenceStore(tmp_path / "evidence"),
+        evidence=(
+            FilesystemEvidenceStore(tmp_path / "evidence") if evidence is None else evidence
+        ),
         clock=lambda: NOW,
     )
 
@@ -231,7 +239,7 @@ def test_executor_opens_sqlite_read_only_and_binds_request_values(tmp_path, monk
             self.connection = connection
 
         def execute(self, statement, parameters=()):
-            if statement.lstrip().startswith("SELECT"):
+            if f'FROM "{financial_research._TABLE_NAME}"' in statement:
                 aggregate_calls.append((statement, parameters))
             return self.connection.execute(statement, parameters)
 
@@ -267,6 +275,48 @@ def test_executor_rejects_derived_root_inside_repository_or_protected_data(tmp_p
             executor(tmp_path, derived_root=derived_root)
 
 
+def test_executor_requires_concrete_filesystem_evidence_store(tmp_path):
+    class FakeEvidenceStore:
+        root = tmp_path / "evidence"
+
+        def put_bytes(self, **_kwargs):
+            raise AssertionError("unsafe evidence store must not be called")
+
+    with pytest.raises(FinancialResearchError, match="evidence store"):
+        executor(tmp_path, evidence=FakeEvidenceStore())
+
+
+def test_executor_rejects_evidence_root_inside_repository_massive_or_derived(tmp_path):
+    repository = Path(__file__).resolve().parents[2]
+    market_database(tmp_path / "massive")
+    unsafe_roots = (
+        repository,
+        tmp_path / "massive",
+        tmp_path / "derived",
+        tmp_path / "derived" / "evidence",
+    )
+
+    for evidence_root in unsafe_roots:
+        store = FilesystemEvidenceStore(evidence_root)
+        with pytest.raises(FinancialResearchError, match="evidence root"):
+            executor(tmp_path, evidence=store)
+
+    assert not (repository / "runs" / "run-001").exists()
+
+
+def test_executor_revalidates_mutated_evidence_root_before_any_output(tmp_path):
+    market_database(tmp_path / "massive")
+    store = FilesystemEvidenceStore(tmp_path / "evidence")
+    research = executor(tmp_path, evidence=store)
+    store.root = tmp_path / "massive"
+
+    with pytest.raises(FinancialResearchError, match="evidence root"):
+        research.execute(*execution_inputs())
+
+    assert not (tmp_path / "derived").exists()
+    assert not (tmp_path / "massive" / "runs" / "run-001").exists()
+
+
 @pytest.mark.parametrize("source_state", ("missing", "malformed"))
 def test_executor_rejects_missing_or_malformed_market_database(tmp_path, source_state):
     if source_state == "malformed":
@@ -276,6 +326,37 @@ def test_executor_rejects_missing_or_malformed_market_database(tmp_path, source_
 
     with pytest.raises(FinancialResearchError, match="market database"):
         executor(tmp_path).execute(*execution_inputs())
+
+
+@pytest.mark.parametrize("invalid_date", ("1999-99-99", "not-a-date", 20260701))
+def test_executor_rejects_invalid_requested_symbol_date_anywhere_in_source(
+    tmp_path,
+    invalid_date,
+):
+    database = market_database(tmp_path / "massive")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("SPY", invalid_date, 1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+
+    with pytest.raises(FinancialResearchError, match="invalid dates"):
+        executor(tmp_path).execute(*execution_inputs())
+
+    assert not (tmp_path / "derived").exists()
+
+
+def test_executor_ignores_invalid_dates_for_unrequested_symbols(tmp_path):
+    database = market_database(tmp_path / "massive")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("QQQ", "not-a-date", 1.0, 1.0, 1.0, 1.0, 1.0),
+        )
+
+    dataset, _, _ = executor(tmp_path).execute(*execution_inputs())
+
+    assert dataset.row_count == 3
 
 
 @pytest.mark.parametrize(
@@ -309,6 +390,58 @@ def test_executor_rejects_symlinked_market_source(tmp_path):
         executor(tmp_path).execute(*execution_inputs())
 
     assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-shm", "-journal"))
+def test_executor_rejects_sqlite_sidecars_before_reading(tmp_path, suffix):
+    database = market_database(tmp_path / "massive")
+    Path(f"{database}{suffix}").write_bytes(b"sidecar")
+
+    with pytest.raises(FinancialResearchError, match="sidecar"):
+        executor(tmp_path).execute(*execution_inputs())
+
+    assert not (tmp_path / "derived").exists()
+
+
+def test_executor_rejects_source_identity_change_between_reopens(tmp_path, monkeypatch):
+    market_database(tmp_path / "massive")
+    original_identity = financial_research._source_identity
+    calls = 0
+
+    def changing_identity(root, path):
+        nonlocal calls
+        calls += 1
+        identity = original_identity(root, path)
+        if calls >= 3:
+            return replace(identity, mtime_ns=identity.mtime_ns + 1)
+        return identity
+
+    monkeypatch.setattr(financial_research, "_source_identity", changing_identity)
+
+    with pytest.raises(FinancialResearchError, match="changed during analysis"):
+        executor(tmp_path).execute(*execution_inputs())
+
+    assert not (tmp_path / "derived" / "run-001").exists()
+
+
+def test_executor_rejects_derived_root_swap_before_child_creation(tmp_path):
+    market_database(tmp_path / "massive")
+    research = executor(tmp_path)
+    derived = research.derived_root
+    original = tmp_path / "original-derived"
+    if derived.exists():
+        derived.rename(original)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        derived.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    with pytest.raises(FinancialResearchError, match="derived"):
+        research.execute(*execution_inputs())
+
+    assert not (outside / "run-001").exists()
 
 
 def test_executor_replay_is_byte_and_hash_stable(tmp_path):
