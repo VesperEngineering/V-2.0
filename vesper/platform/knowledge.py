@@ -135,8 +135,8 @@ class SqliteKnowledgeIndex:
 
     def restore(self, rows: tuple[_KnowledgeIndexRow, ...]) -> None:
         with self._lock:
-            self._connection.execute("BEGIN IMMEDIATE")
             try:
+                self._connection.execute("BEGIN IMMEDIATE")
                 self._connection.execute("DELETE FROM v20_knowledge_fts")
                 self._connection.executemany(
                     "INSERT INTO v20_knowledge_fts "
@@ -144,10 +144,11 @@ class SqliteKnowledgeIndex:
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     rows,
                 )
+                self._connection.execute("COMMIT")
             except Exception:
-                self._connection.execute("ROLLBACK")
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
                 raise
-            self._connection.execute("COMMIT")
 
     def search(
         self,
