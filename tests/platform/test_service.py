@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -149,6 +149,120 @@ def test_operator_knowledge_commands_reject_vault_outside_current_repository(tmp
 
     with pytest.raises(SpecialistRuntimeUnavailable, match="inside the current repository"):
         platform.sync_knowledge()
+
+
+def test_operator_knowledge_lifecycle_commands_only_create_candidates_or_proposals(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    monkeypatch.chdir(repository)
+    knowledge = create_knowledge_fixture(repository)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        knowledge_root=knowledge,
+        clock=lambda: NOW,
+    )
+
+    observed = platform.observe_knowledge(
+        "brief-writing",
+        "Prefer brief writing",
+        "memory",
+        "shared",
+        "Prefer brief, direct wording.",
+        "codex-task-123",
+        True,
+    )
+
+    assert observed["status"] == "candidate-created"
+    assert (knowledge / "inbox" / "brief-writing.md").is_file()
+    assert platform.knowledge_compaction_plan(2800)["entries"] == []
+    assert platform.knowledge_reactivation_plan()["entries"] == []
+    assert not list((knowledge / "memory").glob("brief-writing.md"))
+    assert not list((knowledge / "archive").rglob("brief-writing.md"))
+
+
+@pytest.mark.parametrize(
+    ("kind", "scope"),
+    (("invalid-kind", "shared"), ("memory", "invalid-role"), ("memory", "invalid-scope")),
+)
+def test_operator_knowledge_observation_rejects_invalid_kind_or_scope_before_writes(
+    tmp_path, monkeypatch, kind, scope
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    monkeypatch.chdir(repository)
+    knowledge = create_knowledge_fixture(repository)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"), knowledge_root=knowledge
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="invalid knowledge observation"):
+        platform.observe_knowledge(
+            "brief-writing",
+            "Prefer brief writing",
+            kind,
+            scope,
+            "Prefer brief, direct wording.",
+            "codex-task-123",
+            True,
+        )
+
+    assert not (knowledge / "inbox" / "brief-writing.md").exists()
+
+
+def test_operator_knowledge_observation_rejects_non_utc_time_before_writes(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    monkeypatch.chdir(repository)
+    knowledge = create_knowledge_fixture(repository)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"),
+        knowledge_root=knowledge,
+        clock=lambda: NOW.astimezone(timezone(timedelta(hours=-4))),
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="invalid knowledge observation"):
+        platform.observe_knowledge(
+            "brief-writing",
+            "Prefer brief writing",
+            "memory",
+            "shared",
+            "Prefer brief, direct wording.",
+            "codex-task-123",
+            True,
+        )
+
+    assert not (knowledge / "inbox" / "brief-writing.md").exists()
+
+
+def test_operator_knowledge_observation_rejects_secret_before_candidate_write(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    monkeypatch.chdir(repository)
+    knowledge = create_knowledge_fixture(repository)
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "state"), knowledge_root=knowledge
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="invalid knowledge observation"):
+        platform.observe_knowledge(
+            "brief-writing",
+            "Prefer brief writing",
+            "memory",
+            "shared",
+            "api_key: sk-abcdefghijklmnopqrstuvwxyz123456",
+            "codex-task-123",
+            True,
+        )
+
+    assert not (knowledge / "inbox" / "brief-writing.md").exists()
 
 
 def evidence(request, name):

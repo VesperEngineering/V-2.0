@@ -60,6 +60,21 @@ class PlatformService(Protocol):
 
     def knowledge_status(self): ...
 
+    def observe_knowledge(
+        self,
+        concept_key: str,
+        title: str,
+        kind: str,
+        scope: str,
+        summary: str,
+        source_ref: str,
+        explicit: bool,
+    ): ...
+
+    def knowledge_compaction_plan(self, target_lines: int): ...
+
+    def knowledge_reactivation_plan(self): ...
+
 
 class PlatformRuntimeUnavailable(RuntimeError):
     """A requested platform capability has no configured local runtime."""
@@ -276,6 +291,49 @@ def build_app(
     def knowledge_status(context: typer.Context) -> None:
         """Report the documents in the derived knowledge store."""
         _call(context, "knowledge_status")
+
+    @app.command("knowledge-observe")
+    def observe_knowledge(
+        context: typer.Context,
+        concept_key: str = typer.Option(..., "--concept-key", help="Stable candidate concept key."),
+        title: str = typer.Option(..., "--title", help="Candidate title."),
+        kind: str = typer.Option(..., "--kind", help="Candidate kind: memory or skill."),
+        scope: str = typer.Option(..., "--scope", help="Candidate scope."),
+        summary: str = typer.Option(..., "--summary", help="Candidate summary without secrets."),
+        source_ref: str = typer.Option(
+            ..., "--source-ref", help="Observation provenance reference."
+        ),
+        explicit: bool = typer.Option(
+            False, "--explicit", help="Create an explicit candidate immediately."
+        ),
+    ) -> None:
+        """Create a knowledge candidate only; this command cannot approve or move knowledge."""
+        _call(
+            context,
+            "observe_knowledge",
+            concept_key,
+            title,
+            kind,
+            scope,
+            summary,
+            source_ref,
+            explicit,
+        )
+
+    @app.command("knowledge-compaction-plan")
+    def knowledge_compaction_plan(
+        context: typer.Context,
+        target_lines: int = typer.Option(
+            3000, "--target-lines", help="Maximum projected active lines."
+        ),
+    ) -> None:
+        """Create a compaction proposal only; this command cannot approve or move knowledge."""
+        _call(context, "knowledge_compaction_plan", target_lines)
+
+    @app.command("knowledge-reactivation-plan")
+    def knowledge_reactivation_plan(context: typer.Context) -> None:
+        """Create a reactivation proposal only; this command cannot approve or move knowledge."""
+        _call(context, "knowledge_reactivation_plan")
 
     @app.command("approve")
     def approve_run(

@@ -65,6 +65,20 @@ class FakeService:
         self.calls.append(("knowledge-status",))
         return {"documents": 1, "memory": 0, "skill": 1}
 
+    def observe_knowledge(self, concept_key, title, kind, scope, summary, source_ref, explicit):
+        self.calls.append(
+            ("knowledge-observe", concept_key, title, kind, scope, summary, source_ref, explicit)
+        )
+        return {"status": "candidate-created", "concept_key": concept_key}
+
+    def knowledge_compaction_plan(self, target_lines):
+        self.calls.append(("knowledge-compaction-plan", target_lines))
+        return {"proposal_id": "compaction-001", "entries": []}
+
+    def knowledge_reactivation_plan(self):
+        self.calls.append(("knowledge-reactivation-plan",))
+        return {"proposal_id": "reactivation-001", "entries": []}
+
 
 @pytest.fixture
 def cli():
@@ -143,6 +157,40 @@ def cli():
             ("knowledge-search", "documentation marker", "v20-development"),
         ),
         (["knowledge-status"], ("knowledge-status",)),
+        (
+            [
+                "knowledge-observe",
+                "--concept-key",
+                "brief-writing",
+                "--title",
+                "Prefer brief writing",
+                "--kind",
+                "memory",
+                "--scope",
+                "shared",
+                "--summary",
+                "Prefer brief, direct wording.",
+                "--source-ref",
+                "codex-task-123",
+                "--explicit",
+            ],
+            (
+                "knowledge-observe",
+                "brief-writing",
+                "Prefer brief writing",
+                "memory",
+                "shared",
+                "Prefer brief, direct wording.",
+                "codex-task-123",
+                True,
+            ),
+        ),
+        (
+            ["knowledge-compaction-plan", "--target-lines", "2800"],
+            ("knowledge-compaction-plan", 2800),
+        ),
+        (["knowledge-compaction-plan"], ("knowledge-compaction-plan", 3000)),
+        (["knowledge-reactivation-plan"], ("knowledge-reactivation-plan",)),
     ],
 )
 def test_cli_routes_explicit_commands_to_injected_service(cli, arguments, expected_call):
@@ -161,6 +209,9 @@ def test_cli_routes_explicit_commands_to_injected_service(cli, arguments, expect
         "knowledge-sync",
         "knowledge-search",
         "knowledge-status",
+        "knowledge-observe",
+        "knowledge-compaction-plan",
+        "knowledge-reactivation-plan",
     }
 
 
@@ -176,6 +227,31 @@ def test_read_only_help_does_not_construct_service(cli):
     assert "knowledge-sync" in result.output
     assert "knowledge-search" in result.output
     assert "knowledge-status" in result.output
+    assert "knowledge-observe" in result.output
+    assert "knowledge-compaction-plan" in result.output
+    assert "knowledge-reactivation-plan" in result.output
+    assert service.calls == []
+    assert configs == []
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_phrase"),
+    (
+        (["knowledge-observe", "--help"], "candidate only"),
+        (["knowledge-compaction-plan", "--help"], "proposal only"),
+        (["knowledge-reactivation-plan", "--help"], "proposal only"),
+    ),
+)
+def test_knowledge_lifecycle_command_help_does_not_construct_service(
+    cli, arguments, expected_phrase
+):
+    runner, app, service, configs = cli
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 0
+    assert expected_phrase in result.output
+    assert "cannot approve or move knowledge" in " ".join(result.output.split())
     assert service.calls == []
     assert configs == []
 

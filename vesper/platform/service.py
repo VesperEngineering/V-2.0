@@ -12,11 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from pydantic import ValidationError
+
 from .composition import NativeSpecialistComposition
 from .contracts import (
     ApprovalDecision,
     HumanApprovalDecision,
     HumanApprovalRequest,
+    KnowledgeKind,
+    KnowledgeObservation,
+    KnowledgeScope,
     RunStatus,
     SpecialistReceipt,
     SpecialistRole,
@@ -26,7 +31,7 @@ from .control import RuntimeControl
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .knowledge import ObsidianKnowledgeService
-from .knowledge_lifecycle import KnowledgeLifecycleService
+from .knowledge_lifecycle import KnowledgeLifecycleError, KnowledgeLifecycleService
 from .opencode import (
     OpenCodeGateway,
     _process_exists,
@@ -523,6 +528,40 @@ class LocalPlatformService:
                 index=persistence.knowledge_index,
             ).status()
 
+    def observe_knowledge(
+        self,
+        concept_key: str,
+        title: str,
+        kind: str,
+        scope: str,
+        summary: str,
+        source_ref: str,
+        explicit: bool,
+    ) -> dict[str, object]:
+        try:
+            observation = KnowledgeObservation(
+                concept_key=concept_key,
+                title=title,
+                kind=KnowledgeKind(kind),
+                scope=KnowledgeScope(scope),
+                summary=summary,
+                source_ref=source_ref,
+                observed_at=self._clock(),
+                explicit=explicit,
+            )
+            with open_persistence(self.paths) as persistence:
+                return self._operator_knowledge_lifecycle(persistence).observe(observation)
+        except (KnowledgeLifecycleError, ValueError, ValidationError) as exc:
+            raise SpecialistRuntimeUnavailable(f"invalid knowledge observation: {exc}") from exc
+
+    def knowledge_compaction_plan(self, target_lines: int) -> dict[str, object]:
+        with open_persistence(self.paths) as persistence:
+            return self._operator_knowledge_lifecycle(persistence).compaction_plan(target_lines)
+
+    def knowledge_reactivation_plan(self) -> dict[str, object]:
+        with open_persistence(self.paths) as persistence:
+            return self._operator_knowledge_lifecycle(persistence).reactivation_plan()
+
     def _controller(
         self,
         persistence: PlatformPersistence,
@@ -957,6 +996,16 @@ class LocalPlatformService:
                 "knowledge root must be inside the current repository"
             )
         return knowledge_root
+
+    def _operator_knowledge_lifecycle(
+        self,
+        persistence: PlatformPersistence,
+    ) -> KnowledgeLifecycleService:
+        return KnowledgeLifecycleService(
+            vault_root=self._operator_knowledge_root(),
+            store=persistence.store,
+            clock=self._clock,
+        )
 
     @staticmethod
     def _repository_root(workspace: Path) -> Path:
