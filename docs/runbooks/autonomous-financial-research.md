@@ -18,10 +18,15 @@ authorized; Phase 1 does not notify, schedule, promote, or act on that date.
 - `weak-model-result` requires both metric options. It enters research only when
   `--observed-metric` is lower than `--threshold`; an equal or higher result is
   persisted as `ignored` and creates no derived dataset or validation evidence.
+  Both values must be finite; `NaN` and positive or negative infinity are
+  rejected before service construction.
 
 Dates must use ISO `YYYY-MM-DD`, the start must not follow the end, and
 `--symbol` may be repeated. The only admitted analysis is the fixed two-node
-coverage plan: read source coverage, then summarize it.
+coverage plan: read source coverage, then summarize it. Its single aggregate
+binds the requested symbols and inclusive date bounds. Malformed dates are
+rejected when they occur in that candidate window; rows outside it are not part
+of the request.
 
 ## Controller-owned locations
 
@@ -96,7 +101,9 @@ $weak.run_id
 ## Inspect and compare runs
 
 `financial-research-status` takes the run ID as a positional argument. It reads
-the persisted terminal record; it does not start or resume work.
+the persisted terminal record; it does not start or resume work. It opens only
+the existing Store database with SQLite `mode=ro` and does not create a root,
+file, schema, knowledge index, evidence store, checkpointer, or executor.
 
 ```powershell
 $directStatus = uv run --locked vesper-agent `
@@ -114,6 +121,7 @@ $weakStatus = uv run --locked vesper-agent `
 @($directStatus, $weakStatus) | ForEach-Object {
   [pscustomobject]@{
     run_id = $_.run_id
+    event_type = $_.event.event_type
     status = $_.status
     rows = $_.dataset.row_count
     tickers = $_.dataset.ticker_count
@@ -126,9 +134,11 @@ $weakStatus = uv run --locked vesper-agent `
 ```
 
 Compare the persisted status, coverage counts/dates, source/transform/cache
-hashes, relative derived path, evidence path, conclusion, and uncertainty. A
-fair comparison uses the same symbols and date window. Different `run_id` and
-`event_id` values are expected.
+hashes, initiating event, relative derived path, evidence path, conclusion, and
+uncertainty. The accepted terminal hash covers that event and the complete typed
+output chain. Output `created_at` values record their generation times and may
+follow the event intake time. A fair comparison uses the same symbols and date
+window. Different `run_id` and `event_id` values are expected.
 
 ## Status and failure semantics
 
@@ -138,7 +148,7 @@ fair comparison uses the same symbols and date window. Different `run_id` and
   close rows or a workflow failure that was durably recorded.
 - `ignored`: a weak metric met or exceeded its threshold; no analysis executed.
 - Invalid CLI option combinations fail before persistence.
-- An unavailable run reports
+- A missing, unavailable, or integrity-invalid status record reports
   `platform unavailable: financial research run is unavailable`.
 - Workflow execution and replay-integrity failures expose the generic message
   `platform unavailable: Financial research workflow failed.` and exit code 4;
@@ -148,12 +158,15 @@ Each CLI `financial-research-start` call creates a new controller-owned run; it
 is not a cross-invocation deduplication command. Within one run, replay of the
 same event fingerprint returns an existing outcome only when its accepted
 terminal record is integrity-valid: `completed`, `ignored`, or an accepted
-`stopped` recommendation. A generic workflow-failure record remains inspectable
-through status, but replay fails with the generic workflow message; it never
-fabricates or returns an accepted outcome. A different event under the same run
-ID also fails closed. Derived and evidence files are immutable: an exact
-same-byte output write is accepted idempotently, while conflicting bytes at an
-existing path are rejected. Status inspection is read-only and repeatable.
+`stopped` recommendation. A generic workflow-failure record remains minimal and
+inspectable through status. Retrying its exact event removes only the prefixed
+`financial-research:<run_id>` checkpoint history and performs a fresh bounded
+execution; unrelated software-workflow history is preserved. Terminal Store
+write failures follow the same sanitized cleanup and retry behavior. A different
+event under the same run ID fails closed. Derived and evidence files are
+immutable: an exact same-byte output write is accepted idempotently, while
+conflicting bytes at an existing path are rejected. Status inspection validates
+terminal integrity, is read-only, and is repeatable.
 
 ## Verification and review gate
 

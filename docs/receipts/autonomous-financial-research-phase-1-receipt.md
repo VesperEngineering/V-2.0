@@ -2,12 +2,13 @@
 
 - Recorded: 2026-07-29
 - Environment: Windows, Python 3.11, `uv run --locked`
-- Phase 1 implementation head: `d3572370812b9924bcc681f37657cdbd75cb7fe4`
-- Final verification pre-receipt tree: `9cf96f8` (`docs(research): clarify
-  replay failure semantics`)
-- Result: behavioral, lint, compile, lock, CLI, documentation, and diff checks
-  passed; the required repository-wide Ruff format check remains open: `40
-  files would be reformatted, 67 files already formatted`.
+- Phase 1 implementation head: `d8016da7fc4fc8367ea362e07793997598a210ba`
+- Final repair verification tree: `d8016da` plus the documentation and receipt
+  changes recorded below.
+- Result: final behavioral, lint, changed-file format, compile, lock, CLI,
+  documentation, and diff checks passed. The unchanged repository-wide Ruff
+  format baseline remains open: `40 files would be reformatted, 67 files already
+  formatted`.
 
 ## Implemented boundary
 
@@ -154,7 +155,57 @@ Result after receipt creation: `git diff --check` exited 0 with no whitespace
 errors. Status contained exactly the five expected Task 6 paths: `README.md`,
 the candidate knowledge note, ADR-0004, the runbook, and this receipt.
 
-## Remaining concern
+## Final whole-branch repair verification
+
+Commit `d8016da` closes the final review findings without adding Phase 2
+behavior. Status now validates exact accepted-terminal shape, hash, initiating
+event, typed chain, authority, and coherent state through a Store-only read-only
+opener. Coverage is symbol- and date-bounded. Weak metrics reject all non-finite
+values. Terminal Store failures are sanitized and exact-event retries clean only
+financial-prefixed checkpoints. Generated artifact timestamps use the executor
+clock. The accepted report now exposes its hash-bound initiating event.
+
+The reconciled changed-area suite was run as:
+
+```powershell
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked python -m pytest tests/platform/test_contracts.py tests/platform/test_financial_research.py tests/platform/test_financial_workflow.py tests/platform/test_persistence.py tests/platform/test_service.py tests/platform/test_cli.py -q -k "not stale_opencode_process_is_terminated_after_controller_loss"
+```
+
+Result: exit 0; `254 passed, 1 deselected in 34.43s`. The deselected test is the
+existing Windows process-termination test, which requires host process control;
+it was included successfully in the escalated full-suite run below.
+
+The full suite used a dedicated native Windows temporary directory:
+
+```powershell
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked python -m pytest tests -q --basetemp "C:\Users\bgonn\AppData\Local\Temp\v20-phase1-finalfix-019fab16"
+```
+
+Result: exit 0; `902 passed, 5 skipped in 122.84s`.
+
+Final static and interface gates:
+
+```powershell
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked ruff check vesper scripts tests
+$pythonFiles = @(git diff --name-only 6215a50 -- '*.py')
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked ruff format --check @pythonFiles
+$env:PYTHONPYCACHEPREFIX = '.superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-pycache'
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked python -m compileall -q vesper scripts tests
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked python -m py_compile vesper/platform/cli.py vesper/platform/contracts.py vesper/platform/financial_research.py vesper/platform/financial_workflow.py vesper/platform/persistence.py vesper/platform/service.py tests/platform/test_cli.py tests/platform/test_contracts.py tests/platform/test_financial_research.py tests/platform/test_financial_workflow.py tests/platform/test_persistence.py tests/platform/test_service.py
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache lock --check
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked vesper-agent --help
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked vesper-agent financial-research-start --help
+uv --cache-dir .superpowers/sdd/2026-07-29-autonomous-financial-research-phase-1/task-3-uv-cache run --locked vesper-agent financial-research-status --help
+git diff --check 6215a50
+```
+
+Results: Ruff lint passed; all 12 branch-changed Python files were formatted;
+compileall and explicit changed-file `py_compile` passed; the lock resolved 79
+packages; all three help commands exited 0; and the branch-aware whitespace
+check exited 0. The design specification's extra EOF blank line was removed.
+The Obsidian note remains `vesper_status: candidate`.
+
+## Remaining baseline concern
 
 The repository-wide formatter gate is not green: `40 files would be
 reformatted, 67 files already formatted`. No production assertion, focused

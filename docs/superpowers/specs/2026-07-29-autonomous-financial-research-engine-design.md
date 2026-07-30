@@ -339,4 +339,3 @@ automatic promotion. Promotion should be considered only if the candidate
 registry, shadow comparison, rollback, drift monitoring, and false-promotion
 tests have demonstrated that the automatic decision is more reliable than the
 manual gate.
-

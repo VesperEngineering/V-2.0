@@ -18,22 +18,30 @@ human-authority boundaries.
 Add a sibling Phase 1 workflow with two admitted event types:
 `direct-request` and `weak-model-result`. A direct request always triggers. A
 weak result triggers only when its observed metric is below its threshold;
-otherwise it terminates as `ignored`.
+otherwise it terminates as `ignored`. Weak-result metrics must be finite at the
+CLI, service, and typed-contract boundaries.
 
 Triggered events follow one static, typed, acyclic two-node plan: read local
 Massive coverage and summarize it. The executor opens
 `sp500_ohlcv.sqlite` read-only and immutable, validates its identity and schema,
-and writes canonical JSON only below the controller's separate derived and
-evidence roots. Dataset receipts bind source, plan, transform, cache, authority,
-lineage, and validation-evidence hashes. Terminal records are integrity-bound;
-same-event replay returns only integrity-valid accepted terminal outcomes.
-Generic workflow-failure records remain inspectable, but their replay fails
-generically and never returns an accepted outcome. Mismatched replay fails
-closed.
+queries only the requested symbols and inclusive date bounds, and writes
+canonical JSON only below the controller's separate derived and evidence roots.
+Malformed source dates outside that candidate window are irrelevant. Dataset
+receipts bind source, plan, transform, cache, authority, lineage, and
+validation-evidence hashes. Generated evidence, dataset, assessment, and
+recommendation timestamps come from the injected execution clock.
+
+Accepted terminal records hash-bind the initiating event and exact typed output
+chain. Status replays those integrity checks before exposing a record. Generic
+workflow-failure records remain minimal and inspectable. A same-event retry
+cleans only `financial-research:<run_id>` checkpoints and re-executes; a
+mismatched event or corrupt terminal record fails closed.
 
 Expose only `financial-research-start` and `financial-research-status`. Every
-CLI start creates a new run; status is read-only. Failures expose generic
-operator-safe messages rather than raw internals.
+CLI start creates a new run. Status opens only the existing terminal Store with
+SQLite `mode=ro`; it performs no directory, file, schema, index, evidence,
+checkpointer, or executor initialization. Missing or corrupt state and terminal
+Store failures expose generic operator-safe messages rather than raw internals.
 
 Phase 1 is shadow research and non-authoritative. It provides no orders, model
 promotion, model training, web retrieval, scheduler activation, automatic

@@ -98,6 +98,12 @@ database without writing to it, and produces immutable controller-owned
 coverage evidence and a recommendation. It has no order, promotion, training,
 web-retrieval, scheduler, deployment, risk, or capital authority.
 
+Coverage is limited to the requested symbols and inclusive ISO date window;
+weak-result metrics must be finite. Status opens only the existing terminal
+Store in SQLite read-only mode, validates the exact hash-bound terminal chain,
+and exposes the initiating event for accepted outcomes. Missing or corrupt
+status state fails generically without initializing other persistence.
+
 See the [operator runbook](docs/runbooks/autonomous-financial-research.md) for
 copy/paste commands, paths, status semantics, and the manual comparison
 procedure. [ADR-0004](docs/adr/ADR-0004-autonomous-financial-research-phase-1.md)

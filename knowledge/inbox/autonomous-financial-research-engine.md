@@ -234,6 +234,14 @@ controller-owned derived JSON, validation evidence, and integrity-bound terminal
 state. The operator surface contains only `financial-research-start` and
 `financial-research-status`.
 
+Final review repairs are implemented in `d8016da`. Coverage is symbol- and
+date-bounded, weak metrics must be finite, generated artifacts use execution
+timestamps, and accepted terminal state hash-binds the initiating event and full
+typed chain. Status validates that chain through a Store-only SQLite `mode=ro`
+path with no writable initialization. Sanitized terminal-write failures clean
+only financial-prefixed checkpoints and permit an exact-event retry. This note
+remains a candidate; none of those repairs expands Phase 1 authority.
+
 This evidence does not activate the broader behavior proposed above. Phase 1
 has no orders, promotion, training, web retrieval, scheduler activation,
 automatic two-week schedule, or automatic August 12 action. August 12 remains a
