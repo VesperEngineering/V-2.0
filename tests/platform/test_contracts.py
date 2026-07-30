@@ -288,6 +288,32 @@ def test_financial_event_variants_require_their_expected_metrics():
         FinancialEventEnvelope.model_validate(weak_payload)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("observed_metric", float("nan")),
+        ("observed_metric", float("inf")),
+        ("observed_metric", float("-inf")),
+        ("threshold", float("nan")),
+        ("threshold", float("inf")),
+        ("threshold", float("-inf")),
+    ),
+)
+def test_weak_financial_events_reject_non_finite_metrics(field, value):
+    payload = direct_financial_event().model_dump()
+    payload.update(
+        {
+            "event_type": FinancialEventType.WEAK_MODEL_RESULT,
+            "observed_metric": 0.01,
+            "threshold": 0.03,
+            field: value,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="finite"):
+        FinancialEventEnvelope.model_validate(payload)
+
+
 def test_financial_events_require_explicit_requested_date_bounds():
     payload = direct_financial_event().model_dump()
     del payload["requested_start_date"]

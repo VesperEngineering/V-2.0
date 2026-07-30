@@ -446,6 +446,48 @@ def test_cli_rejects_invalid_financial_research_before_service(cli, arguments):
     assert configs == []
 
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("--observed-metric", "nan"),
+        ("--observed-metric", "inf"),
+        ("--observed-metric", "-inf"),
+        ("--threshold", "nan"),
+        ("--threshold", "inf"),
+        ("--threshold", "-inf"),
+    ),
+)
+def test_cli_rejects_non_finite_metrics_before_service_construction(cli, option, value):
+    runner, app, service, configs = cli
+    observed_metric = value if option == "--observed-metric" else "0.01"
+    threshold = value if option == "--threshold" else "0.03"
+
+    result = runner.invoke(
+        app,
+        (
+            "financial-research-start",
+            "--event-type",
+            "weak-model-result",
+            "--objective",
+            "Reject non-finite metrics",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+            "--observed-metric",
+            observed_metric,
+            "--threshold",
+            threshold,
+        ),
+    )
+
+    assert result.exit_code == 2
+    assert service.calls == []
+    assert configs == []
+
+
 def test_cli_reports_unknown_financial_research_run_without_raw_detail():
     raw_detail = "secret missing-run lookup detail"
     constructed = False

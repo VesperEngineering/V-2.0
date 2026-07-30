@@ -329,7 +329,7 @@ class LocalFinancialResearchExecutor:
                 run_id=event.run_id,
                 task_id=event.task_id,
                 repository_revision=event.repository_revision,
-                created_at=event.created_at,
+                created_at=self.clock(),
                 artifact_id=f"{dataset_id}-validation",
                 body=body,
                 media_type="application/json",
@@ -343,7 +343,7 @@ class LocalFinancialResearchExecutor:
             run_id=event.run_id,
             task_id=event.task_id,
             repository_revision=event.repository_revision,
-            created_at=event.created_at,
+            created_at=self.clock(),
             event_id=event.event_id,
             non_authority=FINANCIAL_RESEARCH_NON_AUTHORITY,
             dataset_id=dataset_id,
@@ -366,7 +366,7 @@ class LocalFinancialResearchExecutor:
             ticker_count=ticker_count,
             null_close_count=null_close_count,
         )
-        return dataset, *_assess_coverage(dataset, validation)
+        return dataset, *_assess_coverage(dataset, validation, self.clock)
 
     @staticmethod
     def _coverage_aggregate(
@@ -413,22 +413,17 @@ class LocalFinancialResearchExecutor:
                                END AS valid_date
                         FROM "{_TABLE_NAME}"
                         WHERE ticker IN ({placeholders})
-                    ), classified AS (
-                        SELECT ticker, date, close, valid_date,
-                               CASE
-                                 WHEN valid_date = 1 AND date >= ? AND date <= ? THEN 1
-                                 ELSE 0
-                               END AS in_window
-                        FROM requested
+                          AND date >= ?
+                          AND date <= ?
                     )
-                    SELECT COALESCE(SUM(in_window), 0),
-                           COUNT(DISTINCT CASE WHEN in_window = 1 THEN ticker END),
-                           MIN(CASE WHEN in_window = 1 THEN date END),
-                           MAX(CASE WHEN in_window = 1 THEN date END),
+                    SELECT COUNT(*),
+                           COUNT(DISTINCT ticker),
+                           MIN(date),
+                           MAX(date),
                            COALESCE(SUM(CASE
-                             WHEN in_window = 1 AND close IS NULL THEN 1 ELSE 0 END), 0),
+                             WHEN close IS NULL THEN 1 ELSE 0 END), 0),
                            COALESCE(SUM(CASE WHEN valid_date = 0 THEN 1 ELSE 0 END), 0)
-                    FROM classified''',
+                    FROM requested''',
                 (*symbols, start, end),
             ).fetchone()
             _require_stable_source(massive_root, database, source_identity)
@@ -756,18 +751,18 @@ def _write_immutable(root: Path, relative_path: str, body: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _assess_coverage(dataset: DerivedDatasetReceipt, validation):
+def _assess_coverage(dataset: DerivedDatasetReceipt, validation, clock: Callable[[], datetime]):
     common = {
         "run_id": dataset.run_id,
         "task_id": dataset.task_id,
         "repository_revision": dataset.repository_revision,
-        "created_at": dataset.created_at,
         "event_id": dataset.event_id,
         "non_authority": FINANCIAL_RESEARCH_NON_AUTHORITY,
     }
     if dataset.null_close_count:
         gap = FinancialGapAssessment(
             **common,
+            created_at=clock(),
             assessment_id=f"{dataset.dataset_id}-gap",
             status=FinancialResearchStatus.NEEDS_ANALYSIS,
             unresolved_gaps=(
@@ -780,6 +775,7 @@ def _assess_coverage(dataset: DerivedDatasetReceipt, validation):
         )
         report = FinancialRecommendation(
             **common,
+            created_at=clock(),
             recommendation_id=f"{dataset.dataset_id}-recommendation",
             status=FinancialResearchStatus.STOPPED,
             conclusions=("Coverage evidence failed null-close validation.",),
@@ -795,6 +791,7 @@ def _assess_coverage(dataset: DerivedDatasetReceipt, validation):
     )
     gap = FinancialGapAssessment(
         **common,
+        created_at=clock(),
         assessment_id=f"{dataset.dataset_id}-gap",
         status=FinancialResearchStatus.COMPLETE,
         supported_claims=(claim,),
@@ -807,6 +804,7 @@ def _assess_coverage(dataset: DerivedDatasetReceipt, validation):
     )
     report = FinancialRecommendation(
         **common,
+        created_at=clock(),
         recommendation_id=f"{dataset.dataset_id}-recommendation",
         status=FinancialResearchStatus.COMPLETE,
         conclusions=(claim,),

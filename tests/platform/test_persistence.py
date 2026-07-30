@@ -6,7 +6,8 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from vesper.platform.persistence import PlatformPaths, open_persistence
+import vesper.platform.persistence as persistence_module
+from vesper.platform.persistence import PlatformPaths, open_persistence, open_store_read_only
 
 
 class CounterState(TypedDict):
@@ -50,6 +51,34 @@ def test_sqlite_store_survives_close_and_reopen(tmp_path):
     with open_persistence(paths) as reopened:
         assert reopened.store.get(namespace, "memory-001") == {"content": "persisted"}
         assert reopened.store.search(namespace) == ({"content": "persisted"},)
+
+
+def test_read_only_store_opener_uses_only_the_existing_store_database(tmp_path, monkeypatch):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    namespace = ("financial-research", "runs")
+    with open_persistence(paths) as persistence:
+        persistence.store.put(namespace, "run-001", {"status": "completed"})
+    before = paths.store_db.read_bytes()
+    original_connect = persistence_module.sqlite3.connect
+    calls = []
+
+    def recording_connect(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_connect(*args, **kwargs)
+
+    def reject_setup(_store):
+        raise AssertionError("read-only status must not run Store schema setup")
+
+    monkeypatch.setattr(persistence_module.sqlite3, "connect", recording_connect)
+    monkeypatch.setattr(persistence_module.SqliteStore, "setup", reject_setup)
+
+    with open_store_read_only(paths) as store:
+        assert store.get(namespace, "run-001") == {"status": "completed"}
+
+    assert len(calls) == 1
+    assert "mode=ro" in calls[0][0][0]
+    assert calls[0][1]["uri"] is True
+    assert paths.store_db.read_bytes() == before
 
 
 def test_store_duplicate_key_is_deterministic_last_write(tmp_path):

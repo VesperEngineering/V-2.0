@@ -39,9 +39,15 @@ from .financial_research import (
 )
 from .financial_workflow import (
     FinancialResearchController,
+    FinancialResearchWorkflowError,
     build_financial_research_workflow,
 )
-from .persistence import PlatformPaths, PlatformPersistence, open_persistence
+from .persistence import (
+    PlatformPaths,
+    PlatformPersistence,
+    open_persistence,
+    open_store_read_only,
+)
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .knowledge import ObsidianKnowledgeService
 from .knowledge_lifecycle import KnowledgeLifecycleError, KnowledgeLifecycleService
@@ -389,14 +395,12 @@ class LocalPlatformService:
         return outcome.model_dump(mode="json")
 
     def inspect_financial_research(self, run_id: str) -> dict[str, object]:
-        self._validate_financial_research_roots()
+        self._validate_financial_research_store_path()
         try:
-            with open_persistence(self.paths) as persistence:
-                return dict(self._financial_research_controller(persistence).inspect(run_id))
-        except KeyError:
+            with open_store_read_only(self.paths) as store:
+                return dict(FinancialResearchController(graph=None, store=store).inspect(run_id))
+        except (FinancialResearchWorkflowError, KeyError, OSError, RuntimeError, ValueError):
             raise SpecialistRuntimeUnavailable("financial research run is unavailable") from None
-        except FinancialResearchError as exc:
-            raise SpecialistRuntimeUnavailable(str(exc)) from exc
 
     def resume_run(self, run_id: str) -> dict[str, object]:
         with open_persistence(self.paths) as persistence:
@@ -887,6 +891,26 @@ class LocalPlatformService:
                 for index, left in enumerate(database_paths)
                 for right in database_paths[index + 1 :]
             )
+        ):
+            raise SpecialistRuntimeUnavailable(
+                "financial research persistence locations must be separate safe locations "
+                "outside the repository and protected data"
+            )
+
+    def _validate_financial_research_store_path(self) -> None:
+        repository_root = Path(__file__).resolve().parents[2]
+        platform_root = self.paths.root.resolve()
+        store_path = self.paths.store_db.resolve()
+        protected_roots = (
+            repository_root,
+            (repository_root / "vesper" / "data" / "massive").resolve(),
+            (repository_root / "vesper" / "data" / "model_research").resolve(),
+            self._research_data_root,
+        )
+        if (
+            self._has_reparse_component(self.paths.store_db)
+            or not store_path.is_relative_to(platform_root)
+            or any(self._paths_overlap(store_path, protected) for protected in protected_roots)
         ):
             raise SpecialistRuntimeUnavailable(
                 "financial research persistence locations must be separate safe locations "

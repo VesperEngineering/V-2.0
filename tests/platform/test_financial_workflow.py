@@ -169,7 +169,9 @@ def assert_replay_rejected_without_mutation(controller, persistence, record, his
     assert str(caught.value) == "Financial research workflow failed."
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__ is True
-    assert controller.inspect("run-001") == record
+    assert persistence.store.get(("financial-research", "runs"), "run-001") == record
+    with pytest.raises(FinancialResearchWorkflowError):
+        controller.inspect("run-001")
     assert financial_histories(persistence) == histories
 
 
@@ -206,6 +208,50 @@ def test_direct_event_reaches_completed_report_without_software_graph(tmp_path):
         }
 
 
+def test_workflow_accepts_generated_outputs_created_after_event_intake(tmp_path):
+    market_database(tmp_path / "massive")
+    generated_times = tuple(NOW + timedelta(minutes=offset) for offset in range(1, 5))
+    clock_values = iter(generated_times)
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        executor = LocalFinancialResearchExecutor(
+            massive_root=tmp_path / "massive",
+            derived_root=tmp_path / "derived",
+            evidence=persistence.evidence,
+            clock=lambda: next(clock_values),
+        )
+        controller = financial_controller(tmp_path, persistence, executor=executor)
+
+        report = controller.start(direct_event())
+        record = controller.inspect("run-001")
+
+    assert report.status is FinancialResearchStatus.COMPLETED
+    assert report.created_at == generated_times[3]
+    assert record["dataset"]["created_at"] == generated_times[1].isoformat().replace("+00:00", "Z")
+
+
+def test_completed_status_exposes_the_hash_bound_initiating_event(tmp_path):
+    event = direct_event()
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        record = financial_controller(tmp_path, persistence).start(event)
+        inspected = financial_controller(tmp_path, persistence).inspect(record.run_id)
+
+    assert FinancialEventEnvelope.model_validate_json(json.dumps(inspected["event"])) == event
+    assert set(inspected) == {
+        "run_id",
+        "status",
+        "event",
+        "event_fingerprint",
+        "trigger",
+        "request",
+        "plan",
+        "dataset",
+        "assessment",
+        "recommendation",
+        "terminal_record_sha256",
+    }
+
+
 def test_weak_event_above_threshold_is_persisted_as_ignored(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         controller = financial_controller(tmp_path, persistence)
@@ -217,6 +263,106 @@ def test_weak_event_above_threshold_is_persisted_as_ignored(tmp_path):
         assert controller.inspect(report.run_id)["status"] == "ignored"
         assert len(controller.inspect(report.run_id)["terminal_record_sha256"]) == 64
         assert "recommendation" not in controller.inspect(report.run_id)
+
+
+def test_ignored_status_exposes_the_hash_bound_initiating_event(tmp_path):
+    event = weak_event(observed=0.04, threshold=0.03)
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        controller = financial_controller(tmp_path, persistence)
+        controller.start(event)
+
+        inspected = controller.inspect(event.run_id)
+
+    assert FinancialEventEnvelope.model_validate_json(json.dumps(inspected["event"])) == event
+    assert set(inspected) == {
+        "run_id",
+        "status",
+        "reason",
+        "event",
+        "event_fingerprint",
+        "trigger",
+        "terminal_record_sha256",
+    }
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("hash", "shape", "chain", "authority", "status"),
+)
+def test_status_rejects_corrupt_accepted_terminal_records(tmp_path, corruption):
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        controller = financial_controller(tmp_path, persistence)
+        controller.start(direct_event())
+        record = dict(persistence.store.get(("financial-research", "runs"), "run-001"))
+        if corruption == "hash":
+            record["terminal_record_sha256"] = "0" * 64
+        elif corruption == "shape":
+            record["private_claim"] = "must not be exposed"
+        elif corruption == "chain":
+            request = dict(record["request"])
+            request["non_authority"] = "Grants trading authority."
+            record["request"] = request
+        elif corruption == "authority":
+            event = dict(record.get("event", direct_event().model_dump(mode="json")))
+            event["run_id"] = "foreign-run"
+            record["event"] = event
+        else:
+            recommendation = dict(record["recommendation"])
+            recommendation["status"] = FinancialResearchStatus.REQUESTED.value
+            record["recommendation"] = recommendation
+        if corruption != "hash":
+            record["terminal_record_sha256"] = terminal_record_hash(record)
+        persistence.store.put(("financial-research", "runs"), "run-001", record)
+
+        with pytest.raises(FinancialResearchWorkflowError) as caught:
+            controller.inspect("run-001")
+
+    assert str(caught.value) == "Financial research workflow failed."
+    assert "private" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_status_rejects_corrupt_ignored_terminal_record(tmp_path):
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        controller = financial_controller(tmp_path, persistence)
+        controller.start(weak_event(observed=0.04, threshold=0.03))
+        record = dict(persistence.store.get(("financial-research", "runs"), "run-001"))
+        trigger = dict(record["trigger"])
+        trigger["triggered"] = True
+        record["trigger"] = trigger
+        record["terminal_record_sha256"] = terminal_record_hash(record)
+        persistence.store.put(("financial-research", "runs"), "run-001", record)
+
+        with pytest.raises(
+            FinancialResearchWorkflowError, match="Financial research workflow failed"
+        ):
+            controller.inspect("run-001")
+
+
+def test_status_validates_the_exact_generic_failure_shape(tmp_path):
+    class FailingExecutor:
+        def execute(self, _event, _request, _plan):
+            raise RuntimeError("private executor detail")
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        controller = financial_controller(tmp_path, persistence, executor=FailingExecutor())
+        with pytest.raises(FinancialResearchWorkflowError):
+            controller.start(direct_event())
+        valid_failure = controller.inspect("run-001")
+        assert set(valid_failure) == {
+            "run_id",
+            "status",
+            "failure_reason",
+            "event_fingerprint",
+        }
+        corrupted = {**valid_failure, "private_claim": "must not be exposed"}
+        persistence.store.put(("financial-research", "runs"), "run-001", corrupted)
+
+        with pytest.raises(FinancialResearchWorkflowError) as caught:
+            controller.inspect("run-001")
+
+    assert str(caught.value) == "Financial research workflow failed."
 
 
 def test_plan_validation_failure_persists_only_a_generic_reason(tmp_path, monkeypatch):
@@ -335,6 +481,108 @@ def test_cleanup_failures_never_leak_private_failure_details(
             )
 
 
+def test_post_success_store_failure_is_sanitized_cleaned_and_retryable(
+    tmp_path,
+    monkeypatch,
+):
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        software_checkpoint(persistence.checkpointer, "run-001")
+        software_history = list(
+            persistence.checkpointer.list({"configurable": {"thread_id": "run-001"}})
+        )
+        executor = CountingExecutor(local_executor(tmp_path, persistence))
+        controller = financial_controller(tmp_path, persistence, executor=executor)
+        original_put = persistence.store.put
+        failed = False
+
+        def fail_terminal_once(namespace, key, value):
+            nonlocal failed
+            if not failed and "terminal_record_sha256" in value:
+                failed = True
+                raise RuntimeError("private terminal store database path")
+            original_put(namespace, key, value)
+
+        monkeypatch.setattr(persistence.store, "put", fail_terminal_once)
+
+        with pytest.raises(FinancialResearchWorkflowError) as caught:
+            controller.start(direct_event())
+
+        assert str(caught.value) == "Financial research workflow failed."
+        assert "private" not in str(caught.value)
+        assert set(controller.inspect("run-001")) == {
+            "run_id",
+            "status",
+            "failure_reason",
+            "event_fingerprint",
+        }
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == []
+        )
+        assert (
+            list(persistence.checkpointer.list({"configurable": {"thread_id": "run-001"}}))
+            == software_history
+        )
+        monkeypatch.setattr(persistence.store, "put", original_put)
+
+        retried = controller.start(direct_event())
+
+        assert retried.status is FinancialResearchStatus.COMPLETED
+        assert executor.calls == 2
+        assert controller.inspect("run-001")["status"] == "completed"
+
+
+def test_post_ignored_store_failure_is_sanitized_cleaned_and_retryable(
+    tmp_path,
+    monkeypatch,
+):
+    event = weak_event(observed=0.04, threshold=0.03)
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        controller = financial_controller(tmp_path, persistence)
+        original_put = persistence.store.put
+        failed = False
+
+        def fail_terminal_once(namespace, key, value):
+            nonlocal failed
+            if not failed and "terminal_record_sha256" in value:
+                failed = True
+                raise RuntimeError("private ignored store database path")
+            original_put(namespace, key, value)
+
+        monkeypatch.setattr(persistence.store, "put", fail_terminal_once)
+
+        with pytest.raises(FinancialResearchWorkflowError) as caught:
+            controller.start(event)
+
+        assert str(caught.value) == "Financial research workflow failed."
+        assert "private" not in str(caught.value)
+        assert set(controller.inspect("run-001")) == {
+            "run_id",
+            "status",
+            "failure_reason",
+            "event_fingerprint",
+        }
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == []
+        )
+        monkeypatch.setattr(persistence.store, "put", original_put)
+
+        retried = controller.start(event)
+
+        assert retried.status is FinancialResearchStatus.IGNORED
+        assert controller.inspect("run-001")["status"] == "ignored"
+
+
 def test_completed_output_remains_inspectable_after_persistence_reopens(tmp_path):
     paths = PlatformPaths.below(tmp_path / "platform")
     market_database(tmp_path / "massive")
@@ -369,7 +617,6 @@ def test_stopped_executor_report_is_not_promoted_to_completed(tmp_path):
     ("authority_field", "foreign_value"),
     (
         ("run_id", "foreign-run"),
-        ("created_at", NOW + timedelta(minutes=1)),
         ("non_authority", "Grants trading authority."),
     ),
 )
@@ -547,7 +794,7 @@ def test_tampered_terminal_payload_is_rejected_without_replay_mutation(tmp_path,
             recommendation["evidence"] = evidence
         record["recommendation"] = recommendation
         persistence.store.put(("financial-research", "runs"), "run-001", record)
-        stored_record = dict(controller.inspect("run-001"))
+        stored_record = dict(persistence.store.get(("financial-research", "runs"), "run-001"))
         histories = financial_histories(persistence)
 
         assert_replay_rejected_without_mutation(controller, persistence, stored_record, histories)
@@ -566,7 +813,7 @@ def test_malformed_stored_outcome_is_sanitized_without_replay_mutation(tmp_path)
         record["recommendation"] = {"private_validation_detail": "secret schema path"}
         record["terminal_record_sha256"] = terminal_record_hash(record)
         persistence.store.put(("financial-research", "runs"), "run-001", record)
-        stored_record = dict(controller.inspect("run-001"))
+        stored_record = dict(persistence.store.get(("financial-research", "runs"), "run-001"))
         histories = financial_histories(persistence)
 
         assert_replay_rejected_without_mutation(controller, persistence, stored_record, histories)
@@ -588,7 +835,7 @@ def test_invalid_terminal_hash_is_rejected_without_replay_mutation(tmp_path, has
         else:
             record["terminal_record_sha256"] = "0" * 64
         persistence.store.put(("financial-research", "runs"), "run-001", record)
-        stored_record = dict(controller.inspect("run-001"))
+        stored_record = dict(persistence.store.get(("financial-research", "runs"), "run-001"))
         histories = financial_histories(persistence)
 
         assert_replay_rejected_without_mutation(controller, persistence, stored_record, histories)
@@ -617,7 +864,7 @@ def test_rehashed_incoherent_terminal_outcome_is_rejected(tmp_path, outcome_fiel
         record["recommendation"] = recommendation
         record["terminal_record_sha256"] = terminal_record_hash(record)
         persistence.store.put(("financial-research", "runs"), "run-001", record)
-        stored_record = dict(controller.inspect("run-001"))
+        stored_record = dict(persistence.store.get(("financial-research", "runs"), "run-001"))
         histories = financial_histories(persistence)
 
         assert_replay_rejected_without_mutation(controller, persistence, stored_record, histories)
@@ -651,7 +898,7 @@ def test_rehashed_tampered_terminal_contract_chain_is_rejected(tmp_path, contrac
         record[contract_name] = contract
         record["terminal_record_sha256"] = terminal_record_hash(record)
         persistence.store.put(("financial-research", "runs"), "run-001", record)
-        stored_record = dict(controller.inspect("run-001"))
+        stored_record = dict(persistence.store.get(("financial-research", "runs"), "run-001"))
         histories = financial_histories(persistence)
 
         assert_replay_rejected_without_mutation(controller, persistence, stored_record, histories)

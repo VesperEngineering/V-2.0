@@ -7,6 +7,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from datetime import date
+from math import isfinite
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
@@ -196,6 +197,12 @@ def _validate_financial_research_options(
             "must not follow --end-date",
             param_hint="--start-date",
         )
+    for value, option in (
+        (observed_metric, "--observed-metric"),
+        (threshold, "--threshold"),
+    ):
+        if value is not None and not isfinite(value):
+            raise typer.BadParameter("must be finite", param_hint=option)
     has_metric = observed_metric is not None
     has_threshold = threshold is not None
     if event_type == "direct-request" and (has_metric or has_threshold):

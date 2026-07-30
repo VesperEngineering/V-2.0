@@ -79,6 +79,7 @@ def market_database(massive_root: Path, *, null_close: bool = False) -> Path:
             "CREATE TABLE sp500_ohlcv "
             "(ticker TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL)"
         )
+        connection.execute("CREATE INDEX sp500_ohlcv_ticker_date_idx ON sp500_ohlcv (ticker, date)")
         connection.executemany(
             "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -252,11 +253,31 @@ def test_executor_reads_market_database_without_mutating_source(tmp_path):
     assert report.non_authority.startswith("Research evidence only")
 
 
+def test_executor_uses_its_advancing_clock_for_generated_output_times(tmp_path):
+    market_database(tmp_path / "massive")
+    generated_times = tuple(NOW + timedelta(minutes=offset) for offset in range(1, 5))
+    clock_values = iter(generated_times)
+    research = LocalFinancialResearchExecutor(
+        massive_root=tmp_path / "massive",
+        derived_root=tmp_path / "derived",
+        evidence=FilesystemEvidenceStore(tmp_path / "evidence"),
+        clock=lambda: next(clock_values),
+    )
+
+    dataset, gap, report = research.execute(*execution_inputs())
+
+    assert dataset.validation_evidence.created_at == generated_times[0]
+    assert dataset.created_at == generated_times[1]
+    assert gap.created_at == generated_times[2]
+    assert report.created_at == generated_times[3]
+
+
 def test_executor_opens_sqlite_read_only_and_binds_request_values(tmp_path, monkeypatch):
     market_database(tmp_path / "massive")
     original_connect = financial_research.sqlite3.connect
     connect_calls = []
     aggregate_calls = []
+    query_plan = []
 
     class RecordingConnection:
         def __init__(self, connection):
@@ -265,6 +286,12 @@ def test_executor_opens_sqlite_read_only_and_binds_request_values(tmp_path, monk
         def execute(self, statement, parameters=()):
             if f'FROM "{financial_research._TABLE_NAME}"' in statement:
                 aggregate_calls.append((statement, parameters))
+                query_plan.extend(
+                    self.connection.execute(
+                        f"EXPLAIN QUERY PLAN {statement}",
+                        parameters,
+                    ).fetchall()
+                )
             return self.connection.execute(statement, parameters)
 
         def close(self):
@@ -284,6 +311,10 @@ def test_executor_opens_sqlite_read_only_and_binds_request_values(tmp_path, monk
     assert "SPY" not in statement
     assert "2026-07-27" not in statement
     assert parameters == ("SPY", "2026-07-27", "2026-07-29")
+    assert any(
+        "USING INDEX sp500_ohlcv_ticker_date_idx (ticker=? AND date>? AND date<?)" in str(row[3])
+        for row in query_plan
+    )
 
 
 def test_executor_rejects_derived_root_inside_repository_or_protected_data(tmp_path):
@@ -352,8 +383,8 @@ def test_executor_rejects_missing_or_malformed_market_database(tmp_path, source_
         executor(tmp_path).execute(*execution_inputs())
 
 
-@pytest.mark.parametrize("invalid_date", ("1999-99-99", "not-a-date", 20260701))
-def test_executor_rejects_invalid_requested_symbol_date_anywhere_in_source(
+@pytest.mark.parametrize("invalid_date", ("2026-07-28T", "2026-07-28 ", "2026-07-28Z"))
+def test_executor_rejects_invalid_requested_symbol_date_in_candidate_window(
     tmp_path,
     invalid_date,
 ):
@@ -370,18 +401,21 @@ def test_executor_rejects_invalid_requested_symbol_date_anywhere_in_source(
     assert not (tmp_path / "derived").exists()
 
 
-def test_executor_rejects_python_invalid_year_zero_date_for_requested_symbol(tmp_path):
+@pytest.mark.parametrize("outside_date", ("1999-99-99", "not-a-date", "0000-01-01", 20260701))
+def test_executor_ignores_malformed_dates_outside_the_requested_candidate_window(
+    tmp_path,
+    outside_date,
+):
     database = market_database(tmp_path / "massive")
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("SPY", "0000-01-01", 1.0, 1.0, 1.0, 1.0, 1.0),
+            ("SPY", outside_date, 1.0, 1.0, 1.0, 1.0, 1.0),
         )
 
-    with pytest.raises(FinancialResearchError, match="invalid dates"):
-        executor(tmp_path).execute(*execution_inputs())
+    dataset, _, _ = executor(tmp_path).execute(*execution_inputs())
 
-    assert not (tmp_path / "derived").exists()
+    assert dataset.row_count == 3
 
 
 def test_executor_ignores_invalid_dates_for_unrequested_symbols(tmp_path):

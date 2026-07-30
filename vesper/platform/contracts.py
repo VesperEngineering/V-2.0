@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from enum import StrEnum
+from math import isfinite
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Literal
 
@@ -209,6 +210,11 @@ class FinancialEventEnvelope(FinancialResearchContract):
             or start > end
         ):
             raise ValueError("requested dates must be ordered ISO YYYY-MM-DD bounds")
+        if any(
+            value is not None and not isfinite(value)
+            for value in (self.observed_metric, self.threshold)
+        ):
+            raise ValueError("financial research metrics must be finite")
         has_metrics = self.observed_metric is not None and self.threshold is not None
         if self.event_type is FinancialEventType.WEAK_MODEL_RESULT and not has_metrics:
             raise ValueError("weak model results require metrics")

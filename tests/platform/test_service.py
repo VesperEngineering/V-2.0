@@ -106,6 +106,15 @@ def create_research_data_fixture(root: Path) -> Path:
     return research_data
 
 
+def filesystem_snapshot(root: Path):
+    if not root.exists():
+        return None
+    return {
+        path.relative_to(root).as_posix(): (None if path.is_dir() else path.read_bytes())
+        for path in sorted(root.rglob("*"))
+    }
+
+
 def test_service_syncs_searches_and_reports_repository_knowledge(tmp_path, monkeypatch):
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -455,6 +464,100 @@ def test_service_runs_direct_financial_research_below_platform_root(tmp_path):
     assert (platform.paths.root / "derived").is_dir()
 
 
+def test_financial_status_uses_only_the_read_only_terminal_store(tmp_path, monkeypatch):
+    research_data = create_research_data_fixture(tmp_path)
+    identifiers = iter(("run-financial-001", "task-financial-001", "event-financial-001"))
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    platform.start_financial_research(
+        "direct-request",
+        "Check coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        None,
+        None,
+    )
+    before = filesystem_snapshot(platform.paths.root)
+
+    def writable_path_used(*_args, **_kwargs):
+        raise AssertionError("status must not construct writable persistence or an executor")
+
+    monkeypatch.setattr("vesper.platform.service.open_persistence", writable_path_used)
+    monkeypatch.setattr(platform, "_financial_research_controller", writable_path_used)
+
+    inspected = platform.inspect_financial_research("run-financial-001")
+
+    assert inspected["status"] == "completed"
+    assert filesystem_snapshot(platform.paths.root) == before
+
+
+@pytest.mark.parametrize("missing_state", ("root", "store", "malformed"))
+def test_financial_status_missing_state_is_generic_and_does_not_mutate_disk(
+    tmp_path,
+    missing_state,
+):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    if missing_state == "store":
+        paths.root.mkdir(parents=True)
+        (paths.root / "sentinel.txt").write_text("unchanged\n", encoding="utf-8")
+    elif missing_state == "malformed":
+        paths.root.mkdir(parents=True)
+        paths.store_db.write_bytes(b"private malformed sqlite database")
+    before = filesystem_snapshot(paths.root)
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+    )
+
+    with pytest.raises(
+        SpecialistRuntimeUnavailable,
+        match="financial research run is unavailable",
+    ):
+        platform.inspect_financial_research("missing-run")
+
+    assert filesystem_snapshot(paths.root) == before
+
+
+def test_financial_status_sanitizes_corrupt_terminal_state(tmp_path):
+    research_data = create_research_data_fixture(tmp_path)
+    paths = PlatformPaths.below(tmp_path / "platform")
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=iter(
+            ("run-financial-001", "task-financial-001", "event-financial-001")
+        ).__next__,
+    )
+    platform.start_financial_research(
+        "direct-request",
+        "Check coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        None,
+        None,
+    )
+    with open_persistence(paths) as persistence:
+        record = dict(persistence.store.get(("financial-research", "runs"), "run-financial-001"))
+        record["private_claim"] = "secret database path"
+        persistence.store.put(("financial-research", "runs"), "run-financial-001", record)
+
+    with pytest.raises(
+        SpecialistRuntimeUnavailable,
+        match="financial research run is unavailable",
+    ) as caught:
+        platform.inspect_financial_research("run-financial-001")
+
+    assert "secret" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
 def test_service_runs_weak_financial_research_only_below_threshold(tmp_path):
     research_data = create_research_data_fixture(tmp_path)
     identifiers = iter(
@@ -506,6 +609,12 @@ def test_service_runs_weak_financial_research_only_below_threshold(tmp_path):
         ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, None),
         ("unsupported", "2026-07-27", "2026-07-27", None, None),
         ("direct-request", "2026-07-28", "2026-07-27", None, None),
+        ("weak-model-result", "2026-07-27", "2026-07-27", float("nan"), 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", float("inf"), 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", float("-inf"), 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, float("nan")),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, float("inf")),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, float("-inf")),
     ),
 )
 def test_service_rejects_invalid_financial_research_before_persistence(
@@ -652,7 +761,15 @@ def test_service_rejects_unsafe_financial_database_paths_before_persistence(
     monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
 
     with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
-        platform.inspect_financial_research("missing-run")
+        platform.start_financial_research(
+            "direct-request",
+            "Reject unsafe persistence",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
 
     assert opened is False
     assert unsafe_path.parent.exists() is False
@@ -684,7 +801,15 @@ def test_service_rejects_overlapping_financial_database_paths_before_persistence
     monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
 
     with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
-        platform.inspect_financial_research("missing-run")
+        platform.start_financial_research(
+            "direct-request",
+            "Reject overlapping persistence",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
 
     assert opened is False
 
@@ -713,7 +838,15 @@ def test_service_rejects_reparse_financial_database_path_before_persistence(
     monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
 
     with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
-        platform.inspect_financial_research("missing-run")
+        platform.start_financial_research(
+            "direct-request",
+            "Reject reparse persistence",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
 
     assert opened is False
 

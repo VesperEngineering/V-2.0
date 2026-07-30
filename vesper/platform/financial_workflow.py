@@ -35,6 +35,12 @@ from langgraph.graph import END, START, StateGraph  # noqa: E402
 FINANCIAL_RESEARCH_RUN_NAMESPACE = ("financial-research", "runs")
 _GENERIC_FAILURE_REASON = "Financial research workflow failed."
 _TERMINAL_HASH_FIELD = "terminal_record_sha256"
+_GENERIC_FAILURE_FIELDS = {
+    "run_id",
+    "status",
+    "failure_reason",
+    "event_fingerprint",
+}
 
 
 class FinancialResearchWorkflowError(RuntimeError):
@@ -112,12 +118,18 @@ def _stored_outcome(
             raise ValueError("invalid terminal record hash")
         if record.get("run_id") != event.run_id:
             raise ValueError("invalid terminal record authority")
+        stored_event = _parse(FinancialEventEnvelope, record["event"])
+        if stored_event != event or record.get("event_fingerprint") != _event_fingerprint(
+            stored_event
+        ):
+            raise ValueError("invalid terminal record event")
         status = record.get("status")
         if status == FinancialResearchStatus.IGNORED.value:
             if set(record) != {
                 "run_id",
                 "status",
                 "reason",
+                "event",
                 "event_fingerprint",
                 "trigger",
                 _TERMINAL_HASH_FIELD,
@@ -138,6 +150,7 @@ def _stored_outcome(
         } or set(record) != {
             "run_id",
             "status",
+            "event",
             "event_fingerprint",
             "trigger",
             "request",
@@ -166,12 +179,45 @@ def _stored_outcome(
         raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
 
 
+def _validated_stored_record(
+    record: Mapping[str, object],
+    run_id: str,
+) -> Mapping[str, object]:
+    try:
+        if _validate_generic_failure_record(record, run_id):
+            return record
+        event = _parse(FinancialEventEnvelope, record["event"])
+        if event.run_id != run_id:
+            raise ValueError("invalid terminal record authority")
+        _stored_outcome(record, event)
+        return record
+    except FinancialResearchWorkflowError:
+        raise
+    except Exception:
+        raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
+
+
+def _validate_generic_failure_record(record: Mapping[str, object], run_id: str) -> bool:
+    if set(record) != _GENERIC_FAILURE_FIELDS:
+        return False
+    fingerprint = record["event_fingerprint"]
+    if (
+        record["run_id"] != run_id
+        or record["status"] != FinancialResearchStatus.STOPPED.value
+        or record["failure_reason"] != _GENERIC_FAILURE_REASON
+        or not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+        raise ValueError("invalid generic failure record")
+    return True
+
+
 def _authority(model) -> tuple[object, ...]:
     return (
         model.run_id,
         model.task_id,
         model.repository_revision,
-        model.created_at,
         model.event_id,
     )
 
@@ -337,11 +383,22 @@ class FinancialResearchController:
         event: FinancialEventEnvelope,
     ) -> FinancialRecommendation | FinancialTriggerDecision:
         fingerprint = _event_fingerprint(event)
-        existing = self.store.get(FINANCIAL_RESEARCH_RUN_NAMESPACE, event.run_id)
+        try:
+            existing = self.store.get(FINANCIAL_RESEARCH_RUN_NAMESPACE, event.run_id)
+        except Exception:
+            raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
         if existing is not None:
             if existing.get("event_fingerprint") == fingerprint:
-                return _stored_outcome(existing, event)
-            raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
+                try:
+                    if _validate_generic_failure_record(existing, event.run_id):
+                        self.graph.checkpointer.delete_thread(_financial_thread_id(event.run_id))
+                        self.store.delete(FINANCIAL_RESEARCH_RUN_NAMESPACE, event.run_id)
+                    else:
+                        return _stored_outcome(existing, event)
+                except Exception:
+                    raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
+            else:
+                raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
         initial: FinancialResearchRuntimeState = {
             "event": _dump(event),
             "status": FinancialResearchStatus.REQUESTED.value,
@@ -354,34 +411,38 @@ class FinancialResearchController:
         }
         try:
             result = self.graph.invoke(initial, self._config(event.run_id))
-        except Exception:
-            try:
-                self.graph.checkpointer.delete_thread(_financial_thread_id(event.run_id))
-            except Exception:
-                pass
-            try:
+            if result["status"] == FinancialResearchStatus.IGNORED.value:
+                decision = _parse(FinancialTriggerDecision, result["trigger"])
+                record = _accepted_terminal_record(
+                    {
+                        "run_id": event.run_id,
+                        "status": FinancialResearchStatus.IGNORED.value,
+                        "reason": "Event did not trigger bounded financial research.",
+                        "event": _dump(event),
+                        "event_fingerprint": fingerprint,
+                        "trigger": result["trigger"],
+                    }
+                )
                 self.store.put(
                     FINANCIAL_RESEARCH_RUN_NAMESPACE,
                     event.run_id,
-                    {
-                        "run_id": event.run_id,
-                        "status": FinancialResearchStatus.STOPPED.value,
-                        "failure_reason": _GENERIC_FAILURE_REASON,
-                        "event_fingerprint": fingerprint,
-                    },
+                    record,
                 )
-            except Exception:
-                pass
-            raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
-        if result["status"] == FinancialResearchStatus.IGNORED.value:
-            decision = _parse(FinancialTriggerDecision, result["trigger"])
+                return decision
+
+            recommendation = _parse(FinancialRecommendation, result["recommendation"])
             record = _accepted_terminal_record(
                 {
                     "run_id": event.run_id,
-                    "status": FinancialResearchStatus.IGNORED.value,
-                    "reason": "Event did not trigger bounded financial research.",
+                    "status": result["status"],
+                    "event": _dump(event),
                     "event_fingerprint": fingerprint,
                     "trigger": result["trigger"],
+                    "request": result["request"],
+                    "plan": result["plan"],
+                    "dataset": result["dataset"],
+                    "assessment": result["assessment"],
+                    "recommendation": result["recommendation"],
                 }
             )
             self.store.put(
@@ -389,34 +450,46 @@ class FinancialResearchController:
                 event.run_id,
                 record,
             )
-            return decision
-
-        recommendation = _parse(FinancialRecommendation, result["recommendation"])
-        record = _accepted_terminal_record(
-            {
-                "run_id": event.run_id,
-                "status": result["status"],
-                "event_fingerprint": fingerprint,
-                "trigger": result["trigger"],
-                "request": result["request"],
-                "plan": result["plan"],
-                "dataset": result["dataset"],
-                "assessment": result["assessment"],
-                "recommendation": result["recommendation"],
-            }
-        )
-        self.store.put(
-            FINANCIAL_RESEARCH_RUN_NAMESPACE,
-            event.run_id,
-            record,
-        )
-        return recommendation
+            return recommendation
+        except Exception:
+            self._record_generic_failure(event, fingerprint)
+            raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
 
     def inspect(self, run_id: str) -> Mapping[str, object]:
-        record = self.store.get(FINANCIAL_RESEARCH_RUN_NAMESPACE, run_id)
+        try:
+            record = self.store.get(FINANCIAL_RESEARCH_RUN_NAMESPACE, run_id)
+        except Exception:
+            raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
         if record is None:
             raise KeyError(f"financial research run not found: {run_id}")
-        return record
+        return _validated_stored_record(record, run_id)
+
+    def _record_generic_failure(
+        self,
+        event: FinancialEventEnvelope,
+        fingerprint: str,
+    ) -> None:
+        try:
+            self.graph.checkpointer.delete_thread(_financial_thread_id(event.run_id))
+        except Exception:
+            pass
+        try:
+            self.store.delete(FINANCIAL_RESEARCH_RUN_NAMESPACE, event.run_id)
+        except Exception:
+            pass
+        try:
+            self.store.put(
+                FINANCIAL_RESEARCH_RUN_NAMESPACE,
+                event.run_id,
+                {
+                    "run_id": event.run_id,
+                    "status": FinancialResearchStatus.STOPPED.value,
+                    "failure_reason": _GENERIC_FAILURE_REASON,
+                    "event_fingerprint": fingerprint,
+                },
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _config(run_id: str) -> dict[str, dict[str, str]]:

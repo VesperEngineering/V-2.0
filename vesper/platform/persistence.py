@@ -143,3 +143,21 @@ def open_persistence(paths: PlatformPaths) -> Iterator[PlatformPersistence]:
         yield persistence
     finally:
         persistence.close()
+
+
+@contextmanager
+def open_store_read_only(paths: PlatformPaths) -> Iterator[LangGraphStoreAdapter]:
+    store_path = paths.store_db.resolve(strict=True)
+    connection = sqlite3.connect(
+        f"{store_path.as_uri()}?mode=ro",
+        uri=True,
+        check_same_thread=False,
+    )
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA trusted_schema = OFF")
+        langgraph_store = SqliteStore(connection)
+        langgraph_store.is_setup = True
+        yield LangGraphStoreAdapter(langgraph_store)
+    finally:
+        connection.close()
