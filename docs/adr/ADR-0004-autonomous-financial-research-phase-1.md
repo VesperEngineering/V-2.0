@@ -26,7 +26,10 @@ Massive coverage and summarize it. The executor opens
 and writes canonical JSON only below the controller's separate derived and
 evidence roots. Dataset receipts bind source, plan, transform, cache, authority,
 lineage, and validation-evidence hashes. Terminal records are integrity-bound;
-same-event replay is idempotent and mismatched replay fails closed.
+same-event replay returns only integrity-valid accepted terminal outcomes.
+Generic workflow-failure records remain inspectable, but their replay fails
+generically and never returns an accepted outcome. Mismatched replay fails
+closed.
 
 Expose only `financial-research-start` and `financial-research-status`. Every
 CLI start creates a new run; status is read-only. Failures expose generic

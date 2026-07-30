@@ -146,10 +146,14 @@ fair comparison uses the same symbols and date window. Different `run_id` and
 
 Each CLI `financial-research-start` call creates a new controller-owned run; it
 is not a cross-invocation deduplication command. Within one run, replay of the
-same event fingerprint returns the existing terminal outcome. A different event
-under the same run ID fails closed. Derived and evidence files are immutable:
-an exact same-byte replay is accepted idempotently, while conflicting bytes at
-an existing path are rejected. Status inspection is read-only and repeatable.
+same event fingerprint returns an existing outcome only when its accepted
+terminal record is integrity-valid: `completed`, `ignored`, or an accepted
+`stopped` recommendation. A generic workflow-failure record remains inspectable
+through status, but replay fails with the generic workflow message; it never
+fabricates or returns an accepted outcome. A different event under the same run
+ID also fails closed. Derived and evidence files are immutable: an exact
+same-byte output write is accepted idempotently, while conflicting bytes at an
+existing path are rejected. Status inspection is read-only and repeatable.
 
 ## Verification and review gate
 
