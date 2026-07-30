@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from vesper.platform.cli import CliConfig, build_app
+from vesper.platform.service import SpecialistRuntimeUnavailable
 
 
 @dataclass
@@ -407,6 +408,32 @@ def test_cli_exposes_only_start_and_status_for_phase_one(cli):
             "--end-date",
             "2026-01-31",
         ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "direct-request",
+            "--objective",
+            "   ",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+        ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "direct-request",
+            "--objective",
+            "Check blank symbol",
+            "--symbol",
+            "   ",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+        ),
     ),
 )
 def test_cli_rejects_invalid_financial_research_before_service(cli, arguments):
@@ -417,6 +444,30 @@ def test_cli_rejects_invalid_financial_research_before_service(cli, arguments):
     assert result.exit_code == 2
     assert service.calls == []
     assert configs == []
+
+
+def test_cli_reports_unknown_financial_research_run_without_raw_detail():
+    raw_detail = "secret missing-run lookup detail"
+    constructed = False
+
+    class MissingRunService(FakeService):
+        def inspect_financial_research(self, run_id):
+            raise SpecialistRuntimeUnavailable("financial research run is unavailable") from None
+
+    def factory(_config):
+        nonlocal constructed
+        constructed = True
+        return MissingRunService()
+
+    result = CliRunner().invoke(
+        build_app(service_factory=factory),
+        ["financial-research-status", raw_detail],
+    )
+
+    assert result.exit_code == 4
+    assert "platform unavailable: financial research run is unavailable" in result.output
+    assert raw_detail not in result.output
+    assert constructed is True
 
 
 @pytest.mark.parametrize(

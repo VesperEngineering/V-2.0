@@ -393,6 +393,8 @@ class LocalPlatformService:
         try:
             with open_persistence(self.paths) as persistence:
                 return dict(self._financial_research_controller(persistence).inspect(run_id))
+        except KeyError:
+            raise SpecialistRuntimeUnavailable("financial research run is unavailable") from None
         except FinancialResearchError as exc:
             raise SpecialistRuntimeUnavailable(str(exc)) from exc
 
@@ -833,8 +835,17 @@ class LocalPlatformService:
 
     def _validate_financial_research_roots(self) -> None:
         repository_root = Path(__file__).resolve().parents[2]
+        platform_root = self.paths.root.resolve()
         derived_root = (self.paths.root / "derived").resolve()
         evidence_root = self.paths.evidence_root.resolve()
+        database_paths = tuple(
+            path.resolve()
+            for path in (
+                self.paths.checkpoint_db,
+                self.paths.store_db,
+                self.paths.knowledge_index_db,
+            )
+        )
         protected_roots = (
             repository_root,
             (repository_root / "vesper" / "data" / "massive").resolve(),
@@ -842,32 +853,63 @@ class LocalPlatformService:
             self._research_data_root,
         )
         if (
-            self._has_reparse_component(self.paths.root / "derived")
-            or self._has_reparse_component(self.paths.evidence_root)
+            any(
+                self._has_reparse_component(candidate)
+                for candidate in (
+                    self.paths.root / "derived",
+                    self.paths.evidence_root,
+                    self.paths.checkpoint_db,
+                    self.paths.store_db,
+                    self.paths.knowledge_index_db,
+                )
+            )
             or any(
                 self._paths_overlap(candidate, protected)
                 for candidate in (derived_root, evidence_root)
                 for protected in protected_roots
             )
             or self._paths_overlap(derived_root, evidence_root)
+            or any(
+                not database_path.is_relative_to(platform_root) for database_path in database_paths
+            )
+            or any(
+                self._paths_overlap(database_path, protected)
+                for database_path in database_paths
+                for protected in protected_roots
+            )
+            or any(
+                self._paths_overlap(database_path, output_root)
+                for database_path in database_paths
+                for output_root in (derived_root, evidence_root)
+            )
+            or any(
+                self._paths_overlap(left, right)
+                for index, left in enumerate(database_paths)
+                for right in database_paths[index + 1 :]
+            )
         ):
             raise SpecialistRuntimeUnavailable(
-                "financial research derived and evidence roots must be separate safe locations "
+                "financial research persistence locations must be separate safe locations "
                 "outside the repository and protected data"
             )
 
     @staticmethod
     def _financial_repository_revision() -> str:
         repository_root = Path(__file__).resolve().parents[2]
-        completed = subprocess.run(
-            ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise SpecialistRuntimeUnavailable(
+                "financial research repository revision is unavailable"
+            ) from None
         revision = completed.stdout.strip()
         if completed.returncode != 0 or not revision:
             raise SpecialistRuntimeUnavailable(

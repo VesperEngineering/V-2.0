@@ -173,6 +173,8 @@ def _iso_date(value: str, option: str) -> str:
 
 def _validate_financial_research_options(
     event_type: str,
+    objective: str,
+    symbols: list[str],
     start_date: str,
     end_date: str,
     observed_metric: float | None,
@@ -183,6 +185,10 @@ def _validate_financial_research_options(
             "must be direct-request or weak-model-result",
             param_hint="--event-type",
         )
+    if not objective.strip():
+        raise typer.BadParameter("must not be blank", param_hint="--objective")
+    if not symbols or any(not symbol.strip() for symbol in symbols):
+        raise typer.BadParameter("must not be blank", param_hint="--symbol")
     start = _iso_date(start_date, "--start-date")
     end = _iso_date(end_date, "--end-date")
     if start > end:
@@ -320,6 +326,8 @@ def build_app(
         """Start bounded Phase 1 financial research."""
         start, end = _validate_financial_research_options(
             event_type,
+            objective,
+            symbols,
             start_date,
             end_date,
             observed_metric,
