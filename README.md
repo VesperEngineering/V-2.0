@@ -24,6 +24,8 @@ are not needed for setup or verification.
 | Purpose | Command | Operational boundary |
 | --- | --- | --- |
 | Native platform CLI help | `uv run --locked vesper-agent --help` | Side-effect-free help; it does not open persistence, initialize a specialist, load credentials, or import trading/provider/UI runtime modules. |
+| Phase 1 financial research | `uv run --locked vesper-agent financial-research-start --help` | Starts bounded, local, analysis-only coverage research from a direct request or weak model result. It cannot train or promote a model, retrieve web content, schedule work, or trade. |
+| Phase 1 financial-research status | `uv run --locked vesper-agent financial-research-status --help` | Inspects one persisted research run without starting another run. |
 | Paper launcher help | `uv run --locked python scripts/run_paper.py --help` | Safe inspection only; does not initialize Tk, load credentials, connect to a broker or data provider, or execute trading logic. |
 | Paper trading | `uv run --locked python scripts/run_paper.py` | Operational command: loads credentials and starts the configured paper-trading engine. Do not use as a health check. |
 | Dashboard | `uv run --locked python scripts/dashboard.py` | Opens the local Tk dashboard. It has no command-line help mode. |
@@ -34,10 +36,10 @@ are not needed for setup or verification.
 | Universe builder | `uv run --locked python scripts/build_universe.py` | Operational command with network and configuration-write side effects; it has no help mode. |
 
 The native platform command tree currently exposes `create`, `status`,
-`resume`, `receipts`, `evidence`, `approvals`, `active`, `approve`, `reject`,
-`cancel`, `knowledge-sync`, `knowledge-search`, `knowledge-status`,
-`knowledge-observe`, `knowledge-compaction-plan`, and
-`knowledge-reactivation-plan`.
+`financial-research-start`, `financial-research-status`, `resume`, `receipts`,
+`evidence`, `approvals`, `active`, `approve`, `reject`, `cancel`,
+`knowledge-sync`, `knowledge-search`, `knowledge-status`, `knowledge-observe`,
+`knowledge-compaction-plan`, and `knowledge-reactivation-plan`.
 Approval, rejection, and cancellation require explicit arguments.
 Only `create` and a resumed specialist turn may invoke an explicitly selected
 model runtime; no command connects to a trading runtime. See
@@ -87,6 +89,19 @@ are disabled. Opt-in `local_opencode` coverage includes a complete controlled wo
 with `opencode/mimo-v2.5-free` that stopped at persisted human approval. Host turns
 publish active child-process metadata outside the clone and cooperatively terminate on
 an operator cancellation request.
+
+## Autonomous financial research: Phase 1
+
+Phase 1 is a sibling, shadow-only research workflow. It admits only direct
+operator requests and weak model results, reads the configured Massive SQLite
+database without writing to it, and produces immutable controller-owned
+coverage evidence and a recommendation. It has no order, promotion, training,
+web-retrieval, scheduler, deployment, risk, or capital authority.
+
+See the [operator runbook](docs/runbooks/autonomous-financial-research.md) for
+copy/paste commands, paths, status semantics, and the manual comparison
+procedure. [ADR-0004](docs/adr/ADR-0004-autonomous-financial-research-phase-1.md)
+records the Phase 1 boundary.
 
 ## Agent knowledge
 

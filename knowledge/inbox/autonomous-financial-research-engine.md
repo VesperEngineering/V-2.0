@@ -224,3 +224,19 @@ The matching accepted specification is in
 `docs/superpowers/specs/2026-07-29-autonomous-financial-research-engine-design.md`;
 this Obsidian note contains the complete recommendation and decision boundaries.
 
+## Phase 1 implementation evidence
+
+Phase 1 is implemented by commits `2f1436b` through `d357237` on the
+`codex/vesper-autonomous-research-slice` branch. The implemented slice admits
+only `direct-request` and `weak-model-result`, validates one static two-node
+coverage plan, reads Massive SQLite in read-only immutable mode, and persists
+controller-owned derived JSON, validation evidence, and integrity-bound terminal
+state. The operator surface contains only `financial-research-start` and
+`financial-research-status`.
+
+This evidence does not activate the broader behavior proposed above. Phase 1
+has no orders, promotion, training, web retrieval, scheduler activation,
+automatic two-week schedule, or automatic August 12 action. August 12 remains a
+human review gate. Verification is recorded in
+`docs/receipts/autonomous-financial-research-phase-1-receipt.md` and operations
+in `docs/runbooks/autonomous-financial-research.md`.
