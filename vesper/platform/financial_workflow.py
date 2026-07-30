@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from hashlib import sha256
+from hmac import compare_digest
 from typing import Protocol, TypedDict
 
 from .contracts import (
@@ -33,6 +34,7 @@ from langgraph.graph import END, START, StateGraph  # noqa: E402
 
 FINANCIAL_RESEARCH_RUN_NAMESPACE = ("financial-research", "runs")
 _GENERIC_FAILURE_REASON = "Financial research workflow failed."
+_TERMINAL_HASH_FIELD = "terminal_record_sha256"
 
 
 class FinancialResearchWorkflowError(RuntimeError):
@@ -81,16 +83,87 @@ def _event_fingerprint(event: FinancialEventEnvelope) -> str:
     return sha256(canonical).hexdigest()
 
 
+def _terminal_record_hash(record: Mapping[str, object]) -> str:
+    payload = {key: value for key, value in record.items() if key != _TERMINAL_HASH_FIELD}
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(canonical).hexdigest()
+
+
+def _accepted_terminal_record(record: Mapping[str, object]) -> dict[str, object]:
+    accepted = dict(record)
+    accepted[_TERMINAL_HASH_FIELD] = _terminal_record_hash(accepted)
+    return accepted
+
+
 def _stored_outcome(
     record: Mapping[str, object],
+    event: FinancialEventEnvelope,
 ) -> FinancialRecommendation | FinancialTriggerDecision:
-    recommendation = record.get("recommendation")
-    if recommendation is not None:
-        return _parse(FinancialRecommendation, recommendation)
-    trigger = record.get("trigger")
-    if record.get("status") == FinancialResearchStatus.IGNORED.value and trigger is not None:
-        return _parse(FinancialTriggerDecision, trigger)
-    raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON)
+    try:
+        stored_hash = record.get(_TERMINAL_HASH_FIELD)
+        if not isinstance(stored_hash, str) or not compare_digest(
+            stored_hash, _terminal_record_hash(record)
+        ):
+            raise ValueError("invalid terminal record hash")
+        if record.get("run_id") != event.run_id:
+            raise ValueError("invalid terminal record authority")
+        status = record.get("status")
+        if status == FinancialResearchStatus.IGNORED.value:
+            if set(record) != {
+                "run_id",
+                "status",
+                "reason",
+                "event_fingerprint",
+                "trigger",
+                _TERMINAL_HASH_FIELD,
+            }:
+                raise ValueError("invalid ignored terminal shape")
+            outcome = _parse(FinancialTriggerDecision, record["trigger"])
+            if (
+                outcome.status is not FinancialResearchStatus.IGNORED
+                or outcome.triggered
+                or _authority(outcome) != _authority(event)
+                or outcome.non_authority != event.non_authority
+            ):
+                raise ValueError("invalid ignored terminal outcome")
+            return outcome
+        if status not in {
+            FinancialResearchStatus.COMPLETED.value,
+            FinancialResearchStatus.STOPPED.value,
+        } or set(record) != {
+            "run_id",
+            "status",
+            "event_fingerprint",
+            "trigger",
+            "request",
+            "plan",
+            "dataset",
+            "assessment",
+            "recommendation",
+            _TERMINAL_HASH_FIELD,
+        }:
+            raise ValueError("invalid recommendation terminal shape")
+        outcome = _parse(FinancialRecommendation, record["recommendation"])
+        expected_status = (
+            FinancialResearchStatus.COMPLETED
+            if status == FinancialResearchStatus.COMPLETED.value
+            else FinancialResearchStatus.STOPPED
+        )
+        if (
+            outcome.status is not expected_status
+            or _authority(outcome) != _authority(event)
+            or outcome.non_authority != FINANCIAL_RESEARCH_NON_AUTHORITY
+        ):
+            raise ValueError("invalid recommendation terminal outcome")
+        _validate_stored_terminal_chain(record, event, status, outcome)
+        return outcome
+    except Exception:
+        raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
 
 
 def _authority(model) -> tuple[object, ...]:
@@ -101,6 +174,49 @@ def _authority(model) -> tuple[object, ...]:
         model.created_at,
         model.event_id,
     )
+
+
+def _validate_stored_terminal_chain(
+    record: Mapping[str, object],
+    event: FinancialEventEnvelope,
+    status: object,
+    recommendation: FinancialRecommendation,
+) -> None:
+    trigger = _parse(FinancialTriggerDecision, record["trigger"])
+    request = _parse(FinancialResearchRequest, record["request"])
+    plan = _parse(FinancialAnalysisPlan, record["plan"])
+    dataset = _parse(DerivedDatasetReceipt, record["dataset"])
+    assessment = _parse(FinancialGapAssessment, record["assessment"])
+    expected = _authority(event)
+    if any(
+        _authority(output) != expected
+        for output in (trigger, request, plan, dataset, assessment, recommendation)
+    ):
+        raise ValueError("invalid terminal chain authority")
+    if any(
+        output.non_authority != event.non_authority for output in (trigger, request, plan)
+    ) or any(
+        output.non_authority != FINANCIAL_RESEARCH_NON_AUTHORITY
+        for output in (dataset, assessment, recommendation)
+    ):
+        raise ValueError("invalid terminal chain non-authority")
+    if (
+        not trigger.triggered
+        or trigger.status is not FinancialResearchStatus.REQUESTED
+        or request.status is not FinancialResearchStatus.REQUESTED
+        or plan.status is not FinancialResearchStatus.PLANNED
+    ):
+        raise ValueError("invalid terminal chain state")
+    if status == FinancialResearchStatus.COMPLETED.value:
+        coherent = assessment.status is FinancialResearchStatus.COMPLETE
+    else:
+        coherent = assessment.status in {
+            FinancialResearchStatus.NEEDS_RESEARCH,
+            FinancialResearchStatus.NEEDS_ANALYSIS,
+            FinancialResearchStatus.STOPPED,
+        }
+    if not coherent:
+        raise ValueError("invalid terminal chain assessment")
 
 
 def _validate_executor_outputs(
@@ -224,7 +340,7 @@ class FinancialResearchController:
         existing = self.store.get(FINANCIAL_RESEARCH_RUN_NAMESPACE, event.run_id)
         if existing is not None:
             if existing.get("event_fingerprint") == fingerprint:
-                return _stored_outcome(existing)
+                return _stored_outcome(existing, event)
             raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
         initial: FinancialResearchRuntimeState = {
             "event": _dump(event),
@@ -259,23 +375,24 @@ class FinancialResearchController:
             raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
         if result["status"] == FinancialResearchStatus.IGNORED.value:
             decision = _parse(FinancialTriggerDecision, result["trigger"])
-            self.store.put(
-                FINANCIAL_RESEARCH_RUN_NAMESPACE,
-                event.run_id,
+            record = _accepted_terminal_record(
                 {
                     "run_id": event.run_id,
                     "status": FinancialResearchStatus.IGNORED.value,
                     "reason": "Event did not trigger bounded financial research.",
                     "event_fingerprint": fingerprint,
                     "trigger": result["trigger"],
-                },
+                }
+            )
+            self.store.put(
+                FINANCIAL_RESEARCH_RUN_NAMESPACE,
+                event.run_id,
+                record,
             )
             return decision
 
         recommendation = _parse(FinancialRecommendation, result["recommendation"])
-        self.store.put(
-            FINANCIAL_RESEARCH_RUN_NAMESPACE,
-            event.run_id,
+        record = _accepted_terminal_record(
             {
                 "run_id": event.run_id,
                 "status": result["status"],
@@ -286,7 +403,12 @@ class FinancialResearchController:
                 "dataset": result["dataset"],
                 "assessment": result["assessment"],
                 "recommendation": result["recommendation"],
-            },
+            }
+        )
+        self.store.put(
+            FINANCIAL_RESEARCH_RUN_NAMESPACE,
+            event.run_id,
+            record,
         )
         return recommendation
 
