@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +19,8 @@ from pydantic import ValidationError
 from .composition import NativeSpecialistComposition
 from .contracts import (
     ApprovalDecision,
+    FinancialEventEnvelope,
+    FinancialEventType,
     HumanApprovalDecision,
     HumanApprovalRequest,
     KnowledgeKind,
@@ -28,6 +32,15 @@ from .contracts import (
     TaskRequest,
 )
 from .control import RuntimeControl
+from .financial_research import (
+    FINANCIAL_RESEARCH_NON_AUTHORITY,
+    FinancialResearchError,
+    LocalFinancialResearchExecutor,
+)
+from .financial_workflow import (
+    FinancialResearchController,
+    build_financial_research_workflow,
+)
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .knowledge import ObsidianKnowledgeService
@@ -347,6 +360,41 @@ class LocalPlatformService:
         with open_persistence(self.paths) as persistence:
             view = self._controller(persistence).inspect(run_id)
         return self._view_payload(view)
+
+    def start_financial_research(
+        self,
+        event_type: str,
+        objective: str,
+        symbols: tuple[str, ...],
+        start_date: str,
+        end_date: str,
+        observed_metric: float | None,
+        threshold: float | None,
+    ) -> dict[str, object]:
+        event = self._financial_research_event(
+            event_type,
+            objective,
+            symbols,
+            start_date,
+            end_date,
+            observed_metric,
+            threshold,
+        )
+        self._validate_financial_research_roots()
+        try:
+            with open_persistence(self.paths) as persistence:
+                outcome = self._financial_research_controller(persistence).start(event)
+        except FinancialResearchError as exc:
+            raise SpecialistRuntimeUnavailable(str(exc)) from exc
+        return outcome.model_dump(mode="json")
+
+    def inspect_financial_research(self, run_id: str) -> dict[str, object]:
+        self._validate_financial_research_roots()
+        try:
+            with open_persistence(self.paths) as persistence:
+                return dict(self._financial_research_controller(persistence).inspect(run_id))
+        except FinancialResearchError as exc:
+            raise SpecialistRuntimeUnavailable(str(exc)) from exc
 
     def resume_run(self, run_id: str) -> dict[str, object]:
         with open_persistence(self.paths) as persistence:
@@ -706,6 +754,148 @@ class LocalPlatformService:
             clock=self._clock,
         )
         return WorkflowController(graph=graph, store=persistence.store, clock=self._clock)
+
+    def _financial_research_controller(
+        self,
+        persistence: PlatformPersistence,
+    ) -> FinancialResearchController:
+        executor = LocalFinancialResearchExecutor(
+            massive_root=self._research_data_root,
+            derived_root=self.paths.root / "derived",
+            evidence=persistence.evidence,
+            clock=self._clock,
+        )
+        graph = build_financial_research_workflow(
+            checkpointer=persistence.checkpointer,
+            store=persistence.langgraph_store,
+            executor=executor,
+        )
+        return FinancialResearchController(graph=graph, store=persistence.store)
+
+    def _financial_research_event(
+        self,
+        event_type: str,
+        objective: str,
+        symbols: tuple[str, ...],
+        start_date: str,
+        end_date: str,
+        observed_metric: float | None,
+        threshold: float | None,
+    ) -> FinancialEventEnvelope:
+        try:
+            event_kind = FinancialEventType(event_type)
+            payload = {
+                "event_type": event_kind.value,
+                "objective": objective,
+                "symbols": symbols,
+                "start_date": start_date,
+                "end_date": end_date,
+                "observed_metric": observed_metric,
+                "threshold": threshold,
+            }
+            payload_sha256 = sha256(
+                json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            now = self._clock()
+            return FinancialEventEnvelope(
+                run_id=self._id_factory(),
+                task_id=self._id_factory(),
+                repository_revision=self._financial_repository_revision(),
+                created_at=now,
+                event_id=self._id_factory(),
+                non_authority=FINANCIAL_RESEARCH_NON_AUTHORITY,
+                event_type=event_kind,
+                occurred_at=now,
+                observed_at=now,
+                requested_start_date=start_date,
+                requested_end_date=end_date,
+                symbols=symbols,
+                origin=(
+                    "operator"
+                    if event_kind is FinancialEventType.DIRECT_REQUEST
+                    else "model-evaluation"
+                ),
+                deduplication_key=payload_sha256,
+                payload_sha256=payload_sha256,
+                summary=objective,
+                observed_metric=observed_metric,
+                threshold=threshold,
+            )
+        except (ValidationError, ValueError) as exc:
+            raise SpecialistRuntimeUnavailable(
+                f"invalid financial research request: {exc}"
+            ) from exc
+
+    def _validate_financial_research_roots(self) -> None:
+        repository_root = Path(__file__).resolve().parents[2]
+        derived_root = (self.paths.root / "derived").resolve()
+        evidence_root = self.paths.evidence_root.resolve()
+        protected_roots = (
+            repository_root,
+            (repository_root / "vesper" / "data" / "massive").resolve(),
+            (repository_root / "vesper" / "data" / "model_research").resolve(),
+            self._research_data_root,
+        )
+        if (
+            self._has_reparse_component(self.paths.root / "derived")
+            or self._has_reparse_component(self.paths.evidence_root)
+            or any(
+                self._paths_overlap(candidate, protected)
+                for candidate in (derived_root, evidence_root)
+                for protected in protected_roots
+            )
+            or self._paths_overlap(derived_root, evidence_root)
+        ):
+            raise SpecialistRuntimeUnavailable(
+                "financial research derived and evidence roots must be separate safe locations "
+                "outside the repository and protected data"
+            )
+
+    @staticmethod
+    def _financial_repository_revision() -> str:
+        repository_root = Path(__file__).resolve().parents[2]
+        completed = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+        revision = completed.stdout.strip()
+        if completed.returncode != 0 or not revision:
+            raise SpecialistRuntimeUnavailable(
+                "financial research repository revision is unavailable"
+            )
+        return revision
+
+    @staticmethod
+    def _paths_overlap(left: Path, right: Path) -> bool:
+        return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+    @staticmethod
+    def _has_reparse_component(path: Path) -> bool:
+        absolute = path.absolute()
+        current = Path(absolute.anchor)
+        try:
+            for part in absolute.parts[1:]:
+                current = current / part
+                if not (current.exists() or current.is_symlink()):
+                    continue
+                metadata = current.lstat()
+                attributes = getattr(metadata, "st_file_attributes", 0)
+                reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                if stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag):
+                    return True
+        except OSError:
+            return True
+        return False
 
     def _controller_for_run(
         self,

@@ -427,6 +427,187 @@ def service(tmp_path, ids):
     )
 
 
+def test_service_runs_direct_financial_research_below_platform_root(tmp_path):
+    research_data = create_research_data_fixture(tmp_path)
+    identifiers = iter(("run-financial-001", "task-financial-001", "event-financial-001"))
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+
+    result = platform.start_financial_research(
+        "direct-request",
+        "Check coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        None,
+        None,
+    )
+    inspected = platform.inspect_financial_research("run-financial-001")
+
+    assert result["status"] == "completed"
+    assert result["run_id"] == "run-financial-001"
+    assert inspected["request"]["time_window_start"] == "2026-07-27"
+    assert inspected["request"]["time_window_end"] == "2026-07-27"
+    assert (platform.paths.root / "derived").is_dir()
+
+
+def test_service_runs_weak_financial_research_only_below_threshold(tmp_path):
+    research_data = create_research_data_fixture(tmp_path)
+    identifiers = iter(
+        (
+            "run-weak-complete",
+            "task-weak-complete",
+            "event-weak-complete",
+            "run-weak-ignored",
+            "task-weak-ignored",
+            "event-weak-ignored",
+        )
+    )
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+
+    completed = platform.start_financial_research(
+        "weak-model-result",
+        "Check weak coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        0.01,
+        0.03,
+    )
+    ignored = platform.start_financial_research(
+        "weak-model-result",
+        "Do not rerun sufficient result",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        0.03,
+        0.03,
+    )
+
+    assert completed["status"] == "completed"
+    assert ignored["status"] == "ignored"
+    assert platform.inspect_financial_research("run-weak-ignored")["status"] == "ignored"
+
+
+@pytest.mark.parametrize(
+    ("event_type", "start", "end", "metric", "threshold"),
+    (
+        ("direct-request", "2026-07-27", "2026-07-27", 0.01, 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", None, 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, None),
+        ("unsupported", "2026-07-27", "2026-07-27", None, None),
+        ("direct-request", "2026-07-28", "2026-07-27", None, None),
+    ),
+)
+def test_service_rejects_invalid_financial_research_before_persistence(
+    tmp_path,
+    event_type,
+    start,
+    end,
+    metric,
+    threshold,
+):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+        clock=lambda: NOW,
+        id_factory=iter(("run-invalid", "task-invalid", "event-invalid")).__next__,
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="invalid financial research request"):
+        platform.start_financial_research(
+            event_type,
+            "Invalid request",
+            ("SPY",),
+            start,
+            end,
+            metric,
+            threshold,
+        )
+
+    assert not paths.checkpoint_db.exists()
+    assert not paths.store_db.exists()
+
+
+def test_service_rejects_overlapping_financial_roots_before_persistence(tmp_path, monkeypatch):
+    root = tmp_path / "platform"
+    paths = PlatformPaths(
+        root=root,
+        checkpoint_db=root / "checkpoints.sqlite3",
+        store_db=root / "store.sqlite3",
+        knowledge_index_db=root / "knowledge-index.sqlite3",
+        evidence_root=root / "derived",
+    )
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+        clock=lambda: NOW,
+        id_factory=iter(("run-invalid", "task-invalid", "event-invalid")).__next__,
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
+        platform.start_financial_research(
+            "direct-request",
+            "Invalid roots",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert opened is False
+
+
+def test_service_rejects_reparse_financial_roots_before_persistence(tmp_path, monkeypatch):
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=create_research_data_fixture(tmp_path),
+        clock=lambda: NOW,
+        id_factory=iter(("run-invalid", "task-invalid", "event-invalid")).__next__,
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr(platform, "_has_reparse_component", lambda _path: True, raising=False)
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
+        platform.start_financial_research(
+            "direct-request",
+            "Invalid roots",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert opened is False
+
+
 def test_service_create_inspect_approve_and_resume(tmp_path):
     platform = service(tmp_path, ("run-001", "task-001", "approval-001"))
     workspace = tmp_path / "workspace"

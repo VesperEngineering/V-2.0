@@ -43,6 +43,8 @@ def direct_event() -> FinancialEventEnvelope:
         event_type=FinancialEventType.DIRECT_REQUEST,
         occurred_at=NOW - timedelta(days=2),
         observed_at=NOW,
+        requested_start_date="2026-07-27",
+        requested_end_date="2026-07-29",
         symbols=("SPY",),
         origin="operator",
         deduplication_key="direct-request-spy",
@@ -57,6 +59,8 @@ def weak_event(*, observed: float, threshold: float) -> FinancialEventEnvelope:
         event_type=FinancialEventType.WEAK_MODEL_RESULT,
         occurred_at=NOW,
         observed_at=NOW,
+        requested_start_date="2026-07-27",
+        requested_end_date="2026-07-29",
         symbols=("SPY",),
         origin="model-evaluation",
         deduplication_key="weak-result-spy",
@@ -161,6 +165,20 @@ def test_coverage_request_and_plan_have_static_deterministic_order():
         "market-coverage-source",
         "coverage-summary",
     )
+
+
+def test_coverage_request_preserves_explicit_requested_date_bounds():
+    event = direct_event().model_copy(
+        update={
+            "requested_start_date": "2026-07-28",
+            "requested_end_date": "2026-07-29",
+        }
+    )
+
+    request = build_coverage_research_request(event, decide_financial_trigger(event))
+
+    assert request.time_window_start == "2026-07-28"
+    assert request.time_window_end == "2026-07-29"
 
 
 def test_plan_validator_rejects_cycles_before_execution():

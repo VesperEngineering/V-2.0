@@ -181,6 +181,8 @@ class FinancialEventEnvelope(FinancialResearchContract):
     event_type: FinancialEventType
     occurred_at: AwareDatetime
     observed_at: AwareDatetime
+    requested_start_date: NonEmptyStr
+    requested_end_date: NonEmptyStr
     symbols: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
     origin: NonEmptyStr
     deduplication_key: NonEmptyStr
@@ -196,6 +198,17 @@ class FinancialEventEnvelope(FinancialResearchContract):
 
     @model_validator(mode="after")
     def validate_event_metrics(self) -> FinancialEventEnvelope:
+        try:
+            start = date.fromisoformat(self.requested_start_date)
+            end = date.fromisoformat(self.requested_end_date)
+        except ValueError as exc:
+            raise ValueError("requested dates must use ISO YYYY-MM-DD") from exc
+        if (
+            start.isoformat() != self.requested_start_date
+            or end.isoformat() != self.requested_end_date
+            or start > end
+        ):
+            raise ValueError("requested dates must be ordered ISO YYYY-MM-DD bounds")
         has_metrics = self.observed_metric is not None and self.threshold is not None
         if self.event_type is FinancialEventType.WEAK_MODEL_RESULT and not has_metrics:
             raise ValueError("weak model results require metrics")

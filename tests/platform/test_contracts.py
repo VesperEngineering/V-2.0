@@ -170,6 +170,8 @@ def direct_financial_event() -> FinancialEventEnvelope:
         event_type=FinancialEventType.DIRECT_REQUEST,
         occurred_at=NOW,
         observed_at=NOW,
+        requested_start_date="2020-01-01",
+        requested_end_date="2026-07-27",
         symbols=("SPY",),
         origin="operator",
         deduplication_key="direct-request-spy",
@@ -284,6 +286,32 @@ def test_financial_event_variants_require_their_expected_metrics():
     weak_payload["event_type"] = FinancialEventType.WEAK_MODEL_RESULT
     with pytest.raises(ValidationError, match="weak model results require metrics"):
         FinancialEventEnvelope.model_validate(weak_payload)
+
+
+def test_financial_events_require_explicit_requested_date_bounds():
+    payload = direct_financial_event().model_dump()
+    del payload["requested_start_date"]
+    del payload["requested_end_date"]
+
+    with pytest.raises(ValidationError, match="requested_start_date"):
+        FinancialEventEnvelope.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    (
+        ("2026-1-01", "2026-01-31"),
+        ("2026-02-30", "2026-03-01"),
+        ("2026-02-01", "2026-01-31"),
+    ),
+)
+def test_financial_events_require_valid_ordered_iso_date_bounds(start, end):
+    payload = direct_financial_event().model_dump()
+    payload["requested_start_date"] = start
+    payload["requested_end_date"] = end
+
+    with pytest.raises(ValidationError, match="requested date"):
+        FinancialEventEnvelope.model_validate(payload)
 
 
 def test_derived_dataset_requires_complete_reproducibility_receipt():

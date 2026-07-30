@@ -99,9 +99,6 @@ def build_coverage_research_request(
     ):
         raise FinancialResearchError("trigger decision authority does not match the event")
 
-    start, end = sorted(
-        (event.occurred_at.date().isoformat(), event.observed_at.date().isoformat())
-    )
     symbols = ", ".join(event.symbols)
     return FinancialResearchRequest(
         run_id=event.run_id,
@@ -115,8 +112,8 @@ def build_coverage_research_request(
         questions=(f"What local coverage exists for {symbols}?",),
         source_classes=("local-market-data",),
         symbols=event.symbols,
-        time_window_start=start,
-        time_window_end=end,
+        time_window_start=event.requested_start_date,
+        time_window_end=event.requested_end_date,
         sufficiency_criteria=("Coverage dates are known.",),
     )
 
