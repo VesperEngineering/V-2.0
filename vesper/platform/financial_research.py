@@ -495,12 +495,15 @@ def _parse_iso_date(value: str, label: str) -> date:
 
 
 def _canonical_json(payload: object) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8") + b"\n"
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -553,7 +556,9 @@ def _validate_derived_root(configured: Path, massive_root: Path) -> Path:
         raise FinancialResearchError("derived root must not traverse a symlink or reparse point")
     resolved = configured.resolve()
     if any(_paths_overlap(resolved, root) for root in _protected_roots(massive_root)):
-        raise FinancialResearchError("derived root must be outside the repository and protected data")
+        raise FinancialResearchError(
+            "derived root must be outside the repository and protected data"
+        )
     return resolved
 
 
@@ -603,7 +608,9 @@ def _require_valid_evidence_root(
             resolved != root
             or not root.is_dir()
             or _has_reparse_component(root)
-            or any(_paths_overlap(resolved, protected) for protected in _protected_roots(massive_root))
+            or any(
+                _paths_overlap(resolved, protected) for protected in _protected_roots(massive_root)
+            )
             or _paths_overlap(resolved, derived_root)
         ):
             raise FinancialResearchError(
@@ -637,11 +644,7 @@ def _require_current_evidence_store(
 
 def _require_derived_root(root: Path) -> None:
     try:
-        if (
-            not root.is_dir()
-            or _has_reparse_component(root)
-            or root.resolve(strict=True) != root
-        ):
+        if not root.is_dir() or _has_reparse_component(root) or root.resolve(strict=True) != root:
             raise FinancialResearchError("derived root changed or is unsafe")
     except FinancialResearchError:
         raise
@@ -684,7 +687,9 @@ def _reject_sqlite_sidecars(path: Path) -> None:
     except FinancialResearchError:
         raise
     except OSError as exc:
-        raise FinancialResearchError("market database sidecars could not be checked safely") from exc
+        raise FinancialResearchError(
+            "market database sidecars could not be checked safely"
+        ) from exc
 
 
 def _stream_sha256(path: Path, root: Path, expected: _SourceIdentity) -> str:
@@ -711,7 +716,9 @@ def _write_immutable(root: Path, relative_path: str, body: bytes) -> None:
     try:
         path.parent.mkdir(parents=False, exist_ok=True)
     except OSError as exc:
-        raise FinancialResearchError("derived output directory could not be created safely") from exc
+        raise FinancialResearchError(
+            "derived output directory could not be created safely"
+        ) from exc
     _require_derived_root(root)
     if (
         _has_reparse_component(path.parent)
@@ -721,7 +728,9 @@ def _write_immutable(root: Path, relative_path: str, body: bytes) -> None:
         raise FinancialResearchError("derived output path is unsafe")
     if path.exists() or path.is_symlink():
         if path.is_symlink() or not path.is_file() or path.read_bytes() != body:
-            raise FinancialResearchError("immutable derived output already exists with different content")
+            raise FinancialResearchError(
+                "immutable derived output already exists with different content"
+            )
         return
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)

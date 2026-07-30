@@ -101,9 +101,7 @@ def executor(
     return LocalFinancialResearchExecutor(
         massive_root=tmp_path / "massive",
         derived_root=derived_root or tmp_path / "derived",
-        evidence=(
-            FilesystemEvidenceStore(tmp_path / "evidence") if evidence is None else evidence
-        ),
+        evidence=(FilesystemEvidenceStore(tmp_path / "evidence") if evidence is None else evidence),
         clock=lambda: NOW,
     )
 
@@ -231,14 +229,21 @@ def test_plan_validator_rejects_unsupported_operations_and_schemas(kind, output_
 def test_executor_reads_market_database_without_mutating_source(tmp_path):
     database = market_database(tmp_path / "massive")
     before = database.read_bytes()
-    source_files = tuple(sorted(path.relative_to(tmp_path / "massive") for path in (tmp_path / "massive").rglob("*")))
+    source_files = tuple(
+        sorted(path.relative_to(tmp_path / "massive") for path in (tmp_path / "massive").rglob("*"))
+    )
 
     dataset, gap, report = executor(tmp_path).execute(*execution_inputs())
 
     assert database.read_bytes() == before
-    assert tuple(
-        sorted(path.relative_to(tmp_path / "massive") for path in (tmp_path / "massive").rglob("*"))
-    ) == source_files
+    assert (
+        tuple(
+            sorted(
+                path.relative_to(tmp_path / "massive") for path in (tmp_path / "massive").rglob("*")
+            )
+        )
+        == source_files
+    )
     assert dataset.row_count == 3
     assert dataset.ticker_count == 1
     assert dataset.coverage_start == "2026-07-27"
@@ -399,9 +404,7 @@ def test_executor_ignores_invalid_dates_for_unrequested_symbols(tmp_path):
 def test_executor_rejects_invalid_request_dates_before_writing(tmp_path, start, end):
     market_database(tmp_path / "massive")
     event, request, plan = execution_inputs()
-    invalid = request.model_copy(
-        update={"time_window_start": start, "time_window_end": end}
-    )
+    invalid = request.model_copy(update={"time_window_start": start, "time_window_end": end})
 
     with pytest.raises(FinancialResearchError, match="date"):
         executor(tmp_path).execute(event, invalid, plan)

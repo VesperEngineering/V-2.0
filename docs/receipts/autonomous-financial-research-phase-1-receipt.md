@@ -3,9 +3,11 @@
 - Recorded: 2026-07-29
 - Environment: Windows, Python 3.11, `uv run --locked`
 - Phase 1 implementation head: `d3572370812b9924bcc681f37657cdbd75cb7fe4`
+- Final verification pre-receipt tree: `9cf96f8` (`docs(research): clarify
+  replay failure semantics`)
 - Result: behavioral, lint, compile, lock, CLI, documentation, and diff checks
-  passed; the required repository-wide Ruff format check remains open on 42
-  pre-existing Python files
+  passed; the required repository-wide Ruff format check remains open: `40
+  files would be reformatted, 67 files already formatted`.
 
 ## Implemented boundary
 
@@ -71,16 +73,55 @@ Task 6 changes no Python. The failures are pre-existing and include historical
 files outside this phase. They were not bulk-formatted because that would exceed
 the Task 6 documentation-only scope.
 
-The branch-changed Python set was also checked against baseline `6215a50`:
+## Final bounded format repair
+
+The final bounded repair formatted only the two Phase 1 Python files:
 
 ```powershell
-$pythonFiles = @(git diff --name-only 6215a50..HEAD -- '*.py')
+uv run --locked ruff format vesper/platform/financial_research.py tests/platform/test_financial_research.py
+```
+
+Result: exit 0; `2 files reformatted`. Review of Ruff's generated diff
+confirmed line-wrapping and whitespace changes only; no production or test
+semantics changed.
+
+The focused final verification command used a fresh task-owned `C:\tmp`
+directory for `TEMP` and `TMP`, preserving the historical host-default temp ACL
+failure above:
+
+```powershell
+uv run --locked python -m pytest tests/platform/test_financial_research.py tests/platform/test_financial_workflow.py tests/platform/test_contracts.py -q
+```
+
+Result: exit 0; `117 passed in 10.99s`.
+
+```powershell
+uv run --locked ruff check vesper/platform/financial_research.py tests/platform/test_financial_research.py
+uv run --locked ruff format --check vesper/platform/financial_research.py tests/platform/test_financial_research.py
+uv run --locked python -m py_compile vesper/platform/financial_research.py tests/platform/test_financial_research.py
+git diff --check
+```
+
+Results: Ruff lint exit 0 (`All checks passed!`); the two files are already
+formatted; `py_compile` exit 0 with no output; and `git diff --check` exit 0
+with no whitespace errors.
+
+The branch-changed Python set was then checked against baseline `6215a50`:
+
+```powershell
+$pythonFiles = @(git diff --name-only 6215a50 -- '*.py')
 uv run --locked ruff format --check @pythonFiles
 ```
 
-Result: exit 1; `2 files would be reformatted, 8 files already formatted`.
-The two files are `vesper/platform/financial_research.py` and
-`tests/platform/test_financial_research.py`, both committed before Task 6.
+Result: exit 0; `10 files already formatted`.
+
+The repository-wide check was rerun without formatting any other file:
+
+```powershell
+uv run --locked ruff format --check vesper tests
+```
+
+Result: exit 1; `40 files would be reformatted, 67 files already formatted`.
 
 ## Lint, compilation, and lock
 
@@ -115,8 +156,9 @@ the candidate knowledge note, ADR-0004, the runbook, and this receipt.
 
 ## Remaining concern
 
-The repository-wide formatter gate is not green. No production assertion,
-Ruff-lint, compilation, lock, CLI-help, documentation-content, link, or
-whitespace defect remains. The format baseline should be resolved in a separate
-authorized code/test formatting task rather than folded into this documentation
-commit.
+The repository-wide formatter gate is not green: `40 files would be
+reformatted, 67 files already formatted`. No production assertion, focused
+Ruff-lint, focused compilation, lock, CLI-help, documentation-content, link, or
+whitespace defect remains. The remaining format baseline should be resolved in
+a separate authorized code/test formatting task rather than folded into this
+bounded repair.
