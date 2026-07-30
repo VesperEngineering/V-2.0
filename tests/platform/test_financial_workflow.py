@@ -3,8 +3,10 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
+from langgraph.graph import END, START, StateGraph
 
 import vesper.platform.financial_workflow as financial_workflow
 from vesper.platform.contracts import (
@@ -16,6 +18,7 @@ from vesper.platform.contracts import (
 from vesper.platform.financial_research import LocalFinancialResearchExecutor
 from vesper.platform.financial_workflow import (
     FinancialResearchController,
+    FinancialResearchWorkflowError,
     build_financial_research_workflow,
 )
 from vesper.platform.persistence import PlatformPaths, open_persistence
@@ -94,18 +97,54 @@ def financial_controller(
     *,
     executor=None,
 ) -> FinancialResearchController:
-    executor = executor or LocalFinancialResearchExecutor(
-        massive_root=tmp_path / "massive",
-        derived_root=tmp_path / "derived",
-        evidence=persistence.evidence,
-        clock=lambda: NOW,
-    )
+    executor = executor or local_executor(tmp_path, persistence)
     graph = build_financial_research_workflow(
         checkpointer=persistence.checkpointer,
         store=persistence.langgraph_store,
         executor=executor,
     )
     return FinancialResearchController(graph=graph, store=persistence.store)
+
+
+def local_executor(tmp_path: Path, persistence) -> LocalFinancialResearchExecutor:
+    return LocalFinancialResearchExecutor(
+        massive_root=tmp_path / "massive",
+        derived_root=tmp_path / "derived",
+        evidence=persistence.evidence,
+        clock=lambda: NOW,
+    )
+
+
+class CountingExecutor:
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.calls = 0
+
+    def execute(self, event, request, plan):
+        self.calls += 1
+        return self.delegate.execute(event, request, plan)
+
+
+class MutatingExecutor:
+    def __init__(self, delegate, mutate):
+        self.delegate = delegate
+        self.mutate = mutate
+
+    def execute(self, event, request, plan):
+        return self.mutate(self.delegate.execute(event, request, plan))
+
+
+def software_checkpoint(checkpointer, run_id: str):
+    class SoftwareState(TypedDict):
+        marker: str
+
+    builder = StateGraph(SoftwareState)
+    builder.add_node("software", lambda state: {"marker": state["marker"]})
+    builder.add_edge(START, "software")
+    builder.add_edge("software", END)
+    graph = builder.compile(checkpointer=checkpointer)
+    graph.invoke({"marker": "software-history"}, {"configurable": {"thread_id": run_id}})
+    return graph
 
 
 def test_direct_event_reaches_completed_report_without_software_graph(tmp_path):
@@ -152,14 +191,24 @@ def test_plan_validation_failure_persists_only_a_generic_reason(tmp_path, monkey
             controller.start(direct_event())
 
         record = controller.inspect("run-001")
-        assert record == {
-            "run_id": "run-001",
-            "status": "stopped",
-            "failure_reason": "Financial research workflow failed.",
+        assert record["run_id"] == "run-001"
+        assert record["status"] == "stopped"
+        assert record["failure_reason"] == "Financial research workflow failed."
+        assert len(record["event_fingerprint"]) == 64
+        assert set(record) == {
+            "run_id",
+            "status",
+            "failure_reason",
+            "event_fingerprint",
         }
-        assert list(
-            persistence.checkpointer.list({"configurable": {"thread_id": "run-001"}})
-        ) == []
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == []
+        )
 
 
 def test_executor_failure_persists_no_raw_data_or_recommendation(tmp_path):
@@ -180,15 +229,70 @@ def test_executor_failure_persists_no_raw_data_or_recommendation(tmp_path):
             )
 
         record = controller.inspect("run-001")
-        assert record == {
-            "run_id": "run-001",
-            "status": "stopped",
-            "failure_reason": "Financial research workflow failed.",
+        assert record["run_id"] == "run-001"
+        assert record["status"] == "stopped"
+        assert record["failure_reason"] == "Financial research workflow failed."
+        assert len(record["event_fingerprint"]) == 64
+        assert set(record) == {
+            "run_id",
+            "status",
+            "failure_reason",
+            "event_fingerprint",
         }
         assert "recommendation" not in record
-        assert list(
-            persistence.checkpointer.list({"configurable": {"thread_id": "run-001"}})
-        ) == []
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == []
+        )
+
+
+@pytest.mark.parametrize(
+    ("delete_fails", "put_fails"),
+    ((True, False), (False, True), (True, True)),
+)
+def test_cleanup_failures_never_leak_private_failure_details(
+    tmp_path, monkeypatch, delete_fails, put_fails
+):
+    class FailingExecutor:
+        def execute(self, _event, _request, _plan):
+            raise RuntimeError("private executor path")
+
+    def fail_delete(_thread_id):
+        raise RuntimeError("private checkpoint database path")
+
+    def fail_put(_namespace, _key, _value):
+        raise RuntimeError("private store database path")
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        controller = financial_controller(tmp_path, persistence, executor=FailingExecutor())
+        if delete_fails:
+            monkeypatch.setattr(controller.graph.checkpointer, "delete_thread", fail_delete)
+        if put_fails:
+            monkeypatch.setattr(controller.store, "put", fail_put)
+
+        with pytest.raises(FinancialResearchWorkflowError) as caught:
+            controller.start(direct_event())
+
+        assert str(caught.value) == "Financial research workflow failed."
+        assert caught.value.__cause__ is None
+        assert caught.value.__suppress_context__ is True
+        if not put_fails:
+            assert controller.inspect("run-001")["failure_reason"] == (
+                "Financial research workflow failed."
+            )
+        if not delete_fails:
+            assert (
+                list(
+                    persistence.checkpointer.list(
+                        {"configurable": {"thread_id": "financial-research:run-001"}}
+                    )
+                )
+                == []
+            )
 
 
 def test_completed_output_remains_inspectable_after_persistence_reopens(tmp_path):
@@ -217,3 +321,231 @@ def test_stopped_executor_report_is_not_promoted_to_completed(tmp_path):
 
         assert report.status is FinancialResearchStatus.STOPPED
         assert controller.inspect(report.run_id)["status"] == "stopped"
+
+
+@pytest.mark.parametrize("output_index", (0, 1, 2))
+@pytest.mark.parametrize(
+    ("authority_field", "foreign_value"),
+    (
+        ("run_id", "foreign-run"),
+        ("created_at", NOW + timedelta(minutes=1)),
+        ("non_authority", "Grants trading authority."),
+    ),
+)
+def test_foreign_executor_output_authority_fails_without_raw_persistence(
+    tmp_path, output_index, authority_field, foreign_value
+):
+    def replace_authority(outputs):
+        changed = list(outputs)
+        changed[output_index] = changed[output_index].model_copy(
+            update={authority_field: foreign_value}
+        )
+        return tuple(changed)
+
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        executor = MutatingExecutor(local_executor(tmp_path, persistence), replace_authority)
+        controller = financial_controller(tmp_path, persistence, executor=executor)
+
+        with pytest.raises(RuntimeError, match="Financial research workflow failed"):
+            controller.start(direct_event())
+
+        record = controller.inspect("run-001")
+        assert record["failure_reason"] == "Financial research workflow failed."
+        assert "dataset" not in record
+        assert "assessment" not in record
+        assert "recommendation" not in record
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == []
+        )
+
+
+@pytest.mark.parametrize(
+    ("assessment_status", "recommendation_status"),
+    (
+        (FinancialResearchStatus.NEEDS_ANALYSIS, FinancialResearchStatus.COMPLETE),
+        (FinancialResearchStatus.COMPLETE, FinancialResearchStatus.STOPPED),
+        (FinancialResearchStatus.COMPLETE, FinancialResearchStatus.REQUESTED),
+        (FinancialResearchStatus.REQUESTED, FinancialResearchStatus.STOPPED),
+    ),
+)
+def test_incoherent_executor_terminal_states_fail_closed(
+    tmp_path, assessment_status, recommendation_status
+):
+    def replace_statuses(outputs):
+        dataset, assessment, recommendation = outputs
+        return (
+            dataset,
+            assessment.model_copy(update={"status": assessment_status}),
+            recommendation.model_copy(update={"status": recommendation_status}),
+        )
+
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        executor = MutatingExecutor(local_executor(tmp_path, persistence), replace_statuses)
+        controller = financial_controller(tmp_path, persistence, executor=executor)
+
+        with pytest.raises(RuntimeError, match="Financial research workflow failed"):
+            controller.start(direct_event())
+
+        record = controller.inspect("run-001")
+        assert record["failure_reason"] == "Financial research workflow failed."
+        assert "recommendation" not in record
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == []
+        )
+
+
+def test_financial_checkpoints_are_namespaced_from_software_history(tmp_path):
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        software_checkpoint(persistence.checkpointer, "run-001")
+
+        financial_controller(tmp_path, persistence).start(direct_event())
+
+        software_history = list(
+            persistence.checkpointer.list({"configurable": {"thread_id": "run-001"}})
+        )
+        financial_history = list(
+            persistence.checkpointer.list(
+                {"configurable": {"thread_id": "financial-research:run-001"}}
+            )
+        )
+        assert software_history
+        assert financial_history
+        assert any(
+            item.checkpoint["channel_values"].get("marker") == "software-history"
+            for item in software_history
+        )
+        assert all("event" not in item.checkpoint["channel_values"] for item in software_history)
+
+
+def test_financial_failure_cleanup_preserves_software_history(tmp_path):
+    class FailingExecutor:
+        def execute(self, _event, _request, _plan):
+            raise RuntimeError("private database path")
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        software_checkpoint(persistence.checkpointer, "run-001")
+        software_history_before = list(
+            persistence.checkpointer.list({"configurable": {"thread_id": "run-001"}})
+        )
+        controller = financial_controller(tmp_path, persistence, executor=FailingExecutor())
+
+        with pytest.raises(RuntimeError, match="Financial research workflow failed"):
+            controller.start(direct_event())
+
+        assert (
+            list(persistence.checkpointer.list({"configurable": {"thread_id": "run-001"}}))
+            == software_history_before
+        )
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == []
+        )
+
+
+def test_identical_terminal_replay_returns_persisted_outcome_without_execution(tmp_path):
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        executor = CountingExecutor(local_executor(tmp_path, persistence))
+        controller = financial_controller(tmp_path, persistence, executor=executor)
+        first = controller.start(direct_event())
+        first_record = dict(controller.inspect("run-001"))
+        first_history = list(
+            persistence.checkpointer.list(
+                {"configurable": {"thread_id": "financial-research:run-001"}}
+            )
+        )
+
+        replay = controller.start(direct_event())
+
+        assert replay == first
+        assert executor.calls == 1
+        assert controller.inspect("run-001") == first_record
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == first_history
+        )
+
+
+def test_conflicting_terminal_replay_fails_without_modifying_terminal_state(tmp_path):
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        executor = CountingExecutor(local_executor(tmp_path, persistence))
+        controller = financial_controller(tmp_path, persistence, executor=executor)
+        controller.start(direct_event())
+        first_record = dict(controller.inspect("run-001"))
+        first_history = list(
+            persistence.checkpointer.list(
+                {"configurable": {"thread_id": "financial-research:run-001"}}
+            )
+        )
+        conflict = direct_event().model_copy(update={"summary": "Conflicting replay."})
+
+        with pytest.raises(RuntimeError, match="Financial research workflow failed"):
+            controller.start(conflict)
+
+        assert executor.calls == 1
+        assert controller.inspect("run-001") == first_record
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == first_history
+        )
+
+
+def test_failure_attempt_after_completion_returns_accepted_output_without_execution(tmp_path):
+    class FailingExecutor:
+        calls = 0
+
+        def execute(self, _event, _request, _plan):
+            self.calls += 1
+            raise RuntimeError("must not execute")
+
+    market_database(tmp_path / "massive")
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        accepted = financial_controller(tmp_path, persistence).start(direct_event())
+        first_record = dict(financial_controller(tmp_path, persistence).inspect("run-001"))
+        first_history = list(
+            persistence.checkpointer.list(
+                {"configurable": {"thread_id": "financial-research:run-001"}}
+            )
+        )
+        executor = FailingExecutor()
+        controller = financial_controller(tmp_path, persistence, executor=executor)
+
+        replay = controller.start(direct_event())
+
+        assert replay == accepted
+        assert executor.calls == 0
+        assert controller.inspect("run-001") == first_record
+        assert (
+            list(
+                persistence.checkpointer.list(
+                    {"configurable": {"thread_id": "financial-research:run-001"}}
+                )
+            )
+            == first_history
+        )

@@ -42,7 +42,7 @@ _REQUIRED_COLUMNS = {"ticker", "date", "close"}
 _SHA256_CHUNK_SIZE = 1024 * 1024
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_NON_AUTHORITY = (
+FINANCIAL_RESEARCH_NON_AUTHORITY = (
     "Research evidence only; no trading, order, capital-allocation, risk, deployment, "
     "scheduler, or model-promotion authority."
 )
@@ -348,7 +348,7 @@ class LocalFinancialResearchExecutor:
             repository_revision=event.repository_revision,
             created_at=event.created_at,
             event_id=event.event_id,
-            non_authority=_NON_AUTHORITY,
+            non_authority=FINANCIAL_RESEARCH_NON_AUTHORITY,
             dataset_id=dataset_id,
             schema_fields=(
                 "row_count",
@@ -757,7 +757,7 @@ def _assess_coverage(dataset: DerivedDatasetReceipt, validation):
         "repository_revision": dataset.repository_revision,
         "created_at": dataset.created_at,
         "event_id": dataset.event_id,
-        "non_authority": _NON_AUTHORITY,
+        "non_authority": FINANCIAL_RESEARCH_NON_AUTHORITY,
     }
     if dataset.null_close_count:
         gap = FinancialGapAssessment(

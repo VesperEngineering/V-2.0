@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from hashlib import sha256
 from typing import Protocol, TypedDict
 
 from .contracts import (
@@ -17,6 +18,7 @@ from .contracts import (
     FinancialTriggerDecision,
 )
 from .financial_research import (
+    FINANCIAL_RESEARCH_NON_AUTHORITY,
     build_coverage_analysis_plan,
     build_coverage_research_request,
     decide_financial_trigger,
@@ -35,6 +37,10 @@ _GENERIC_FAILURE_REASON = "Financial research workflow failed."
 
 class FinancialResearchWorkflowError(RuntimeError):
     """The sibling workflow stopped without an accepted recommendation."""
+
+
+def _financial_thread_id(run_id: str) -> str:
+    return f"financial-research:{run_id}"
 
 
 class FinancialResearchExecutor(Protocol):
@@ -65,6 +71,73 @@ def _parse(model_type, value):
     return model_type.model_validate_json(json.dumps(value))
 
 
+def _event_fingerprint(event: FinancialEventEnvelope) -> str:
+    canonical = json.dumps(
+        _dump(event),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return sha256(canonical).hexdigest()
+
+
+def _stored_outcome(
+    record: Mapping[str, object],
+) -> FinancialRecommendation | FinancialTriggerDecision:
+    recommendation = record.get("recommendation")
+    if recommendation is not None:
+        return _parse(FinancialRecommendation, recommendation)
+    trigger = record.get("trigger")
+    if record.get("status") == FinancialResearchStatus.IGNORED.value and trigger is not None:
+        return _parse(FinancialTriggerDecision, trigger)
+    raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON)
+
+
+def _authority(model) -> tuple[object, ...]:
+    return (
+        model.run_id,
+        model.task_id,
+        model.repository_revision,
+        model.created_at,
+        model.event_id,
+    )
+
+
+def _validate_executor_outputs(
+    event: FinancialEventEnvelope,
+    request: FinancialResearchRequest,
+    plan: FinancialAnalysisPlan,
+    dataset: DerivedDatasetReceipt,
+    assessment: FinancialGapAssessment,
+    recommendation: FinancialRecommendation,
+) -> None:
+    expected = _authority(event)
+    if any(
+        _authority(output) != expected
+        for output in (request, plan, dataset, assessment, recommendation)
+    ):
+        raise FinancialResearchWorkflowError("financial research authority mismatch")
+    if request.non_authority != event.non_authority or plan.non_authority != event.non_authority:
+        raise FinancialResearchWorkflowError("financial research authority mismatch")
+    if any(
+        output.non_authority != FINANCIAL_RESEARCH_NON_AUTHORITY
+        for output in (dataset, assessment, recommendation)
+    ):
+        raise FinancialResearchWorkflowError("financial research authority mismatch")
+    if recommendation.status is FinancialResearchStatus.COMPLETE:
+        coherent = assessment.status is FinancialResearchStatus.COMPLETE
+    elif recommendation.status is FinancialResearchStatus.STOPPED:
+        coherent = assessment.status in {
+            FinancialResearchStatus.NEEDS_RESEARCH,
+            FinancialResearchStatus.NEEDS_ANALYSIS,
+            FinancialResearchStatus.STOPPED,
+        }
+    else:
+        coherent = False
+    if not coherent:
+        raise FinancialResearchWorkflowError("financial research terminal state mismatch")
+
+
 def build_financial_research_workflow(*, checkpointer, store, executor: FinancialResearchExecutor):
     def trigger_node(state: FinancialResearchRuntimeState) -> dict[str, object]:
         event = _parse(FinancialEventEnvelope, state["event"])
@@ -91,6 +164,14 @@ def build_financial_research_workflow(*, checkpointer, store, executor: Financia
         request = _parse(FinancialResearchRequest, state["request"])
         plan = _parse(FinancialAnalysisPlan, state["plan"])
         dataset, assessment, recommendation = executor.execute(event, request, plan)
+        _validate_executor_outputs(
+            event,
+            request,
+            plan,
+            dataset,
+            assessment,
+            recommendation,
+        )
         return {
             "dataset": _dump(dataset),
             "assessment": _dump(assessment),
@@ -119,9 +200,7 @@ def build_financial_research_workflow(*, checkpointer, store, executor: Financia
     builder.add_conditional_edges(
         "trigger",
         lambda state: (
-            "request"
-            if state["status"] != FinancialResearchStatus.IGNORED.value
-            else "end"
+            "request" if state["status"] != FinancialResearchStatus.IGNORED.value else "end"
         ),
         {"request": "request", "end": END},
     )
@@ -141,6 +220,12 @@ class FinancialResearchController:
         self,
         event: FinancialEventEnvelope,
     ) -> FinancialRecommendation | FinancialTriggerDecision:
+        fingerprint = _event_fingerprint(event)
+        existing = self.store.get(FINANCIAL_RESEARCH_RUN_NAMESPACE, event.run_id)
+        if existing is not None:
+            if existing.get("event_fingerprint") == fingerprint:
+                return _stored_outcome(existing)
+            raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
         initial: FinancialResearchRuntimeState = {
             "event": _dump(event),
             "status": FinancialResearchStatus.REQUESTED.value,
@@ -154,16 +239,23 @@ class FinancialResearchController:
         try:
             result = self.graph.invoke(initial, self._config(event.run_id))
         except Exception:
-            self.graph.checkpointer.delete_thread(event.run_id)
-            self.store.put(
-                FINANCIAL_RESEARCH_RUN_NAMESPACE,
-                event.run_id,
-                {
-                    "run_id": event.run_id,
-                    "status": FinancialResearchStatus.STOPPED.value,
-                    "failure_reason": _GENERIC_FAILURE_REASON,
-                },
-            )
+            try:
+                self.graph.checkpointer.delete_thread(_financial_thread_id(event.run_id))
+            except Exception:
+                pass
+            try:
+                self.store.put(
+                    FINANCIAL_RESEARCH_RUN_NAMESPACE,
+                    event.run_id,
+                    {
+                        "run_id": event.run_id,
+                        "status": FinancialResearchStatus.STOPPED.value,
+                        "failure_reason": _GENERIC_FAILURE_REASON,
+                        "event_fingerprint": fingerprint,
+                    },
+                )
+            except Exception:
+                pass
             raise FinancialResearchWorkflowError(_GENERIC_FAILURE_REASON) from None
         if result["status"] == FinancialResearchStatus.IGNORED.value:
             decision = _parse(FinancialTriggerDecision, result["trigger"])
@@ -174,6 +266,8 @@ class FinancialResearchController:
                     "run_id": event.run_id,
                     "status": FinancialResearchStatus.IGNORED.value,
                     "reason": "Event did not trigger bounded financial research.",
+                    "event_fingerprint": fingerprint,
+                    "trigger": result["trigger"],
                 },
             )
             return decision
@@ -185,6 +279,7 @@ class FinancialResearchController:
             {
                 "run_id": event.run_id,
                 "status": result["status"],
+                "event_fingerprint": fingerprint,
                 "trigger": result["trigger"],
                 "request": result["request"],
                 "plan": result["plan"],
@@ -203,4 +298,4 @@ class FinancialResearchController:
 
     @staticmethod
     def _config(run_id: str) -> dict[str, dict[str, str]]:
-        return {"configurable": {"thread_id": run_id}}
+        return {"configurable": {"thread_id": _financial_thread_id(run_id)}}
