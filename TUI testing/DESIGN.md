@@ -21,6 +21,8 @@ the better framework.
 - Do not change V20 code or settings.
 - Read V20 data only through the existing JSON command line.
 - Do not add any action that changes a run.
+- A live check may open or create V20's controller database under Windows
+  LocalAppData. It must not create, approve, reject, cancel, or restart a run.
 - Do not access brokers, accounts, credentials, orders, positions, risk
   settings, schedulers, training, model promotion, or paid services.
 - Never write to protected V20 data folders.
@@ -281,7 +283,8 @@ name a backup choice, or say that more testing is needed.
 - Benchmark JSON includes enough details to repeat each test.
 - The final report shows raw results, pass/fail results, scores, limits, and a
   framework recommendation.
-- No file outside `TUI testing` changes because of this work.
+- No tracked repository file outside `TUI testing` changes because of this
+  work.
 
 ## Not Included
 
