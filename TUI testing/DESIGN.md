@@ -1,49 +1,54 @@
-# V20 TUI Framework Bakeoff Design
+# V20 TUI Bakeoff Design
 
-Status: approved design sections, pending written-spec review
+Status: approved
 Date: 2026-08-01
-Scope: `C:\Users\bgonn\Desktop\v20\TUI testing`
+Folder: `C:\Users\bgonn\Desktop\v20\TUI testing`
 
 ## Goal
 
-Build production-like, feature-matched operator consoles in Python/Textual and
-Rust/Ratatui. Both consoles read the same live V20 state through the existing
-machine-readable CLI. The bakeoff will select a framework using reproducible
-functional, performance, customization, testing, and packaging evidence.
+Build two matching terminal dashboards:
 
-## Constraints
+- Python with Textual
+- Rust with Ratatui
 
-- Read-only. Neither console may create, resume, approve, reject, cancel, or
-  otherwise mutate a V20 run.
-- V20 core code and configuration remain unchanged.
-- All bakeoff source, fixtures, environments, build outputs, scripts, and
-  results remain below `TUI testing`.
-- No broker, provider, account, credential, order, position, risk, scheduler,
-  training, promotion, protected-data write, or external-service access.
-- Missing or malformed state must fail visibly; it must never be presented as
-  healthy.
-- Both implementations use identical labels, keys, colors, layouts, commands,
-  normalized models, fixtures, benchmark loads, and acceptance checks.
+Both apps will show the same live, read-only V20 data. They will also use the
+same fake data for repeatable speed tests. We will compare the results and pick
+the better framework.
 
-## Verified Environment
+## Safety Rules
 
-- Windows, PowerShell
+- Put all new files inside `TUI testing`.
+- Do not change V20 code or settings.
+- Read V20 data only through the existing JSON command line.
+- Do not add any action that changes a run.
+- Do not access brokers, accounts, credentials, orders, positions, risk
+  settings, schedulers, training, model promotion, or paid services.
+- Never write to protected V20 data folders.
+- Show missing, old, or broken data clearly. Never make it look healthy.
+- Give both apps the same features, labels, keys, colors, data, and tests.
+
+## Verified Tools
+
+- Windows and PowerShell
 - Python 3.11.15
 - uv 0.11.32
 - rustc 1.97.0
 - cargo 1.97.0
-- Live `active` response: `{ "active": [] }`
-- Live `approvals` response: `{ "pending": [] }`
-- Live `knowledge-status` response: four skill documents and zero memory
-  documents
 
-These live values are observations, not fixtures or expected future values.
+The live checks returned:
 
-## Directory Layout
+- no active runs;
+- no pending approvals;
+- four skill documents and no memory documents.
+
+These values can change. They are not test fixtures.
+
+## Planned Files
 
 ```text
 TUI testing/
 |-- DESIGN.md
+|-- IMPLEMENTATION_PLAN.md
 |-- README.md
 |-- .gitignore
 |-- shared/
@@ -62,33 +67,26 @@ TUI testing/
 `-- results/
 ```
 
-The implementation plan will name exact files. Generated environments,
-caches, Rust targets, and transient results will be ignored locally.
+Generated files, caches, Python environments, Rust build files, and temporary
+results will be ignored.
 
-## Architecture
+## Data Flow
 
 ```text
-Python/Textual --+
-                 +--> identical read-only CLI adapter
-Rust/Ratatui ----+              |
-                                +--> active
-                                +--> approvals
-                                +--> knowledge-status
-                                +--> status <run-id>
-                                +--> receipts <run-id>
-                                `--> evidence <run-id>
-                                           |
-                           uv run --locked vesper-agent --json
-                                           |
-                                LocalPlatformService
+Textual app ----+
+                +--> fixed read-only adapter --> V20 JSON command line
+Ratatui app ----+
 ```
 
-Both adapters execute argument arrays with the V20 repository as the working
-directory. They do not invoke a shell. The adapter command is selected only
-from a fixed enum/allowlist; free text may fill only the validated `run-id`
-argument.
+Both adapters will run the same command from the V20 root:
 
-### Allowed commands
+```text
+uv run --locked vesper-agent --json <allowed-command>
+```
+
+They will pass arguments directly. They will not use a shell.
+
+Only these commands are allowed:
 
 - `active`
 - `approvals`
@@ -97,198 +95,200 @@ argument.
 - `receipts <run-id>`
 - `evidence <run-id>`
 
-No other command is representable by the adapter API.
+The adapter will use a fixed command list. Free text is allowed only for a
+checked run ID. No other V20 command can be called.
 
-## Shared Data Contract
+## Shared Data Shape
 
-Each implementation converts CLI JSON into equivalent typed view models:
+Each app will turn the JSON into the same typed records:
 
-- `OverviewSnapshot`: active count, pending count, knowledge counts, command
-  health, fetch time, refresh timestamp, and freshness state.
-- `ActiveRunSummary`: run identifier, status, runtime metadata, and available
-  recovery metadata.
-- `ApprovalSummary`: run, task, request, checkpoint, repository revision,
-  workspace hash, evidence references, and creation time when supplied.
-- `RunDetail`: normalized status payload plus receipt and evidence collections.
-- `CommandResult`: success payload or typed timeout, exit, decoding, schema, or
-  unavailable failure.
+- `OverviewSnapshot`: counts, command health, timing, and data age.
+- `ActiveRunSummary`: run ID, state, and available recovery details.
+- `ApprovalSummary`: run, task, request, checkpoint, revision, workspace hash,
+  evidence, and creation time when available.
+- `RunDetail`: state, receipts, evidence, and raw JSON.
+- `CommandResult`: valid data or a clear timeout, exit, JSON, schema, or
+  unavailable error.
 
-The shared contract documents optional fields explicitly. Unknown fields are
-preserved for the raw JSON detail view but do not silently become typed state.
+Optional fields will be listed in the shared contract. Unknown fields will
+remain visible in raw JSON, but they will not silently become trusted fields.
 
-## Refresh and Failure Semantics
+## Refresh and Error Rules
 
-- Automatic refresh interval: five seconds.
-- Manual refresh: `r`.
-- Pause/resume automatic refresh: `space`.
-- One refresh may run at a time; a second request is coalesced.
-- Per-command timeout: five seconds.
-- First-load failure displays `UNAVAILABLE`.
-- A later failure retains the last valid snapshot and marks it `STALE` with its
-  age and failure category.
-- A successful refresh replaces the snapshot atomically.
-- The UI shows bounded, sanitized error summaries. It does not display raw
-  environment data or credential-shaped values.
-- Shutdown cancels refresh work and terminates any owned CLI child process.
+- Refresh live data every five seconds.
+- Let the user refresh with `r`.
+- Let the user pause or restart automatic refresh with `space`.
+- Never run two refreshes at once. If more requests arrive, keep only one
+  request to run next.
+- Stop each command after five seconds.
+- On the first failed load, show `UNAVAILABLE`.
+- After a later failure, keep the last good data and show `STALE`, its age, and
+  the error type.
+- Build each new view fully before replacing the old view.
+- Show short, safe error messages. Do not show environment values or anything
+  that looks like a credential.
+- On exit, stop refresh work and every command process started by the app.
 
-`STALE` means the screen is showing the last known valid result, not current
-state. This matters because an operator must not mistake old approval or run
-information for live truth.
+`STALE` means the screen shows old data, not the current V20 state. This stops
+an operator from treating an old run or approval as current.
 
-## Matched User Interface
+## Matching Screens
 
 ```text
-+ V20 Operator Console -- LIVE / READ-ONLY -- Last refresh --------+
-| Active Runs | Pending Approvals | Knowledge | CLI Health         |
-+ Navigation ------------------------------------------------------+
++ V20 Console -- LIVE / READ-ONLY -- Last refresh -----------------+
+| Active Runs | Pending Approvals | Knowledge | Command Health     |
++------------------------------------------------------------------+
 | [1 Overview] [2 Runs] [3 Approvals]                              |
-+ Main table -----------------------+ Detail panel ----------------+
-| sortable and filterable rows      | state / receipts / evidence |
-|                                   | raw JSON / errors            |
-+-----------------------------------+------------------------------+
++ Main table -----------------------+ Details ----------------------+
+| rows, sort, and filter            | state, receipts, evidence    |
+|                                   | raw JSON or errors           |
++------------------------------------------------------------------+
 | r refresh | space pause | / filter | t theme | ? help | q quit  |
 +------------------------------------------------------------------+
 ```
 
-### Screens
+### Overview
 
-1. **Overview**
-   - Active, pending, knowledge, and CLI-health summary cards.
-   - Command duration and refresh-latency sparklines.
-   - Compact active-run and pending-approval previews.
-2. **Runs**
-   - Sortable and filterable active-run table.
-   - Run-ID input for direct lookup.
-   - State, receipts, evidence, and raw JSON detail tabs.
-3. **Approvals**
-   - Sortable and filterable pending-approval table.
-   - Read-only authority, checkpoint, revision, workspace-hash, and evidence
-     details.
+- Summary cards for active runs, approvals, knowledge, and command health.
+- Small charts for command time and refresh delay.
+- Short lists of active runs and pending approvals.
 
-### Shared interaction contract
+### Runs
 
-- `1`, `2`, `3`: switch screen
+- A sortable and filterable active-run table.
+- A run-ID box for direct lookup.
+- Detail tabs for state, receipts, evidence, and raw JSON.
+
+### Approvals
+
+- A sortable and filterable pending-approval table.
+- Read-only details for authority, checkpoint, revision, workspace hash, and
+  evidence.
+
+### Shared keys and behavior
+
+- `1`, `2`, `3`: change screen
 - `r`: refresh
-- `space`: pause/resume automatic refresh
-- `/`: focus filter
-- `t`: switch dark/light theme
-- `?`: help
+- `space`: pause or restart automatic refresh
+- `/`: focus the filter
+- `t`: switch dark and light themes
+- `?`: open help
 - `q`: quit
-- Keyboard and mouse navigation
-- Responsive narrow and wide layouts
-- Explicit loading, empty, fresh, stale, and unavailable presentations
+- keyboard and mouse support
+- layouts for narrow and wide terminals
+- clear loading, empty, fresh, stale, and unavailable states
 
-No write button, key binding, command-palette entry, or hidden action exists.
+There will be no write button, write key, write menu item, or hidden write
+action.
 
-## Implementation Boundaries
+## Code Parts
 
-Each version has the same conceptual modules:
+Each app will have the same main parts:
 
-- typed domain/view models;
-- read-only CLI adapter;
-- refresh coordinator;
+- typed data records;
+- read-only V20 command adapter;
+- refresh controller;
 - screens and reusable widgets;
-- dark/light theme definitions;
-- deterministic benchmark entrypoint;
-- contract, interaction, snapshot, lifecycle, and live smoke tests.
+- dark and light themes;
+- repeatable benchmark command;
+- contract, screen, snapshot, shutdown, and live smoke tests.
 
-Framework-specific code stays behind these boundaries. No general plugin system
-will be built. New screens and widgets will use a small internal registry only
-where the matched implementation requires it.
+Framework-specific code will stay inside these parts. We will not build a
+general plugin system. A small internal list of screens or widgets is enough.
 
-## Testing
+## Tests
 
-Both implementations must provide equivalent evidence for:
+Both apps must test the same behavior:
 
 - valid shared fixtures;
 - empty live results;
-- timeout, nonzero exit, invalid JSON, missing-field, and unknown-field cases;
-- first-load unavailable and later stale behavior;
-- refresh coalescing;
-- run-ID validation;
-- screen navigation, filtering, tabs, help, and theme switching;
+- timeouts, failed commands, bad JSON, missing fields, and unknown fields;
+- first-load unavailable and later stale states;
+- refresh requests do not overlap;
+- run-ID checks;
+- navigation, filters, tabs, help, and theme changes;
 - narrow and wide layouts;
-- mutation-command exclusion;
-- clean shutdown with no surviving owned child process;
-- live read-only smoke calls to `active`, `approvals`, and `knowledge-status`.
+- no write commands;
+- clean exit with no command process left running;
+- live read-only checks for `active`, `approvals`, and `knowledge-status`.
 
-Textual tests use headless `Pilot` and snapshot support. Ratatui tests use its
-test backend and buffer snapshots. Tests must assert behavior, not only captured
+Textual will use its headless Pilot test tools and snapshots. Ratatui will use
+its test screen and buffer snapshots. Tests will check behavior as well as
 appearance.
 
-## Benchmark Method
+## Speed Tests
 
-Deterministic shared fixtures provide 100, 1,000, and 10,000 rows. Both
-implementations run the same warmup count, iteration count, terminal sizes, and
-refresh schedules. Results are emitted as JSON under `results/`.
+Shared fixtures will contain 100, 1,000, and 10,000 rows. Both apps will use the
+same warmups, test runs, terminal sizes, and update schedules. The runner will
+save JSON results under `results`.
 
-Measurements:
+We will measure:
 
-- cold process startup and first completed frame;
-- CLI-fetch latency, reported separately from framework performance;
-- JSON decode and view-model construction latency;
-- model-update and render median/p95 latency;
-- filter and navigation median/p95 latency;
-- production load at two updates per second;
-- stress load at five updates per second;
-- peak working-set memory and CPU usage;
-- build/install time and test time;
-- isolated Python environment size and Rust release executable size;
-- source lines, direct dependency count, and evidence-backed customization
-  effort.
+- process start and first complete screen;
+- V20 command time, kept separate from framework speed;
+- JSON reading and typed-record creation;
+- screen update and draw time, including median and 95th percentile;
+- filter and navigation time;
+- two screen updates per second as the normal benchmark;
+- five screen updates per second as the stress benchmark;
+- peak memory and CPU use;
+- build, install, and test time;
+- installed Python app size and Rust release app size;
+- source line count, direct dependency count, and effort for the same UI change.
 
-The PowerShell runner records environment versions, command lines, iterations,
-and timestamps. It does not compare Rust build-directory size with Python
-runtime size; only deployable artifacts are compared.
+The live refresh still runs every five seconds. The faster update rates apply
+only to repeatable screen-load tests.
 
-## Mandatory Gate
+The PowerShell runner will record tool versions, commands, run counts, and
+times. It will compare deployable app sizes, not Rust build files against a
+Python runtime.
 
-A candidate is ineligible if any of these fail:
+## Required Passes
 
-- matched functional scope;
-- safe unavailable/stale behavior;
-- Windows execution;
-- automated contract and UI tests;
-- live read-only smoke test;
-- no V20 writes or mutation commands;
-- clean child-process shutdown;
-- responsive input at the two-updates-per-second production load.
+A framework cannot win unless it passes all of these checks:
 
-## Decision Rubric
+- all matching features work;
+- old or missing data is shown safely;
+- it runs on Windows;
+- contract and screen tests pass;
+- live read-only smoke tests pass;
+- it has no write command or write action;
+- it exits without leaving a command process;
+- input stays responsive during the normal benchmark.
 
-Candidates passing the mandatory gate receive a documented 1-5 score in each
-category:
+## Score
 
-| Category | Weight | Required evidence |
+Frameworks that pass every required check get a score from 1 to 5 in each area:
+
+| Area | Weight | Evidence |
 | --- | ---: | --- |
-| Integration and maintainability | 25% | boundaries, duplication, dependencies, change surface |
-| Customization and growth | 25% | matched theme/layout/widget extension tasks |
-| Responsiveness and resources | 25% | startup, p95 latency, CPU, memory, artifact size |
-| Testability | 15% | interaction, snapshot, failure, and lifecycle coverage |
-| Packaging and deployment | 10% | reproducible build, install time, deployable output |
+| Easy V20 integration and upkeep | 25% | code boundaries, repeated code, dependencies, change size |
+| UI changes and future growth | 25% | same theme, layout, and widget changes |
+| Speed and computer use | 25% | start time, delay, CPU, memory, app size |
+| Easy testing | 15% | screen, snapshot, error, and shutdown tests |
+| Easy install and release | 10% | repeatable build, install time, released files |
 
-Every score must cite raw measurements or inspectable implementation evidence.
-The weighted score cannot override a mandatory-gate failure or conceal a
-material weakness. The final report may recommend one framework, recommend a
-conditional fallback, or conclude that more experimentation is required.
+Every score must point to raw results or code that can be checked. A high score
+cannot hide a failed required check. The final report can choose one framework,
+name a backup choice, or say that more testing is needed.
 
-## Acceptance Criteria
+## Done When
 
-- The two applications implement the matched scope and shared contract.
-- Both run against live V20 read-only CLI output from the repository root.
-- Shared fixtures and benchmark settings are byte-identical inputs.
-- Focused tests and live smoke checks pass with fresh output.
-- Benchmark JSON is reproducible and records provenance.
-- A comparison report presents raw data, gate results, rubric scores,
-  limitations, and the recommended framework.
-- No file outside `TUI testing` changes during implementation.
+- Both apps have the same agreed features and data rules.
+- Both apps can read live V20 data from the repository root.
+- Both apps use the exact same fixtures and benchmark settings.
+- Focused tests and live read-only checks pass with fresh output.
+- Benchmark JSON includes enough details to repeat each test.
+- The final report shows raw results, pass/fail results, scores, limits, and a
+  framework recommendation.
+- No file outside `TUI testing` changes because of this work.
 
-## Explicit Non-Goals
+## Not Included
 
-- Trading, broker, provider, account, order, position, or risk controls
+- Any trading, broker, account, order, position, or risk control
 - Model training or promotion
-- Run creation, approval, rejection, cancellation, or resume
+- Creating, approving, rejecting, cancelling, or restarting runs
 - Scheduler or deployment controls
-- Replacing the V20 CLI or `LocalPlatformService`
-- A network API, remote dashboard, Jira integration, or third-party plugins
-- Selecting a framework before measured results exist
+- Replacing the V20 command line or platform service
+- A network service, remote dashboard, Jira link, or outside plugin
+- Picking a winner before the measured results are ready
