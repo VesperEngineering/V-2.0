@@ -41,6 +41,30 @@ The controller maintains the fixed eight-role roster with an explicit status for
 each role: `active`, `disabled`, or `not_implemented`. A role that does not yet run
 still appears truthfully in the daily digest with its status and no activity.
 
+## Local model strategy
+
+The autonomous local-agent pool uses only Ollama model `qwen:64k`. It is the sole
+automatic local model and is configured with a 65,536-token context window. The
+controller must not silently substitute another local or remote model when it is
+unavailable; affected work remains queued or fails closed with a journal event.
+
+One Ollama model service is shared by isolated logical agent turns. Each role has
+its own profile, context snapshot, memory namespace, task state, and journal. The
+roles never share one conversation. The controller permits one active Qwen
+inference at a time and queues the rest. This avoids eight model copies and keeps
+GPU use predictable.
+
+Existing Codex and OpenCode adapters remain explicit operator-selected execution
+paths, not automatic members of the autonomous local pool. Adding a second local
+model, automatic model fallback, or parallel Qwen inference requires a separate
+evidence-backed design change.
+
+Because all local roles use the same weights, role independence is procedural,
+not model-diverse. Independent Quant Validation and Risk Review therefore receive
+fresh isolated contexts, separate instructions and memory, artifact evidence
+rather than the producing agent's private reasoning, deterministic checks, and a
+final human gate. The system must not describe this as independent-model review.
+
 ## Architecture
 
 ```mermaid
@@ -69,6 +93,33 @@ flowchart TD
 
 Every proposal enters through the controller. An agent cannot act directly on
 its own proposal, change its authority, validate itself, or approve its outcome.
+
+## Operating cadence
+
+Real-time market, order, data-quality, and risk monitoring remains deterministic
+and separate from AI inference. Agents wake on admitted work or scheduled review;
+they do not run endless reasoning loops.
+
+- Product runs when a new safe proposal is admitted.
+- Development runs after an accepted Product brief or a bounded correction.
+- Risk Review runs after deterministic validation completes.
+- Quant Research Lead runs once after each trading session and on a material
+  evidence trigger.
+- Model Research runs for a routed research job, normally post-market or overnight.
+- Independent Quant Validation runs after every research or model result.
+- Portfolio Research runs after each trading session, with a deeper weekly review.
+- Execution Performance receives live deterministic metrics but invokes Qwen only
+  after a material anomaly settles for one to five minutes or during post-market
+  review.
+- Journal writes occur synchronously with each meaningful controller transition.
+- The daily digest is eligible at the official exchange close plus 15 minutes,
+  including early-close sessions.
+
+The queue orders operator-started work first, then admitted corrections and
+validation, material anomaly review, scheduled research, and routine summaries.
+Repeated equivalent triggers within five minutes collapse into one queued item
+with updated evidence. Scheduling these turns remains a protected implementation
+step requiring separate operator approval.
 
 ## Bounded initiative
 
@@ -122,6 +173,42 @@ An agent submits a typed `AgentProposal` containing:
 The rationale is a concise decision explanation, not private chain-of-thought.
 Raw prompts, hidden reasoning, credentials, secrets, and raw protected market
 data are prohibited.
+
+## Qwen tool and skill gateway
+
+Qwen supports structured tool calls, but it never executes host tools directly.
+The controller supplies a small role-specific schema allowlist, validates each
+requested call and its arguments, executes the allowed operation, records the
+receipt, and returns only the bounded result. The initial implementation stops a
+turn after eight tool calls with no automatic exception.
+
+The default role boundaries are:
+
+- Product: read and search.
+- Development: read, search, write, and test inside its exact granted workspace.
+- Research roles: approved read-only data, evidence, and research queries.
+- Independent Quant Validation and Risk Review: read, search, and evidence checks.
+- Execution Performance: read-only fills, costs, and performance records.
+- Every role: no broker, order, position, credential, provider, scheduler,
+  risk-control, protected-write, unrestricted shell, or arbitrary network tools.
+
+Skills are bounded instruction documents, not executable model capabilities. The
+controller selects only the approved skills required for the role and task, adds
+their bounded contents and immutable references to the context snapshot, and never
+exposes arbitrary skill discovery or direct skill-file access to Qwen.
+
+The 65,536-token window is budgeted across the complete tool loop:
+
+- no more than 49,152 accumulated input tokens, including returned tool results;
+- at least 16,384 tokens reserved for final output;
+- no more than 6,000 input tokens for role policy and authority instructions;
+- no more than 6,000 input tokens for tool schemas;
+- no more than 10,000 input tokens for selected skills and knowledge; and
+- the remaining input budget for the task, evidence, and compact history.
+
+Normal turns should use less than the maximum. When required evidence does not fit,
+the controller retrieves a smaller relevant set or splits the work into linked
+turns. It never silently drops authority rules or material contrary evidence.
 
 ## Per-agent journal
 
@@ -284,19 +371,34 @@ Focused offline tests must prove:
 10. secret and prohibited-content rejection without value retention;
 11. separation between journals, runtime memory, durable knowledge, and trading
     authority; and
-12. no effect on trading-engine availability or controls when review is pending.
+12. no effect on trading-engine availability or controls when review is pending;
+13. one shared Qwen service with isolated role contexts and one active inference;
+14. strict context-budget accounting across prompts, tools, results, and output;
+15. controller-mediated role allowlists, the eight-call bound, and forbidden-tool
+    rejection before execution;
+16. approved skill selection without arbitrary discovery or direct skill access;
+17. no silent model fallback when Qwen is unavailable; and
+18. event, scheduled, anomaly-settling, deduplication, queue-priority, and
+    exchange-calendar cadence behavior.
+
+Before enablement, a local no-write canary against the installed `qwen:64k` must
+verify structured tool-call parsing, forbidden-tool denial, context accounting,
+timeout handling, and journal receipts. Passing fake-adapter tests alone does not
+prove the local model is ready.
 
 ## Initial implementation boundary
 
 The first implementation should add the shared contracts, controller-owned
 journal service, proposal router, deterministic digest compiler, hybrid review
-gate, CLI review surface, and focused tests. It should connect the three existing
-native specialists and expose the same registration boundary for the five future
-roles.
+gate, CLI review surface, Ollama Qwen gateway, role-scoped tool loop, context
+budgeter, single-inference queue, and focused tests. It should connect the three
+existing native specialists and expose the same registration boundary for the
+five future roles.
 
 Building the five proposed agents, activating a post-market schedule, adding a
 dashboard, changing trading or risk behavior, training or promoting models, and
-granting broker or provider access are outside this implementation.
+granting broker or provider access are outside this implementation. A second
+local model, automatic fallback, and parallel local inference are also outside.
 
 ## Acceptance criteria
 
@@ -315,6 +417,12 @@ granting broker or provider access are outside this implementation.
 - Only explicitly approved distilled lessons may enter the governed knowledge
   inbox.
 - Journal or review failure cannot alter trading, risk, broker, or order behavior.
+- The autonomous local pool uses only `qwen:64k`, one inference at a time, with no
+  silent model fallback.
+- Each role receives an isolated context and only its approved tools and skills.
+- Tool loops and complete-context use remain inside their deterministic budgets.
+- Real-time monitoring remains deterministic while Qwen runs only on admitted
+  events or approved scheduled review.
 
 ## Source alignment
 
