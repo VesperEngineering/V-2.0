@@ -50,6 +50,7 @@ def test_security_attributes_are_explicit_protected_current_logon_only() -> None
     attributes = current_user_security_attributes()
 
     assert type(attributes).__name__ == "PySECURITY_ATTRIBUTES"
+    assert attributes.bInheritHandle == 0
     handle = win32pipe.CreateNamedPipe(
         pipe_name(logon_sid),
         win32pipe.PIPE_ACCESS_DUPLEX | win32pipe.FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -61,6 +62,7 @@ def test_security_attributes_are_explicit_protected_current_logon_only() -> None
         attributes,
     )
     try:
+        assert win32api.GetHandleInformation(handle) & win32con.HANDLE_FLAG_INHERIT == 0
         descriptor = win32security.GetSecurityInfo(
             handle,
             win32security.SE_KERNEL_OBJECT,

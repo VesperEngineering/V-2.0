@@ -44,23 +44,15 @@ def pipe_name(logon_sid: str) -> str:
     return rf"\\.\pipe\vesper-v20-tui-{suffix}"
 
 
-def current_user_security_attributes() -> "pywintypes.SECURITY_ATTRIBUTES":
-    """Build a protected DACL that grants only the current logon SID."""
-
-    _require_windows()
+def _protected_dacl(rights: int) -> "win32security.ACL":
     sid = win32security.ConvertStringSidToSid(current_logon_sid())
-    rights = (
-        ntsecuritycon.FILE_READ_DATA
-        | ntsecuritycon.FILE_WRITE_DATA
-        | ntsecuritycon.FILE_READ_ATTRIBUTES
-        | ntsecuritycon.FILE_WRITE_ATTRIBUTES
-        | ntsecuritycon.FILE_READ_EA
-        | ntsecuritycon.FILE_WRITE_EA
-        | ntsecuritycon.READ_CONTROL
-        | ntsecuritycon.SYNCHRONIZE
-    )
     dacl = win32security.ACL()
     dacl.AddAccessAllowedAce(win32security.ACL_REVISION, rights, sid)
+    return dacl
+
+
+def _security_attributes(rights: int) -> "pywintypes.SECURITY_ATTRIBUTES":
+    dacl = _protected_dacl(rights)
     descriptor = win32security.SECURITY_DESCRIPTOR()
     descriptor.Initialize()
     descriptor.SetSecurityDescriptorDacl(True, dacl, False)
@@ -69,5 +61,49 @@ def current_user_security_attributes() -> "pywintypes.SECURITY_ATTRIBUTES":
         win32security.SE_DACL_PROTECTED,
     )
     attributes = pywintypes.SECURITY_ATTRIBUTES()
+    attributes.bInheritHandle = False
     attributes.SECURITY_DESCRIPTOR = descriptor
     return attributes
+
+
+_FINAL_PIPE_RIGHTS = (
+    ntsecuritycon.FILE_READ_DATA
+    | ntsecuritycon.FILE_WRITE_DATA
+    | ntsecuritycon.FILE_READ_ATTRIBUTES
+    | ntsecuritycon.FILE_WRITE_ATTRIBUTES
+    | ntsecuritycon.FILE_READ_EA
+    | ntsecuritycon.FILE_WRITE_EA
+    | ntsecuritycon.READ_CONTROL
+    | ntsecuritycon.SYNCHRONIZE
+) if sys.platform == "win32" else 0
+
+
+def current_user_security_attributes() -> "pywintypes.SECURITY_ATTRIBUTES":
+    """Build a non-inheritable final DACL for only the current logon SID."""
+
+    _require_windows()
+    return _security_attributes(_FINAL_PIPE_RIGHTS)
+
+
+def bootstrap_security_attributes() -> "pywintypes.SECURITY_ATTRIBUTES":
+    """Temporarily let the trusted current logon preclaim all four instances."""
+
+    _require_windows()
+    rights = _FINAL_PIPE_RIGHTS | ntsecuritycon.FILE_APPEND_DATA | ntsecuritycon.WRITE_DAC
+    return _security_attributes(rights)
+
+
+def lock_down_pipe(handle: object) -> None:
+    """Apply the protected final DACL before any instance begins accepting."""
+
+    _require_windows()
+    win32security.SetSecurityInfo(
+        handle,
+        win32security.SE_KERNEL_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION
+        | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        _protected_dacl(_FINAL_PIPE_RIGHTS),
+        None,
+    )
