@@ -1,0 +1,28 @@
+---
+source: tests/snapshots.rs
+expression: "normalized_render(80, 24, & state)"
+---
+┌Vesper v20 - Authentication───────────────────────────────────────────────────┐
+│V20 CONSOLE FIRST RUN                                                         │
+│Create console password.                                                      │
+│Password:                                                                     │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

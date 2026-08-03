@@ -19,6 +19,9 @@ use crate::contract::{
 };
 use crate::input::InputEvent;
 use crate::launcher::{GatewayLauncher, LaunchError};
+use crate::preferences::{
+    LoadedPreferences, load_preferences, preferences_path, save_preferences_to,
+};
 use crate::state::{AccessState, AppState, ClientAction, ProtocolError, ReduceOutcome};
 use crate::transport::{PipeTransport, TransportError};
 
@@ -95,6 +98,38 @@ impl MouseCaptureTracker {
 pub struct LoopEffect {
     pub exit: bool,
     pub foundation_actions: Vec<ClientAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreferencePersistence {
+    Idle,
+    Saved,
+    Unavailable,
+}
+
+#[doc(hidden)]
+pub fn persist_pending_preferences_to(state: &mut AppState, path: &Path) -> PreferencePersistence {
+    let Some(preferences) = state.pending_preferences().cloned() else {
+        return PreferencePersistence::Idle;
+    };
+    let succeeded = save_preferences_to(path, &preferences).is_ok();
+    state.finish_preferences_save(succeeded);
+    if succeeded {
+        PreferencePersistence::Saved
+    } else {
+        PreferencePersistence::Unavailable
+    }
+}
+
+fn persist_pending_preferences(state: &mut AppState) -> PreferencePersistence {
+    if state.pending_preferences().is_none() {
+        return PreferencePersistence::Idle;
+    }
+    let Ok(path) = preferences_path() else {
+        state.finish_preferences_save(false);
+        return PreferencePersistence::Unavailable;
+    };
+    persist_pending_preferences_to(state, &path)
 }
 
 #[derive(Debug)]
@@ -668,7 +703,8 @@ pub async fn run_terminal_loop(terminal: &mut DefaultTerminal, repo_root: &Path)
             };
             transport
         };
-        match run_connected_loop(terminal, transport).await? {
+        let loaded_preferences = load_preferences();
+        match run_connected_loop(terminal, transport, loaded_preferences).await? {
             SessionStep::Exit => return Ok(()),
             SessionStep::Reconnect => {
                 let mut control = TerminalConnectionControl::new(terminal);
@@ -685,8 +721,11 @@ pub async fn run_terminal_loop(terminal: &mut DefaultTerminal, repo_root: &Path)
 async fn run_connected_loop<S: FoundationSession>(
     terminal: &mut DefaultTerminal,
     mut session: S,
+    loaded_preferences: LoadedPreferences,
 ) -> io::Result<SessionStep> {
-    let mut client = FoundationClient::new();
+    let mut state = AppState::locked();
+    state.apply_loaded_preferences(loaded_preferences);
+    let mut client = FoundationClient::from_app(App::new(state));
     let mut mouse = TerminalMouseCapture::new();
     if client.start(&mut session).await.is_err() {
         prepare_reconnect(terminal, &mut client, &mut mouse)?;
@@ -816,23 +855,10 @@ fn refresh_terminal(
     client: &mut FoundationClient,
     mouse: &mut TerminalMouseCapture,
 ) -> io::Result<()> {
+    let _ = persist_pending_preferences(&mut client.app.state);
     mouse.sync(client.app.state().access)?;
     if client.app.take_redraw() {
-        terminal.draw(|frame| render(frame, client.app.state()))?;
+        terminal.draw(|frame| crate::ui::render(frame, client.app.state()))?;
     }
     Ok(())
-}
-
-fn render(frame: &mut ratatui::Frame<'_>, state: &AppState) {
-    let text = match state.access {
-        AccessState::Locked => "V20 console locked. Enter password when prompted. Ctrl+C closes.",
-        AccessState::FirstRun => "Create console password. Ctrl+C closes.",
-        AccessState::Controller => "V20 console unlocked: controller.",
-        AccessState::Viewer => "V20 console unlocked: viewer.",
-        AccessState::ProtocolLockout => "Connection locked. Reconnecting safely.",
-    };
-    frame.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Vesper v20")),
-        frame.area(),
-    );
 }

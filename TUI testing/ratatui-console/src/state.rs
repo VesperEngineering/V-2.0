@@ -4,6 +4,9 @@ use crate::contract::{
     AccessState as WireAccessState, Envelope, LeaseStatus, Message, PasswordString, ShellSnapshot,
 };
 use crate::input::InputEvent;
+use crate::layout::DisplayMode;
+use crate::preferences::{LoadedPreferences, ScreenId, ScreenPreferences, UiPreferences};
+use crate::theme::Theme;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Screen {
@@ -61,6 +64,15 @@ pub enum AuthStage {
     #[default]
     Password,
     Confirmation,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuthFeedback {
+    #[default]
+    None,
+    Pending,
+    Failed,
+    PasswordMismatch,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -157,12 +169,16 @@ struct ViewKey {
     auth_stage: AuthStage,
     password_characters: usize,
     confirmation_characters: usize,
+    auth_feedback: AuthFeedback,
     local_input: String,
     state_version: u64,
     awaiting_snapshot: bool,
     lock_pending: bool,
     lease_pending: bool,
     phase: SessionPhase,
+    theme: Theme,
+    display_mode: DisplayMode,
+    preferences_unavailable: bool,
 }
 
 #[derive(Debug)]
@@ -174,6 +190,7 @@ pub struct AppState {
     auth_stage: AuthStage,
     password: SecretBuffer,
     confirmation: SecretBuffer,
+    auth_feedback: AuthFeedback,
     local_input: String,
     state_version: u64,
     last_sequence: u64,
@@ -182,6 +199,9 @@ pub struct AppState {
     lease_pending: bool,
     phase: SessionPhase,
     dirty: bool,
+    preferences: UiPreferences,
+    preferences_unavailable: bool,
+    preferences_save_pending: bool,
 }
 
 impl AppState {
@@ -216,6 +236,7 @@ impl AppState {
             auth_stage: AuthStage::Password,
             password: SecretBuffer::default(),
             confirmation: SecretBuffer::default(),
+            auth_feedback: AuthFeedback::None,
             local_input: String::new(),
             state_version: 0,
             last_sequence: 0,
@@ -224,6 +245,9 @@ impl AppState {
             lease_pending: false,
             phase,
             dirty: true,
+            preferences: UiPreferences::default(),
+            preferences_unavailable: false,
+            preferences_save_pending: false,
         }
     }
 
@@ -236,6 +260,10 @@ impl AppState {
             AuthStage::Password => self.password.masked(),
             AuthStage::Confirmation => self.confirmation.masked(),
         }
+    }
+
+    pub fn auth_feedback(&self) -> AuthFeedback {
+        self.auth_feedback
     }
 
     pub fn state_version(&self) -> u64 {
@@ -252,6 +280,66 @@ impl AppState {
 
     pub fn auth_pending(&self) -> bool {
         matches!(self.phase, SessionPhase::AwaitingAuthResult { .. })
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.preferences.theme
+    }
+
+    pub fn display_mode(&self) -> DisplayMode {
+        self.preferences.display_mode
+    }
+
+    pub fn preferences(&self) -> &UiPreferences {
+        &self.preferences
+    }
+
+    pub fn preferences_unavailable(&self) -> bool {
+        self.preferences_unavailable
+    }
+
+    pub fn apply_loaded_preferences(&mut self, loaded: LoadedPreferences) {
+        self.preferences = loaded.preferences;
+        self.preferences_unavailable = loaded.unavailable_reason.is_some();
+        self.preferences_save_pending = false;
+        self.dirty = true;
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) {
+        if self.preferences.theme != theme {
+            self.preferences.theme = theme;
+            self.preferences_save_pending = true;
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_display_mode(&mut self, display_mode: DisplayMode) {
+        if self.preferences.display_mode != display_mode {
+            self.preferences.display_mode = display_mode;
+            self.preferences_save_pending = true;
+            self.dirty = true;
+        }
+    }
+
+    pub fn set_screen_preferences(&mut self, screen: ScreenId, preferences: ScreenPreferences) {
+        if self.preferences.screens.get(&screen) != Some(&preferences) {
+            self.preferences.screens.insert(screen, preferences);
+            self.preferences_save_pending = true;
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn pending_preferences(&self) -> Option<&UiPreferences> {
+        self.preferences_save_pending.then_some(&self.preferences)
+    }
+
+    pub(crate) fn finish_preferences_save(&mut self, succeeded: bool) {
+        self.preferences_save_pending = false;
+        let unavailable = !succeeded;
+        if self.preferences_unavailable != unavailable {
+            self.preferences_unavailable = unavailable;
+            self.dirty = true;
+        }
     }
 
     pub fn reduce(&mut self, envelope: Envelope) -> Result<ReduceOutcome, ProtocolError> {
@@ -356,6 +444,7 @@ impl AppState {
                 };
                 self.clear_auth();
                 if payload.success {
+                    self.auth_feedback = AuthFeedback::None;
                     self.access = match payload.access_state {
                         WireAccessState::Viewer => AccessState::Viewer,
                         WireAccessState::Controller => {
@@ -388,6 +477,7 @@ impl AppState {
                     } else {
                         AccessState::Locked
                     };
+                    self.auth_feedback = AuthFeedback::Failed;
                     self.phase = SessionPhase::AwaitingAuth { first_run };
                     self.awaiting_snapshot = false;
                     Ok(ReduceOutcome::Changed)
@@ -550,26 +640,37 @@ impl AppState {
             auth_stage: self.auth_stage,
             password_characters: self.password.0.chars().count(),
             confirmation_characters: self.confirmation.0.chars().count(),
+            auth_feedback: self.auth_feedback,
             local_input: self.local_input.clone(),
             state_version: self.state_version,
             awaiting_snapshot: self.awaiting_snapshot,
             lock_pending: self.lock_pending,
             lease_pending: self.lease_pending,
             phase: self.phase,
+            theme: self.theme(),
+            display_mode: self.display_mode(),
+            preferences_unavailable: self.preferences_unavailable,
         }
     }
 
     fn handle_auth(&mut self, event: InputEvent) -> Vec<ClientAction> {
         match event {
-            InputEvent::Char(character) => match self.auth_stage {
-                AuthStage::Password => self.password.push(character),
-                AuthStage::Confirmation => self.confirmation.push(character),
-            },
-            InputEvent::Backspace => match self.auth_stage {
-                AuthStage::Password => self.password.pop(),
-                AuthStage::Confirmation => self.confirmation.pop(),
-            },
+            InputEvent::Char(character) => {
+                self.auth_feedback = AuthFeedback::None;
+                match self.auth_stage {
+                    AuthStage::Password => self.password.push(character),
+                    AuthStage::Confirmation => self.confirmation.push(character),
+                }
+            }
+            InputEvent::Backspace => {
+                self.auth_feedback = AuthFeedback::None;
+                match self.auth_stage {
+                    AuthStage::Password => self.password.pop(),
+                    AuthStage::Confirmation => self.confirmation.pop(),
+                }
+            }
             InputEvent::Escape => {
+                self.auth_feedback = AuthFeedback::None;
                 if self.auth_stage == AuthStage::Confirmation {
                     self.confirmation.clear();
                     self.auth_stage = AuthStage::Password;
@@ -585,11 +686,13 @@ impl AppState {
                 } else if !self.confirmation.is_empty() {
                     if !self.password.matches(&self.confirmation) {
                         self.confirmation.clear();
+                        self.auth_feedback = AuthFeedback::PasswordMismatch;
                     } else if let (Some(password), Some(confirmation)) = (
                         self.password.take_password(),
                         self.confirmation.take_password(),
                     ) {
                         self.auth_stage = AuthStage::Password;
+                        self.auth_feedback = AuthFeedback::Pending;
                         self.phase = SessionPhase::AwaitingAuthResult { first_run: true };
                         return vec![ClientAction::Authenticate(AuthRequest::Setup {
                             password,
@@ -600,6 +703,7 @@ impl AppState {
             }
             InputEvent::Enter if !self.password.is_empty() => {
                 if let Some(password) = self.password.take_password() {
+                    self.auth_feedback = AuthFeedback::Pending;
                     self.phase = SessionPhase::AwaitingAuthResult { first_run: false };
                     return vec![ClientAction::Authenticate(AuthRequest::Unlock { password })];
                 }
@@ -668,6 +772,7 @@ impl AppState {
         self.auth_stage = AuthStage::Password;
         self.password.clear();
         self.confirmation.clear();
+        self.auth_feedback = AuthFeedback::None;
     }
 
     fn begin_manual_lock(&mut self) {

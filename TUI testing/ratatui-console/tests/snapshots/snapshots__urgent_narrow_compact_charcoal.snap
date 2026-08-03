@@ -1,0 +1,29 @@
+---
+source: tests/snapshots.rs
+assertion_line: 614
+expression: "normalized_render(80, 24, & state)"
+---
+┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE               │
+│TIME 2026-01-15 07:34:56 EST | MARKET Closed                                  │
+│REGIME UNAVAILABLE | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE           │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                  │
+│ALERTS URGENT 1 / OPEN 1 | AGENT UNAVAILABLE | QWEN UNAVAILABLE               │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────┐
+│[1 Imp] | 2 Port | 3 Ord | 4 Agt | 5 Mod | 6 Time | 7 Risk | 8 Data | 9 Mem | │
+│0 Sys                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────┐
+│[!] URGENT - Immediate review required.                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌SCREEN: Impact────────────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Phase 1 provides the secure console shell only.                 │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Phase 1 provides the secure console shell only.                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────┐
+│1-9,0 Screens | q Close TUI only | Phase 1 secure shell                       │
+└──────────────────────────────────────────────────────────────────────────────┘

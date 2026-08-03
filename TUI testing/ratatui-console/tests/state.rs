@@ -2,7 +2,9 @@ use serde_json::{Value, json};
 
 use vesper_ratatui_console::contract::Envelope;
 use vesper_ratatui_console::input::InputEvent;
-use vesper_ratatui_console::state::{AccessState, AppState, ClientAction, ReduceOutcome, Screen};
+use vesper_ratatui_console::state::{
+    AccessState, AppState, AuthFeedback, ClientAction, ReduceOutcome, Screen,
+};
 
 fn envelope(sequence: u64, state_version: u64, message_type: &str, payload: Value) -> Envelope {
     serde_json::from_value(json!({
@@ -444,6 +446,36 @@ fn auth_failure_clears_secret_and_remains_in_the_current_auth_flow() {
     );
     assert_eq!(setup.access, AccessState::FirstRun);
     assert_eq!(setup.masked_auth_input(), "");
+}
+
+#[test]
+fn authentication_feedback_tracks_pending_failure_and_first_run_mismatch() {
+    let mut unlock = AppState::locked();
+    unlock.reduce(server_hello(1, false)).unwrap();
+    unlock.handle(InputEvent::Char('x'));
+    unlock.handle(InputEvent::Enter);
+    assert_eq!(unlock.auth_feedback(), AuthFeedback::Pending);
+    unlock
+        .reduce(envelope(
+            2,
+            0,
+            "auth-result",
+            json!({
+                "success": false,
+                "access_state": "locked",
+                "reason": "SENSITIVE SERVER DETAIL"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(unlock.auth_feedback(), AuthFeedback::Failed);
+
+    let mut setup = AppState::locked();
+    setup.reduce(server_hello(1, true)).unwrap();
+    setup.handle(InputEvent::Char('a'));
+    setup.handle(InputEvent::Enter);
+    setup.handle(InputEvent::Char('b'));
+    setup.handle(InputEvent::Enter);
+    assert_eq!(setup.auth_feedback(), AuthFeedback::PasswordMismatch);
 }
 
 #[test]

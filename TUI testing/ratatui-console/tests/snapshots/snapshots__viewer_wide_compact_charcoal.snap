@@ -1,0 +1,41 @@
+---
+source: tests/snapshots.rs
+assertion_line: 587
+expression: "normalized_render(120, 36, & state)"
+---
+┌RUNTIME & MARKET - READ ONLY──────────────────────────────────────────────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE                                                       │
+│TIME UNAVAILABLE - Eastern time unavailable | MARKET UNAVAILABLE                                                      │
+│REGIME UNAVAILABLE | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE                                                   │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                                                          │
+│ALERTS UNAVAILABLE | AGENT UNAVAILABLE | QWEN UNAVAILABLE                                                             │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[1 Impact] | 2 Portfolio | 3 Orders | 4 Agents | 5 Models & Regime | 6 Timeline | 7 Risk & Approvals | 8 Data &       │
+│Evidence | 9 Memory | 0 System                                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[?] ALERTS UNAVAILABLE                                                                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌SCREEN: Impact──────────────────────────────────────────────────────────────┐┌PHASE 1 AVAILABILITY────────────────────┐
+│UNAVAILABLE - Phase 1 provides the secure console shell only.               ││UNAVAILABLE - Phase 1 provides the      │
+│                                                                            ││secure console shell only.              │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+│                                                                            ││                                        │
+└────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────┘
+┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Phase 1 provides the secure console shell only.                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│1-9,0 Screens | q Close TUI only | Phase 1 secure shell                                                               │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
