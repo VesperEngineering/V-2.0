@@ -70,6 +70,7 @@ class ProposalStatus(StrEnum):
 
 class JournalEventType(StrEnum):
     OBSERVATION = "observation"
+    ACTION_COMPLETED = "action-completed"
     PROPOSAL_CREATED = "proposal-created"
     ROUTING_DECISION = "routing-decision"
     TOOL_REQUEST = "tool-request"

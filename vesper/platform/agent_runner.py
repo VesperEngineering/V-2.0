@@ -144,6 +144,17 @@ class AutonomousAgentRunner:
         ):
             record_validation_failure("UnboundProposalEvidence")
             raise ValueError("agent proposal cites evidence not supplied by the controller")
+        self.journal.append(
+            event_id=f"{run_id}:{role.value}:action-completed",
+            role=role,
+            session_id=session_id,
+            run_id=run_id,
+            task_id=task_id,
+            repository_revision=repository_revision,
+            created_at=created_at,
+            event_type=JournalEventType.ACTION_COMPLETED,
+            payload=self._completed_output_payload(output),
+        )
         decisions: list[ProposalRoutingDecision] = []
         for index, proposal in enumerate(output.proposals, start=1):
             self.journal.append(
@@ -181,6 +192,32 @@ class AutonomousAgentRunner:
                 },
             )
         return AgentRunResult(output, tuple(decisions), turn)
+
+    @staticmethod
+    def _completed_output_payload(output: QuantAgentOutput) -> dict[str, str | float | int]:
+        payload: dict[str, str | float | int] = {
+            "summary": output.summary,
+            "confidence": output.confidence,
+            "evidence_ids": json.dumps(output.evidence_ids, separators=(",", ":")),
+            "limitations": json.dumps(output.limitations, separators=(",", ":")),
+            "proposal_count": len(output.proposals),
+        }
+        for field in (
+            "hypotheses",
+            "priorities",
+            "findings",
+            "challenges",
+            "verdict",
+            "exposures",
+            "constraints",
+            "diagnostics",
+        ):
+            value = getattr(output, field, None)
+            if value is not None:
+                payload[field] = (
+                    value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
+                )
+        return payload
 
     def _prompt(
         self,

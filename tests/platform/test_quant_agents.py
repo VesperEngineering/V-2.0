@@ -5,7 +5,7 @@ import pytest
 
 from vesper.platform.agent_profiles import AgentProfileCatalog, AgentProfileIntegrityError
 from vesper.platform.agent_runner import AutonomousAgentRunner
-from vesper.platform.contracts import AgentRole, ProposalStatus
+from vesper.platform.contracts import AgentRole, JournalEventType, ProposalStatus
 from vesper.platform.journals import AgentJournal
 from vesper.platform.persistence import PlatformPaths, open_persistence
 from vesper.platform.qwen_runtime import QwenTurnResult
@@ -100,8 +100,26 @@ def test_each_agent_output_is_typed_and_proposal_only(role):
     assert parsed.proposals[0].role is role
 
 
-def test_runner_routes_and_journals_agent_output(tmp_path):
-    role = AgentRole.QUANT_RESEARCH_LEAD
+@pytest.mark.parametrize(
+    ("role", "conclusions"),
+    (
+        (
+            AgentRole.QUANT_RESEARCH_LEAD,
+            {"hypotheses": '["Signal may persist."]', "priorities": '["Validate OOS."]'},
+        ),
+        (AgentRole.MODEL_RESEARCHER, {"findings": '["Metadata is internally consistent."]'}),
+        (
+            AgentRole.INDEPENDENT_QUANT_VALIDATOR,
+            {"challenges": '["Check leakage."]', "verdict": "inconclusive"},
+        ),
+        (
+            AgentRole.PORTFOLIO_RESEARCHER,
+            {"exposures": '["Sector concentration."]', "constraints": '["No allocation change."]'},
+        ),
+        (AgentRole.EXECUTION_PERFORMANCE_ANALYST, {"diagnostics": '["Slippage rose."]'}),
+    ),
+)
+def test_runner_journals_validated_completed_output_for_each_role(tmp_path, role, conclusions):
 
     class Qwen:
         def run(self, actual_role, prompt, **kwargs):
@@ -130,14 +148,33 @@ def test_runner_routes_and_journals_agent_output(tmp_path):
         )
         assert result.decisions[0].status is ProposalStatus.ADMITTED
         events = journal.list(role, "session-1")
-        assert len(events) == 3
-        assert events[-1].payload["routed_to"] == AgentRole.QUANT_RESEARCH_LEAD.value
+        assert [event.event_type for event in events] == [
+            JournalEventType.OBSERVATION,
+            JournalEventType.ACTION_COMPLETED,
+            JournalEventType.PROPOSAL_CREATED,
+            JournalEventType.ROUTING_DECISION,
+        ]
+        completed_output = events[1].payload
+        assert completed_output == {
+            "summary": "Bounded evidence review.",
+            "confidence": 0.7,
+            "evidence_ids": '["artifact-1"]',
+            "limitations": '["Synthetic evidence."]',
+            "proposal_count": 1,
+            **conclusions,
+        }
+        assert all(
+            not isinstance(value, (list, dict, tuple)) for value in completed_output.values()
+        )
         digest = DailyReviewService(persistence.store, tmp_path / "review").render(
             NOW.date(), {role: events}
         )
         markdown = digest.markdown_path.read_text(encoding="utf-8")
+        assert "Bounded evidence review." in markdown
+        assert "action-completed" in markdown
+        assert all(key in markdown for key in conclusions)
         assert "Run a bounded follow-up." in markdown
-        assert "v20-quant-research-lead" in markdown
+        assert role.value in markdown
 
 
 def test_runner_binds_controller_authority_into_prompt_and_response_schema(tmp_path):
