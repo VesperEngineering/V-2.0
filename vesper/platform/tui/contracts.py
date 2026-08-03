@@ -381,11 +381,15 @@ DiagnosticCallback: TypeAlias = Callable[[UntrustedProtocolDiagnostic], None]
 
 
 class _UntrustedDiagnosticState:
-    __slots__ = ("active", "views")
+    __slots__ = ("active", "containers", "views")
 
     def __init__(self, values: dict[str, JsonValue]) -> None:
         self.active = True
+        self.containers: list[dict[str, JsonValue] | list[JsonValue]] = [values]
         self.views: list[_RevocableJsonScalar] = []
+
+    def register_container(self, values: dict[str, JsonValue] | list[JsonValue]) -> None:
+        self.containers.append(values)
 
     def register(self, view: _RevocableJsonScalar) -> None:
         self.views.append(view)
@@ -395,6 +399,45 @@ class _UntrustedDiagnosticState:
         for view in self.views:
             view._revoke()
         self.views.clear()
+        for values in self.containers:
+            _scrub_json_value(values)
+        self.containers.clear()
+
+
+def _scrub_json_value(value: dict[str, JsonValue] | list[JsonValue]) -> None:
+    if isinstance(value, dict):
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                _scrub_json_value(child)
+        value.clear()
+        return
+    for child in value:
+        if isinstance(child, (dict, list)):
+            _scrub_json_value(child)
+    value.clear()
+
+
+class _RevocableJsonIterator:
+    __slots__ = ("_state", "_iterator", "_transform")
+
+    def __init__(self, state: _UntrustedDiagnosticState, iterator: object, transform: Callable[[object], object]) -> None:
+        self._state = state
+        self._iterator = iterator
+        self._transform = transform
+
+    def __iter__(self) -> _RevocableJsonIterator:
+        return self
+
+    def __next__(self) -> object:
+        if not self._state.active:
+            raise StopIteration
+        return self._transform(next(self._iterator))
+
+    def __getstate__(self) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be serialized")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be pickled")
 
 
 class _RevocableJsonScalar:
@@ -444,8 +487,8 @@ class _RevocableJsonMapping(Mapping[str, object]):
             raise KeyError(key)
         return _revocable_json_value(self._state, self._values[key])
 
-    def __iter__(self):
-        return iter(self._values if self._state.active else ())
+    def __iter__(self) -> _RevocableJsonIterator:
+        return _RevocableJsonIterator(self._state, iter(self._values), lambda key: key)
 
     def __len__(self) -> int:
         return len(self._values) if self._state.active else 0
@@ -468,8 +511,17 @@ class _RevocableJsonSequence(Sequence[object]):
         if not self._state.active:
             raise IndexError(index)
         if isinstance(index, slice):
-            return tuple(_revocable_json_value(self._state, value) for value in self._values[index])
+            values = self._values[index]
+            self._state.register_container(values)
+            return _RevocableJsonSequence(self._state, values)
         return _revocable_json_value(self._state, self._values[index])
+
+    def __iter__(self) -> _RevocableJsonIterator:
+        return _RevocableJsonIterator(
+            self._state,
+            iter(range(len(self._values))),
+            lambda index: _revocable_json_value(self._state, self._values[index]),
+        )
 
     def __len__(self) -> int:
         return len(self._values) if self._state.active else 0

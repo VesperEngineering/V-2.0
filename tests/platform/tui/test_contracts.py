@@ -200,6 +200,54 @@ def test_retained_unknown_scalar_view_is_inaccessible_after_callback() -> None:
         str(retained_scalars[0])
 
 
+def test_retained_unknown_iterators_and_views_are_revoked_after_callback() -> None:
+    wire = (
+        b'{"schema_version":1,"message_id":"server:1","sequence":1,'
+        b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
+        b'"message_type":"lease-request",'
+        b'"payload":{"action":"take-control","secret":"x",'
+        b'"nested":{"secret":"y"},"entries":["z"]}}'
+    )
+    retained: dict[str, object] = {}
+
+    def receive(diagnostic: UntrustedProtocolDiagnostic) -> None:
+        root = diagnostic.unknown_fields
+        nested = root["nested"]
+        entries = root["entries"]
+        retained.update(
+            root_iterator=iter(root),
+            nested_view=nested,
+            nested_iterator=iter(nested),
+            list_view=entries,
+            list_iterator=iter(entries),
+            list_slice=entries[:],
+            list_item=entries[0],
+            keys_iterator=iter(root.keys()),
+            values_iterator=iter(root.values()),
+            items_iterator=iter(root.items()),
+        )
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(wire, receive)
+
+    for name in (
+        "root_iterator",
+        "nested_iterator",
+        "list_iterator",
+        "keys_iterator",
+        "values_iterator",
+        "items_iterator",
+    ):
+        assert list(retained[name]) == []
+        with pytest.raises(TypeError):
+            pickle.dumps(retained[name])
+    assert retained["nested_view"] == {}
+    assert list(retained["list_view"]) == []
+    assert list(retained["list_slice"]) == []
+    with pytest.raises(RuntimeError, match="expired"):
+        str(retained["list_item"])
+
+
 def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> None:
     wire = json.dumps(
         {
