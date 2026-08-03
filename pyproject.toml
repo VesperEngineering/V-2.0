@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 vesper-agent = "vesper.platform.cli:main"
+vesper-tui-gateway = "vesper.platform.tui.cli:main"
 
 [dependency-groups]
 dev = [
