@@ -4,6 +4,34 @@ Status: approved; implementation not started
 Date: 2026-08-03
 Location: `C:\Users\bgonn\Desktop\v20\TUI testing`
 
+## 0. Approved errata and precedence
+
+This section corrects ambiguous language elsewhere in this design and takes
+precedence over every later section and the historical bakeoff documents.
+
+- Wire and stored timestamps are UTC with zero offset. Field names use `_at_utc`
+  or `_time_utc`. Only Rust presentation converts them to
+  `America/New_York`; EST/EDT never crosses the wire or enters storage.
+- Until a reviewed runtime-status adapter returns a value, operating mode is
+  `UNKNOWN` with freshness `UNAVAILABLE` and reason `No reviewed runtime-status
+  adapter is configured.` The gateway must not infer `STOPPED`.
+- `state_version` and event `sequence` describe presentation delivery only.
+  `control_version` and `control_hash` are separate controller authority facts.
+  Every governed command binds the exact control pair the operator reviewed.
+- Every typed Python and Rust contract rejects unknown fields. The decoder may
+  pass one frame's unknown-field object and SHA-256 to a synchronous
+  `UntrustedProtocolDiagnostic` callback. The diagnostic is capped by the 1 MiB
+  frame limit, destroyed when the callback returns, and never rendered, logged,
+  persisted, placed in receipts, or passed to policy or handlers.
+- Every full snapshot carries `command_specs`. Observability defines the neutral
+  strict view and publishes `[]`; controls publishes exactly the 31 authoritative
+  rows from section 4.4. Rust replaces its local command-spec map atomically on
+  each snapshot and never invents a row.
+- Runtime start, continuous work, daily curation, candidate training, candidate
+  deletion, and automatic merge each use `ActivationGrant(enabled,
+  receipt_id)`. Enabled requires a matching validated controller receipt;
+  disabled requires no receipt. Adapter availability cannot activate a grant.
+
 ## 1. Purpose
 
 Build a production-quality local Ratatui console that mirrors V20 truthfully and
@@ -126,16 +154,83 @@ Every message uses a versioned typed contract with:
 - message or request ID;
 - monotonic event sequence;
 - current state version;
-- Eastern Time timestamp;
+- canonical UTC timestamp named `timestamp_utc`;
 - message type;
 - typed payload.
 
 The first successful connection returns a complete snapshot. Later changes use
 events. A sequence gap, reconnect, or schema mismatch forces a fresh snapshot.
 
-State-changing commands include the state version the operator saw. If that
-version is no longer current, the controller rejects the command as stale and
-requires the operator to review the new state.
+State-changing commands include the `control_version` and `control_hash` the
+operator saw. If either is no longer current, the controller rejects the command
+as stale and requires the operator to review the new authority facts.
+
+### 4.4 Authoritative governed-command decision table
+
+This is the complete command catalog. `capability ID` is exact. Payload models
+are strict and frozen; every field shown is required unless marked optional.
+`EmptyPayload` has no fields. `NonEmptyStr` is trimmed length 1..512,
+`SafeId` matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`, `Sha256Hex` is 64
+lowercase hexadecimal characters, `GitRevision` is 40 or 64 lowercase
+hexadecimal characters, `ScreenName` is exactly `impact`, `portfolio`, `orders`,
+`agents`, `models-regime`, `timeline`, `risk-approvals`, `data-evidence`,
+`memory`, or `system`, and `DecimalString` is a finite base-10 string without
+exponent notation. Unknown commands, fields, enum values, and
+payloads above 64 KiB are rejected before policy or handler execution.
+Python owns an exact immutable `PAYLOAD_MODELS` mapping for all 31 commands.
+`CommandRequest` constructs a dictionary payload through the mapped class and
+then requires `type(payload) is PAYLOAD_MODELS[command_type]`; a valid payload
+model belonging to another command is rejected as `payload-model-mismatch`.
+
+Reason rules are exact: `forbidden` requires JSON `null`; `optional` allows
+`null` or trimmed text of 1..2,000 characters; `required` requires trimmed text
+of 1..2,000 characters. Confirmation levels are `none`, `confirm`,
+`double-confirm`, and `typed-live`; `typed-live` accepts only case-sensitive
+`ENABLE LIVE`.
+
+| Command | Exact payload model and fields | Capability ID | Reason | Confirmation |
+| --- | --- | --- | --- | --- |
+| `note.add` | `NoteAddPayload(target_type: stock\|order\|approval\|agent-event, target_id: SafeId, body: str[1..8000], visibility: private\|shared)` | `note.add` | forbidden | none |
+| `alert.dismiss` | `AlertDismissPayload(alert_id: SafeId)` | `alert.dismiss` | forbidden | none |
+| `layout.reset` | `LayoutResetPayload(screen: ScreenName optional)` | `layout.reset` | forbidden | none |
+| `approval.approve` | `ApprovalPayload(run_id: SafeId, checkpoint_id: SafeId)` | `approval.approve` | optional | confirm |
+| `approval.hold` | `ApprovalPayload(run_id: SafeId, checkpoint_id: SafeId)` | `approval.hold` | required | confirm |
+| `approval.reject` | `ApprovalPayload(run_id: SafeId, checkpoint_id: SafeId)` | `approval.reject` | required | confirm |
+| `approval.rework` | `ApprovalReworkPayload(run_id: SafeId, checkpoint_id: SafeId, evidence_ids: tuple[SafeId, ...])` | `approval.rework` | required | confirm |
+| `agent.send-message` | `AgentMessagePayload(agent_id: SafeId, text: str[1..8000], selected_entity_type: str optional, selected_entity_id: SafeId optional)` | `agent.send-message` | forbidden | none |
+| `agent.enqueue` | `AgentEnqueuePayload(agent_id: SafeId, title: NonEmptyStr, objective: str[1..8000], priority: int[0..100])` | `agent.enqueue` | required | confirm |
+| `agent.pause` | `AgentWorkPayload(work_id: SafeId)` | `agent.pause` | required | confirm |
+| `agent.stop` | `AgentStopPayload(work_id: SafeId, workflow_run_id: SafeId optional)` | `agent.stop` | required | confirm |
+| `agent.retry` | `AgentWorkPayload(work_id: SafeId)` | `agent.retry` | required | confirm |
+| `agent.set-priority` | `AgentPriorityPayload(work_id: SafeId, priority: int[0..100])` | `agent.set-priority` | required | confirm |
+| `risk.propose-limit` | `RiskLimitPayload(limit_id: SafeId, proposed_value: DecimalString, evidence_ids: tuple[SafeId, ...])` | `risk.propose-limit` | required | confirm |
+| `trading.pause` | `EmptyPayload` | `trading.pause` | required | confirm |
+| `trading.emergency-stop` | `EmptyPayload` | `trading.emergency-stop` | required | double-confirm |
+| `service.pause` | `ServicePayload(service_id: SafeId)` | `service.pause` | required | confirm |
+| `service.restart` | `ServicePayload(service_id: SafeId)` | `service.restart` | required | confirm |
+| `runtime.start` | `RuntimeStartPayload(mode: shadow\|paper, activation_receipt_id: SafeId)` | `runtime.start` | required | confirm |
+| `runtime.stop-safe` | `EmptyPayload` | `runtime.stop-safe` | required | confirm |
+| `runtime.stop-force` | `EmptyPayload` | `runtime.stop-force` | required | double-confirm |
+| `runtime.prepare-shutdown` | `EmptyPayload` | `runtime.prepare-shutdown` | required | confirm |
+| `mode.switch` | `ModeSwitchPayload(target_mode: shadow\|paper)` | `mode.switch` | required | confirm |
+| `mode.leave-live` | `ModeSwitchPayload(target_mode: shadow\|paper)` | `mode.leave-live` | required | confirm |
+| `mode.enable-live` | `EnableLivePayload(desired_portfolio_id: SafeId)` | `mode.enable-live` | required | typed-live |
+| `model.request-promotion` | `ModelDecisionPayload(candidate_id: SafeId, evidence_ids: tuple[SafeId, ...])` | `model.request-promotion` | required | confirm |
+| `model.request-rollback` | `ModelDecisionPayload(candidate_id: SafeId, evidence_ids: tuple[SafeId, ...])` | `model.request-rollback` | required | confirm |
+| `memory.compress-now` | `CompressMemoryPayload(agent_id: SafeId)` | `memory.compress-now` | forbidden | none |
+| `backup.create` | `BackupCreatePayload(destination: str[1..32767])` | `backup.create` | optional | confirm |
+| `backup.restore` | `BackupRestorePayload(archive: str[1..32767], preview_hash: Sha256Hex, safety_backup_receipt_id: SafeId)` | `backup.restore` | required | double-confirm |
+| `source-control.push` | `SourceControlPushPayload(expected_revision: GitRevision)` | `source-control.push` | required | confirm |
+
+`backup.restore` is admitted only when all staged preconditions are current in
+the same control pair: runtime status is exactly `STOPPED`; archive structure,
+allowlist, DPAPI decrypt, entry sizes, and manifest hashes validate; the preview
+lists every add/replace/remove target and its SHA-256; `preview_hash` matches the
+canonical preview; an automatic safety backup completed successfully and its
+receipt ID matches the request; the archive and target state have not changed;
+double-confirmation is bound to the same preview hash. Any failure replaces zero
+target paths. After replacement, verification must pass or rollback from the
+safety backup and return a failed receipt.
 
 ### 4.4 Refresh model
 
@@ -187,6 +282,9 @@ The header always shows:
 - Qwen idle/busy state and context usage;
 - active alerts;
 - Eastern Time and market session.
+
+The snapshot field is `current_time_utc`; Rust alone renders the Eastern Time
+label from it.
 
 Market session labels are Pre-market, Open, After-hours, and Closed. Eastern
 Time automatically observes EST and EDT.
@@ -665,7 +763,8 @@ authorize cleanup or alteration of those changes.
 - Keep last-known data only with a visible STALE label, age, source, and error.
 - Disable commands whose prerequisites are stale or unavailable.
 - A broken pipe reconnects with bounded backoff and requires a fresh snapshot.
-- Unknown protocol fields are retained for diagnostics but not trusted.
+- Unknown protocol fields reject the typed message. Only the bounded ephemeral
+  diagnostic defined in section 0 may retain their raw object.
 - Unsupported schema versions stop control actions.
 - Duplicate command IDs return the original receipt and do not repeat an
   action.

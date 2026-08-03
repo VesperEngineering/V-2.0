@@ -1,8 +1,11 @@
 # V20 Ratatui Console Build Roadmap
 
-Status: ready for operator review
+Status: approved; preflight corrections incorporated
 Date: 2026-08-03
 Design: `TUI testing/RATATUI_DESIGN.md`
+
+The design's section 0 errata and section 4.4 command table are authoritative
+for every phase. If older wording conflicts, those two sections win.
 
 ## Outcome
 
@@ -32,19 +35,27 @@ must not turn legacy Python objects into an unreviewed broker control path.
 1. `2026-08-03-v20-ratatui-foundation.md`
    - Versioned protocol, secure Windows named pipe, password, control lease,
      Rust client, fixed ten-screen shell, themes, and layout tests.
+   - 9 executable tasks.
 
 2. `2026-08-03-v20-ratatui-observability.md`
    - Truthful projections, snapshots and events, all ten read views, search,
-     drill-down, freshness, portfolio ordering, and broker mismatch display.
+     drill-down, freshness, portfolio ordering, broker mismatch display, and
+     presentation performance. Cached-first-screen verification belongs to
+     phase 4 after the encrypted snapshot cache exists.
+   - 10 executable tasks.
 
 3. `2026-08-03-v20-ratatui-controls.md`
    - Controller command registry, receipts, confirmations, existing agent and
      approval actions, and visible disabled controls for unavailable authority.
+   - 7 executable tasks.
 
 4. `2026-08-03-v20-ratatui-operations.md`
    - Continuous-agent policy, per-agent chats, bounded Qwen context, working
      memory, notifications, backup/recovery, code-maintenance policy,
-     performance, packaging, and final verification.
+     capability-gated phase-4 adapters, cached-first-screen performance,
+     packaging, and final verification.
+   - 13 executable tasks; backup/restore, encrypted cache, recovery, and history
+     retention each own an independent RED/GREEN/commit cycle.
 
 Execute the plans in this order. A phase consumes only committed interfaces from
 the preceding phase.
@@ -61,9 +72,11 @@ Writing and testing code behind a disabled capability does not activate it.
 | Risk-limit changes | Yes, through a port | Risk approval required |
 | Shadow/Paper/Live start or stop | Yes, through a port | Runtime and broker approval required |
 | Candidate training/evaluation | Yes, through a port | Training approval and resource gate required |
-| Scheduler/continuous work | Yes, disabled by default | Scheduler activation approval required |
+| Operations daemon adapter | Yes, disabled by default | Runtime activation approval required |
+| Scheduler/continuous work/daily curation | Yes, disabled by default | Separate scheduler activation approval required; adapter availability is insufficient |
 | Automatic local merge | Yes, policy and fake tests | Clean main plus low-risk scope required |
 | GitHub push | Confirmed button only | Operator confirmation required |
+| Candidate artifact deletion | Yes, policy and temporary-root tests | Separate destructive-retention approval required before a real-root adapter can enable `apply` |
 | Protected data writes | No | Not authorized |
 
 ## Coverage map
@@ -95,6 +108,7 @@ Writing and testing code behind a disabled capability does not activate it.
 | Windows notifications | 4 |
 | DPAPI backup, restore, and recovery | 4 |
 | Automated local code maintenance | 4 |
+| Encrypted snapshot cache and cached-first-screen measurement | 4 |
 | Performance, package, and end-to-end gates | 4 |
 
 ## Cross-phase rules
@@ -102,20 +116,47 @@ Writing and testing code behind a disabled capability does not activate it.
 - Rust renders and requests. Python validates and owns authoritative state.
 - Preserve `ml_model` as the default strategy; `momentum` remains supported and
   no strategy or model family is added by the TUI work.
-- Every command carries the state version the operator reviewed.
+- Wire and stored timestamps are canonical UTC. Rust renders them in
+  `America/New_York`, including EST/EDT transitions.
+- `WireEnvelope.sequence` is a per-client presentation/event delivery sequence.
+  It is assigned only after coalescing and never grants command authority.
+- Snapshots carry `control_version` and `control_hash` separately from
+  presentation state. Every command carries the exact control pair the operator
+  reviewed. Metrics, clocks, layout, chat, and other presentation-only changes
+  do not change that pair.
+- Snapshots also carry strict `command_specs`: phase 2 publishes an empty tuple;
+  phase 3 publishes exactly the 31 design-table rows. Rust consumes these rows
+  and does not hard-code capability or confirmation decisions.
+- Strict typed models reject unknown fields. The decoder may retain bounded raw
+  unknown fields only in an ephemeral untrusted diagnostic record that is never
+  rendered, logged, persisted, or passed to policy or handlers.
+- The gateway derives operator identity from the authenticated Windows pipe
+  session. Rust never asserts an audit identity.
+- An authenticated viewer may send only the lease-transfer request. Every
+  governed command requires the current control lease.
 - Every accepted or rejected command returns a durable receipt.
 - Missing capability means `DISABLED` plus a plain reason.
+- Before a reviewed runtime-status adapter succeeds, mode is `UNKNOWN`, mode
+  freshness is `UNAVAILABLE`, and the gateway must not infer `STOPPED`.
 - First-load failure means `UNAVAILABLE`; loss after a good value means `STALE`.
 - Existing V20 state outranks TUI cache, history, or memory.
 - Tests use fakes unless an explicit opt-in read-only integration test is named.
 - No test connects to a live broker or uses real money.
 - No task writes under `vesper/data/massive/` or
   `vesper/data/model_research/`.
+- A real phase-4 service is usable only through its typed command port and only
+  when the controller advertises the matching capability. Constructing an
+  adapter does not enable runtime, scheduler, training, retention deletion,
+  automatic merge, broker, risk, or Live authority.
+- Each phase-4 activation is an `ActivationGrant`; enabled is valid only with
+  its matching controller receipt. Candidate deletion additionally validates
+  that receipt against the resolved candidate root and exact plan hash.
 
 ## Completion rule
 
 The full console is complete only after all four plans pass their focused and
 combined checks, the design coverage map has no gap, and real capabilities are
-reported separately from disabled ones. Deployment, Live activation, training,
-scheduler activation, or automatic merge activation are separate authority
-events even when their code and tests exist.
+reported separately from disabled ones. Deployment, runtime activation, Live
+activation, training, scheduler/continuous-work/daily-curation activation,
+candidate deletion, or automatic merge activation are separate authority events
+even when their code and tests exist.
