@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import json
 import struct
 import sys
 from datetime import datetime, timezone
 
 import pytest
 
+import vesper.platform.tui.protocol as protocol
 from vesper.platform.tui.contracts import MessageType, UntrustedProtocolDiagnostic, WireEnvelope
 from vesper.platform.tui.protocol import (
     MAX_FRAME_BYTES,
@@ -147,6 +149,35 @@ def test_decoder_normalizes_parser_resource_errors(raw: bytes) -> None:
 
     assert raised.value.code == "invalid-json"
     assert raw[:16].decode("ascii") not in raised.value.safe_message
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RecursionError("second parser exhausted"),
+        ValueError("second parser rejected a number"),
+        json.JSONDecodeError("second parser invalid JSON", "{}", 0),
+    ],
+    ids=("recursion", "value", "json"),
+)
+def test_decoder_normalizes_second_contract_parser_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    server_hello: WireEnvelope,
+    failure: Exception,
+) -> None:
+    raw = server_hello.model_dump_json().encode("utf-8")
+
+    def raise_recursion(*_: object) -> WireEnvelope:
+        raise failure
+
+    monkeypatch.setattr(protocol, "decode_envelope_json", raise_recursion)
+    decoder = FrameDecoder()
+
+    with pytest.raises(ProtocolViolation) as raised:
+        decoder.feed(struct.pack(">I", len(raw)) + raw)
+
+    assert raised.value.code == "invalid-json"
+    assert "server-hello" not in raised.value.safe_message
 
 
 def test_callback_reentry_then_failure_clears_the_outer_decoder(

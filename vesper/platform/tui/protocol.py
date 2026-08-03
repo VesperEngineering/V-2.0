@@ -117,6 +117,14 @@ class FrameDecoder:
                 except ValidationError:
                     self._fatal("invalid-envelope", "Message envelope is invalid.")
                 self._fatal("invalid-payload", "Message payload is invalid.")
+            except (
+                TypeError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                RecursionError,
+                ValueError,
+            ):
+                self._fatal("invalid-json", "Message JSON is invalid.")
         finally:
             self._decode_depth -= 1
 
