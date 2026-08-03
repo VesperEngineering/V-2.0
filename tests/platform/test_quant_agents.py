@@ -444,8 +444,10 @@ def test_runner_response_schema_is_compact_and_bounded_for_ollama(role):
 
     assert_compact(schema)
     properties = schema["properties"]
+    assert properties["proposals"].get("minItems", 0) == 0
     assert properties["evidence_ids"]["items"]["enum"] == ["evidence-1", "evidence-2"]
     proposal = properties["proposals"]["items"]
+    assert proposal["properties"]["evidence_ids"]["minItems"] == 1
     assert proposal["properties"]["evidence_ids"]["items"]["enum"] == [
         "evidence-1",
         "evidence-2",
