@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from .agent_profiles import AgentProfileCatalog
 from .authority import ProposalRouter
@@ -15,6 +15,11 @@ from .contracts import AgentRole, JournalEventType, ProposalRoutingDecision
 from .journals import AgentJournal
 from .quant_agents import OUTPUT_MODELS, QuantAgentOutput
 from .qwen_runtime import QwenTurnResult
+
+
+# Ollama grammar-generation budgets only; the Pydantic output contracts stay unchanged.
+_OLLAMA_GENERATION_MAX_LIST_ITEMS = 3
+_OLLAMA_GENERATION_MAX_PROPOSALS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +67,9 @@ class AutonomousAgentRunner:
             "repository_revision": repository_revision,
             "created_at": created_at.isoformat(),
         }
-        response_format = self._response_format(role, authority)
+        response_format = self._response_format(
+            role, authority, evidence_ids=tuple(bounded_evidence)
+        )
         prompt = self._prompt(profile, objective, bounded_evidence, authority, response_format)
         self.journal.append(
             event_id=f"{run_id}:{role.value}:observation",
@@ -203,8 +210,34 @@ class AutonomousAgentRunner:
         )
 
     @staticmethod
-    def _response_format(role: AgentRole, authority: Mapping[str, str]) -> dict[str, object]:
+    def _response_format(
+        role: AgentRole,
+        authority: Mapping[str, str],
+        *,
+        evidence_ids: Sequence[str] = (),
+    ) -> dict[str, object]:
         schema = deepcopy(OUTPUT_MODELS[role].model_json_schema())
+        definitions = schema.pop("$defs", {})
+
+        def inline_refs(value) -> None:
+            if isinstance(value, dict):
+                reference = value.get("$ref")
+                if isinstance(reference, str) and reference.startswith("#/$defs/"):
+                    name = reference.removeprefix("#/$defs/")
+                    definition = definitions.get(name)
+                    if not isinstance(definition, dict):
+                        raise ValueError(f"unknown output schema reference: {reference}")
+                    overrides = {key: item for key, item in value.items() if key != "$ref"}
+                    value.clear()
+                    value.update(deepcopy(definition))
+                    value.update(overrides)
+                for nested in tuple(value.values()):
+                    inline_refs(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    inline_refs(nested)
+
+        inline_refs(schema)
 
         def bind(value) -> None:
             if isinstance(value, dict):
@@ -221,6 +254,38 @@ class AutonomousAgentRunner:
                     bind(nested)
 
         bind(schema)
+
+        allowed_evidence_ids = list(dict.fromkeys(evidence_ids))
+
+        def compact(value, field_name: str | None = None) -> None:
+            if isinstance(value, dict):
+                for keyword in ("default", "format", "pattern", "title"):
+                    value.pop(keyword, None)
+                if "const" in value:
+                    value.pop("enum", None)
+                if value.get("type") == "array":
+                    limit = (
+                        _OLLAMA_GENERATION_MAX_PROPOSALS
+                        if field_name == "proposals"
+                        else _OLLAMA_GENERATION_MAX_LIST_ITEMS
+                    )
+                    value["maxItems"] = min(int(value.get("maxItems", limit)), limit)
+                    if field_name == "evidence_ids" and allowed_evidence_ids:
+                        items = value.get("items")
+                        if isinstance(items, dict):
+                            items["enum"] = allowed_evidence_ids
+                properties = value.get("properties")
+                if isinstance(properties, dict):
+                    for name, nested in properties.items():
+                        compact(nested, name)
+                for key, nested in tuple(value.items()):
+                    if key != "properties":
+                        compact(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    compact(nested)
+
+        compact(schema)
         return schema
 
     @classmethod

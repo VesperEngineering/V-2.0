@@ -180,11 +180,79 @@ def test_runner_binds_controller_authority_into_prompt_and_response_schema(tmp_p
     assert all(value in captured["prompt"] for value in expected.values())
     properties = captured["response_format"]["properties"]
     assert {key: properties[key]["const"] for key in expected} == expected
-    proposal_properties = captured["response_format"]["$defs"]["AgentProposal"]["properties"]
+    proposal_properties = captured["response_format"]["properties"]["proposals"]["items"][
+        "properties"
+    ]
     proposal_expected = {key: expected[key] for key in expected if key != "session_id"}
     assert {
         key: proposal_properties[key]["const"] for key in proposal_expected
     } == proposal_expected
+
+
+@pytest.mark.parametrize("role", NEW_ROLES)
+def test_runner_response_schema_is_compact_and_bounded_for_ollama(role):
+    authority = {
+        "role": role.value,
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "repository_revision": "abc123",
+        "created_at": NOW.isoformat(),
+    }
+    schema = AutonomousAgentRunner._response_format(
+        role,
+        authority,
+        evidence_ids=("evidence-1", "evidence-2"),
+    )
+    forbidden_keywords = {
+        "$defs",
+        "$ref",
+        "default",
+        "format",
+        "maxLength",
+        "pattern",
+        "title",
+    }
+
+    def assert_compact(value):
+        if isinstance(value, dict):
+            assert forbidden_keywords.isdisjoint(value)
+            if value.get("type") == "array":
+                assert value["maxItems"] <= 3
+                if "minItems" in value:
+                    assert value["minItems"] <= value["maxItems"]
+            for nested in value.values():
+                assert_compact(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_compact(nested)
+
+    assert_compact(schema)
+    properties = schema["properties"]
+    assert properties["evidence_ids"]["items"]["enum"] == ["evidence-1", "evidence-2"]
+    proposal = properties["proposals"]["items"]
+    assert proposal["properties"]["evidence_ids"]["items"]["enum"] == [
+        "evidence-1",
+        "evidence-2",
+    ]
+    assert properties["proposals"]["maxItems"] <= 2
+
+
+def test_ollama_generation_budgets_do_not_narrow_pydantic_output_contract():
+    document = output_document(AgentRole.QUANT_RESEARCH_LEAD)
+    document["limitations"] = [f"limitation-{index}" for index in range(4)]
+    document["hypotheses"] = [f"hypothesis-{index}" for index in range(4)]
+    document["priorities"] = [f"priority-{index}" for index in range(4)]
+    document["proposals"] = [
+        {**document["proposals"][0], "proposal_id": f"proposal-{index}"} for index in range(3)
+    ]
+
+    parsed = OUTPUT_MODELS[AgentRole.QUANT_RESEARCH_LEAD].model_validate_json(json.dumps(document))
+
+    assert len(parsed.limitations) == 4
+    assert len(parsed.hypotheses) == 4
+    assert len(parsed.priorities) == 4
+    assert len(parsed.proposals) == 3
 
 
 def test_runner_rejects_model_fabricated_evidence_id(tmp_path):
