@@ -1,7 +1,15 @@
 import importlib
 import importlib.metadata
+import tomllib
+from pathlib import Path
 
 import pytest
+
+
+def test_tui_windows_transport_is_pinned() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = tuple(project["project"]["dependencies"])
+    assert "pywin32==312; sys_platform == 'win32'" in dependencies
 
 
 @pytest.mark.parametrize(
