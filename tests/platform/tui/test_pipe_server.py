@@ -132,6 +132,51 @@ def test_preconsumed_bootstrap_instance_aborts_before_readiness(
     assert not server.ready_event.is_set()
 
 
+def test_consumption_after_all_listeners_are_armed_aborts_before_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = pipe_name(current_logon_sid())
+    server = WindowsPipeServer(name)
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    handler_calls: list[bytes] = []
+    clients: list[object] = []
+    ready_sets: list[bool] = []
+    original_gate = server._pre_readiness_gate
+    original_ready_set = server.ready_event.set
+
+    def consume_then_gate(listeners: object) -> None:
+        clients.append(_connect(name))
+        original_gate(listeners)
+
+    def record_ready() -> None:
+        ready_sets.append(True)
+        original_ready_set()
+
+    def run() -> None:
+        try:
+            server.serve(lambda body: handler_calls.append(body) or body, stop)
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(server, "_pre_readiness_gate", consume_then_gate)
+    monkeypatch.setattr(server.ready_event, "set", record_ready)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    for client in clients:
+        win32file.CloseHandle(client)
+
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "before readiness" in str(errors[0])
+    assert ready_sets == []
+    assert handler_calls == []
+    assert server.active_handle_count == 0
+    assert server.pending_cancellation_count == 0
+
+
 def test_incomplete_cancellation_retains_event_until_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

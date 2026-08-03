@@ -97,11 +97,13 @@ class WindowsPipeServer:
 
         if self._should_stop(stop_event):
             return
-        listeners = self._bootstrap_listeners()
-        for listener in listeners.values():
-            self._track_handle(listener.handle)
-        self.ready_event.set()
+        listeners: dict[object, _PendingConnect] = {}
         try:
+            listeners = self._bootstrap_listeners()
+            for listener in listeners.values():
+                self._track_handle(listener.handle)
+            self._pre_readiness_gate(listeners)
+            self.ready_event.set()
             while not self._should_stop(stop_event):
                 for handle in self._reap_workers():
                     listeners[handle] = self._arm_connect(handle, reject_preconnected=False)
@@ -135,6 +137,32 @@ class WindowsPipeServer:
             self._reap_workers()
             self._reap_cancellations()
             self._start_cancellation_reaper()
+
+    def _pre_readiness_gate(self, listeners: dict[object, _PendingConnect]) -> None:
+        """Quarantine armed listeners and reject any state change before readiness."""
+
+        if len(listeners) != _MAX_INSTANCES:
+            raise RuntimeError("all pipe instances must be armed before readiness")
+        for check in range(2):
+            for listener in listeners.values():
+                if listener.already_connected:
+                    raise RuntimeError("pipe instance was consumed before readiness")
+                result = win32event.WaitForSingleObject(listener.event, 0)
+                if result == win32event.WAIT_TIMEOUT:
+                    continue
+                if result == win32event.WAIT_OBJECT_0:
+                    try:
+                        win32file.GetOverlappedResult(
+                            listener.handle,
+                            listener.overlapped,
+                            False,
+                        )
+                    except pywintypes.error:
+                        pass
+                    raise RuntimeError("pipe instance changed state before readiness")
+                raise RuntimeError("pipe listener entered an abnormal state before readiness")
+            if check == 0:
+                time.sleep(0.025)
 
     def _bootstrap_listeners(self) -> dict[object, _PendingConnect]:
         handles = self._create_pipe_set()
