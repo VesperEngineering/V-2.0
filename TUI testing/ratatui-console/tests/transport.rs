@@ -1,3 +1,4 @@
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -5,9 +6,13 @@ use tokio::net::windows::named_pipe::ServerOptions;
 use vesper_ratatui_console::contract::Envelope;
 use vesper_ratatui_console::launcher::{
     canonical_state_root, connect_started_gateway, discover_pipe_name_from_command, gateway_args,
-    validate_pipe_name,
+    spawn_managed_command, validate_pipe_name,
 };
 use vesper_ratatui_console::transport::{MAX_FRAME_BYTES, decode_frame_bytes, encode_frame_bytes};
+use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
 
 #[test]
 fn framing_is_unsigned_big_endian_and_handles_split_input() {
@@ -261,7 +266,7 @@ async fn failed_started_gateway_connect_kills_and_waits_for_child() {
             marker.display()
         ),
     ]);
-    let child = command.spawn().unwrap();
+    let child = spawn_managed_command(command).await.unwrap();
     assert!(
         connect_started_gateway(
             child,
@@ -273,6 +278,165 @@ async fn failed_started_gateway_connect_kills_and_waits_for_child() {
     );
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(!marker.exists());
+}
+
+#[tokio::test]
+async fn discovery_cleanup_kills_real_uv_python_descendant() {
+    let marker = unique_marker("uv-descendant");
+    let pid_marker = unique_marker("uv-descendant-pid");
+    let child_script = r#"import pathlib,sys,time; time.sleep(0.8); pathlib.Path(sys.argv[1]).write_text('orphaned', encoding='utf-8')"#;
+    let parent_script = r#"import pathlib,subprocess,sys,time; child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); pathlib.Path(sys.argv[3]).write_text(str(child.pid),encoding='utf-8'); print('x'*300,flush=True); time.sleep(10)"#;
+    let mut command = tokio::process::Command::new("uv");
+    command
+        .current_dir(repo_root())
+        .env("UV_CACHE_DIR", task_uv_cache())
+        .args([
+            "run",
+            "--locked",
+            "python",
+            "-c",
+            parent_script,
+            child_script,
+        ])
+        .arg(&marker)
+        .arg(&pid_marker);
+    let result = discover_pipe_name_from_command(command, Duration::from_secs(10)).await;
+    assert!(
+        matches!(
+            result,
+            Err(vesper_ratatui_console::launcher::LaunchError::InvalidPipeName)
+        ),
+        "unexpected discovery result: {result:?}"
+    );
+    let descendant_pid = read_pid_marker(&pid_marker).await;
+    std::fs::remove_file(&pid_marker).unwrap();
+    assert_process_exited(descendant_pid);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(!marker.exists(), "uv descendant escaped cleanup");
+}
+
+#[tokio::test]
+async fn failed_connect_cleanup_kills_real_uv_python_descendant() {
+    let marker = unique_marker("uv-connect-descendant");
+    let pid_marker = unique_marker("uv-connect-descendant-pid");
+    let child_script = r#"import pathlib,sys,time; time.sleep(0.8); pathlib.Path(sys.argv[1]).write_text('orphaned', encoding='utf-8')"#;
+    let parent_script = r#"import pathlib,subprocess,sys,time; child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); pathlib.Path(sys.argv[3]).write_text(str(child.pid),encoding='utf-8'); time.sleep(10)"#;
+    let mut command = tokio::process::Command::new("uv");
+    command
+        .current_dir(repo_root())
+        .env("UV_CACHE_DIR", task_uv_cache())
+        .args([
+            "run",
+            "--locked",
+            "python",
+            "-c",
+            parent_script,
+            child_script,
+        ])
+        .arg(&marker)
+        .arg(&pid_marker);
+    let child = spawn_managed_command(command).await.unwrap();
+    let descendant_pid = read_pid_marker(&pid_marker).await;
+    std::fs::remove_file(&pid_marker).unwrap();
+    assert!(
+        connect_started_gateway(
+            child,
+            r"\\.\pipe\vesper-v20-tui-ffffffffffffffff",
+            Duration::from_millis(30),
+        )
+        .await
+        .is_err()
+    );
+    assert_process_exited(descendant_pid);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(
+        !marker.exists(),
+        "uv descendant escaped failed-connect cleanup"
+    );
+}
+
+#[tokio::test]
+async fn successful_connect_survives_transport_drop() {
+    let marker = unique_marker("successful-connect-survives-drop");
+    let pipe_name = format!(
+        r"\\.\pipe\vesper-v20-tui-success-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe_name)
+        .unwrap();
+    let mut command = tokio::process::Command::new("pwsh");
+    command.args([
+        "-NoProfile",
+        "-Command",
+        &format!(
+            "Start-Sleep -Milliseconds 250; Set-Content -LiteralPath '{}' -Value survived",
+            marker.display()
+        ),
+    ]);
+    let child = spawn_managed_command(command).await.unwrap();
+    let transport = connect_started_gateway(child, &pipe_name, Duration::from_secs(1))
+        .await
+        .unwrap();
+    drop(transport);
+    drop(server);
+    wait_for_file(&marker).await;
+    std::fs::remove_file(marker).unwrap();
+}
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crate is nested two levels below repo root")
+        .to_path_buf()
+}
+
+fn task_uv_cache() -> std::path::PathBuf {
+    std::env::temp_dir().join("v20-task7-uv-cache")
+}
+
+async fn read_pid_marker(path: &std::path::Path) -> u32 {
+    wait_for_file(path).await;
+    std::fs::read_to_string(path).unwrap().parse().unwrap()
+}
+
+async fn wait_for_file(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !path.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn assert_process_exited(process_id: u32) {
+    // SAFETY: OpenProcess receives a PID reported by the spawned descendant.
+    let raw_handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process_id) };
+    if raw_handle.is_null() {
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(ERROR_INVALID_PARAMETER as i32),
+            "descendant process state could not be inspected"
+        );
+        return;
+    }
+    // SAFETY: OpenProcess returned a new owned handle checked above.
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw_handle) };
+    // SAFETY: the handle grants synchronization access and stays valid for this call.
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle() as _, 0) },
+        WAIT_OBJECT_0,
+        "descendant process is still running"
+    );
 }
 
 fn unique_marker(label: &str) -> std::path::PathBuf {

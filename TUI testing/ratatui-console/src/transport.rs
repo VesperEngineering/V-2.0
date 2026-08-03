@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io;
+use std::os::windows::io::OwnedHandle;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -64,6 +65,7 @@ pub struct PipeTransport {
     send_progress: Option<SendProgress>,
     poisoned: bool,
     _gateway_child: Option<Child>,
+    _gateway_job: Option<OwnedHandle>,
 }
 
 impl PipeTransport {
@@ -81,6 +83,7 @@ impl PipeTransport {
                         send_progress: None,
                         poisoned: false,
                         _gateway_child: None,
+                        _gateway_job: None,
                     });
                 }
                 Err(error)
@@ -111,11 +114,13 @@ impl PipeTransport {
             send_progress: None,
             poisoned: false,
             _gateway_child: None,
+            _gateway_job: None,
         }
     }
 
-    pub(crate) fn retain_gateway_child(&mut self, child: Child) {
+    pub(crate) fn retain_gateway_process(&mut self, child: Child, job: OwnedHandle) {
         self._gateway_child = Some(child);
+        self._gateway_job = Some(job);
     }
 
     pub async fn send(&mut self, envelope: &Envelope) -> Result<(), TransportError> {
