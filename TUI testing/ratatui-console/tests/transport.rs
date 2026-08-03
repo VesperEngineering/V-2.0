@@ -9,7 +9,9 @@ use vesper_ratatui_console::launcher::{
     spawn_managed_command, validate_pipe_name,
 };
 use vesper_ratatui_console::transport::{MAX_FRAME_BYTES, decode_frame_bytes, encode_frame_bytes};
-use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_PARAMETER, ERROR_SHARING_VIOLATION, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
@@ -309,7 +311,7 @@ async fn discovery_cleanup_kills_real_uv_python_descendant() {
         "unexpected discovery result: {result:?}"
     );
     let descendant_pid = read_pid_marker(&pid_marker).await;
-    std::fs::remove_file(&pid_marker).unwrap();
+    remove_file_when_closed(&pid_marker).await;
     assert_process_exited(descendant_pid);
     tokio::time::sleep(Duration::from_millis(900)).await;
     assert!(!marker.exists(), "uv descendant escaped cleanup");
@@ -337,7 +339,7 @@ async fn failed_connect_cleanup_kills_real_uv_python_descendant() {
         .arg(&pid_marker);
     let child = spawn_managed_command(command).await.unwrap();
     let descendant_pid = read_pid_marker(&pid_marker).await;
-    std::fs::remove_file(&pid_marker).unwrap();
+    remove_file_when_closed(&pid_marker).await;
     assert!(
         connect_started_gateway(
             child,
@@ -386,7 +388,7 @@ async fn successful_connect_survives_transport_drop() {
     drop(transport);
     drop(server);
     wait_for_file(&marker).await;
-    std::fs::remove_file(marker).unwrap();
+    remove_file_when_closed(&marker).await;
 }
 
 fn repo_root() -> std::path::PathBuf {
@@ -433,10 +435,26 @@ fn assert_process_exited(process_id: u32) {
     let handle = unsafe { OwnedHandle::from_raw_handle(raw_handle) };
     // SAFETY: the handle grants synchronization access and stays valid for this call.
     assert_eq!(
-        unsafe { WaitForSingleObject(handle.as_raw_handle() as _, 0) },
+        unsafe { WaitForSingleObject(handle.as_raw_handle() as _, 2_000) },
         WAIT_OBJECT_0,
-        "descendant process is still running"
+        "descendant process did not signal exit within two seconds"
     );
+}
+
+async fn remove_file_when_closed(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::remove_file(path) {
+            Ok(()) => return,
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("failed to remove closed marker {}: {error}", path.display()),
+        }
+    }
 }
 
 fn unique_marker(label: &str) -> std::path::PathBuf {
