@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal, TypeAlias
+from types import MappingProxyType
 
 from pydantic import (
     BaseModel,
@@ -15,12 +17,27 @@ from pydantic import (
     Field,
     StringConstraints,
     ValidationError,
+    AfterValidator,
     field_serializer,
     field_validator,
 )
 from typing_extensions import TypeAliasType
 
-JsonScalar: TypeAlias = None | bool | int | float | str
+MAX_UNTRUSTED_UNKNOWN_FIELDS = 16
+MAX_UNTRUSTED_JSON_DEPTH = 8
+MAX_UNTRUSTED_JSON_ITEMS = 32
+MAX_UNTRUSTED_STRING_LENGTH = 4096
+_MISSING = object()
+
+
+def _require_finite_float(value: float) -> float:
+    if not math.isfinite(value):
+        raise ValueError("floating-point values must be finite")
+    return value
+
+
+FiniteFloat = Annotated[float, AfterValidator(_require_finite_float)]
+JsonScalar: TypeAlias = None | bool | int | FiniteFloat | str
 JsonValue = TypeAliasType(
     "JsonValue",
     JsonScalar | list["JsonValue"] | dict[str, "JsonValue"],
@@ -95,6 +112,10 @@ def _serialize_utc(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 class CapabilityView(StrictModel):
     capability_id: NonEmptyStr
     state: CapabilityState
@@ -135,6 +156,16 @@ class HeaderView(StrictModel):
     qwen_context_percent: float | None
     current_time_utc: datetime
     market_session: str
+
+    @field_validator(
+        "data_age_seconds",
+        "regime_confidence",
+        "portfolio_value",
+        "qwen_context_percent",
+    )
+    @classmethod
+    def require_finite_float(cls, value: float | None) -> float | None:
+        return None if value is None else _require_finite_float(value)
 
     @field_validator("next_rebalance_at_utc", "current_time_utc")
     @classmethod
@@ -187,6 +218,17 @@ class WireEnvelope(StrictModel):
     @field_serializer("timestamp_utc")
     def serialize_utc(self, value: datetime) -> str:
         return _serialize_utc(value)
+
+
+CANONICAL_WIRE_FIXTURE = (
+    b'{"schema_version":1,"message_id":"server:1","sequence":1,'
+    b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
+    b'"message_type":"server-hello",'
+    b'"payload":{"server_version":"0.1.0","requires_setup":true}}'
+)
+CANONICAL_WIRE_FIXTURE_SHA256 = hashlib.sha256(CANONICAL_WIRE_FIXTURE).hexdigest()
+WIRE_SCHEMA_RECEIPT = _canonical_json_bytes(WireEnvelope.model_json_schema())
+WIRE_SCHEMA_RECEIPT_SHA256 = hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest()
 
 
 class ClientHelloPayload(StrictModel):
@@ -310,18 +352,111 @@ def decode_payload(envelope: WireEnvelope) -> StrictPayload:
     )
 
 
-class UntrustedProtocolDiagnostic(StrictModel):
-    """Ephemeral raw unknown fields, reserved for a synchronous diagnostic hook."""
+class UntrustedProtocolDiagnostic:
+    """A synchronous-only view that clears raw unknown fields after callback return."""
 
-    frame_sha256: Sha256Hex
-    unknown_fields: dict[str, JsonValue]
+    __slots__ = ("frame_sha256", "_unknown_fields")
+
+    def __init__(self, frame_sha256: str, unknown_fields: dict[str, JsonValue]) -> None:
+        self.frame_sha256 = frame_sha256
+        self._unknown_fields = _freeze_json_value(unknown_fields)
+
+    @property
+    def unknown_fields(self) -> object:
+        """Expose raw fields only while the callback is executing."""
+
+        return self._unknown_fields
+
+    def _invalidate(self) -> None:
+        self._unknown_fields = MappingProxyType({})
+
+    def __getstate__(self) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be serialized")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be pickled")
 
 
 DiagnosticCallback: TypeAlias = Callable[[UntrustedProtocolDiagnostic], None]
 
 
+def _freeze_json_value(value: JsonValue) -> object:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _bounded_json_value(value: JsonValue, depth: int = 0) -> JsonValue:
+    if depth >= MAX_UNTRUSTED_JSON_DEPTH:
+        return "[truncated]"
+    if isinstance(value, str):
+        return value[:MAX_UNTRUSTED_STRING_LENGTH]
+    if isinstance(value, list):
+        return [_bounded_json_value(item, depth + 1) for item in value[:MAX_UNTRUSTED_JSON_ITEMS]]
+    if isinstance(value, dict):
+        return {
+            key: _bounded_json_value(item, depth + 1)
+            for key, item in list(value.items())[:MAX_UNTRUSTED_JSON_ITEMS]
+        }
+    return value
+
+
 def _unknown_fields(values: dict[str, JsonValue], model: PayloadModel | type[WireEnvelope]) -> dict[str, JsonValue]:
-    return {name: value for name, value in values.items() if name not in model.model_fields}
+    unknown: dict[str, JsonValue] = {}
+    for name, value in values.items():
+        if name not in model.model_fields:
+            unknown[name] = _bounded_json_value(value)
+        if len(unknown) == MAX_UNTRUSTED_UNKNOWN_FIELDS:
+            break
+    return unknown
+
+
+def _read_json_location(value: JsonValue, location: tuple[object, ...]) -> JsonValue | object:
+    current: object = value
+    for part in location:
+        if isinstance(current, dict) and isinstance(part, str) and part in current:
+            current = current[part]
+        elif isinstance(current, list) and isinstance(part, int) and 0 <= part < len(current):
+            current = current[part]
+        else:
+            return _MISSING
+    return current
+
+
+def _assign_unknown_location(
+    result: dict[str, JsonValue],
+    location: tuple[object, ...],
+    value: JsonValue,
+) -> None:
+    current = result
+    for part in location[:-1]:
+        key = str(part)
+        child = current.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            current[key] = child
+        current = child
+    if location:
+        current[str(location[-1])] = _bounded_json_value(value)
+
+
+def _unknown_fields_from_validation(
+    payload: dict[str, JsonValue],
+    error: ValidationError,
+) -> dict[str, JsonValue]:
+    unknown: dict[str, JsonValue] = {}
+    count = 0
+    for detail in error.errors():
+        if detail["type"] != "extra_forbidden" or count == MAX_UNTRUSTED_UNKNOWN_FIELDS:
+            continue
+        location = tuple(detail["loc"])
+        value = _read_json_location(payload, location)
+        if value is not _MISSING:
+            _assign_unknown_location(unknown, location, value)
+            count += 1
+    return unknown
 
 
 def _report_untrusted(
@@ -331,13 +466,11 @@ def _report_untrusted(
 ) -> None:
     if not unknown_fields or on_untrusted is None:
         return
-    diagnostic = UntrustedProtocolDiagnostic(
-        frame_sha256=hashlib.sha256(raw_bytes).hexdigest(),
-        unknown_fields=unknown_fields,
-    )
+    diagnostic = UntrustedProtocolDiagnostic(hashlib.sha256(raw_bytes).hexdigest(), unknown_fields)
     try:
         on_untrusted(diagnostic)
     finally:
+        diagnostic._invalidate()
         del diagnostic
 
 
@@ -364,12 +497,12 @@ def decode_envelope_json(
         raise
     try:
         decode_payload(envelope)
-    except ValidationError:
+    except ValidationError as error:
         payload = raw_value.get("payload")
         if isinstance(payload, dict):
             _report_untrusted(
                 raw_bytes,
-                _unknown_fields(payload, PAYLOAD_MODELS[envelope.message_type]),
+                _unknown_fields_from_validation(envelope.payload, error),
                 on_untrusted,
             )
         raise

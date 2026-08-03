@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import pickle
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
 
 from vesper.platform.tui.contracts import (
+    CANONICAL_WIRE_FIXTURE,
+    CANONICAL_WIRE_FIXTURE_SHA256,
     ClientHelloPayload,
+    Freshness,
+    HeaderView,
     LeaseRequestPayload,
     MessageType,
+    OperatingMode,
     SnapshotRequestPayload,
     UntrustedProtocolDiagnostic,
+    WIRE_SCHEMA_RECEIPT,
+    WIRE_SCHEMA_RECEIPT_SHA256,
     WireEnvelope,
     decode_envelope_json,
     decode_payload,
@@ -31,6 +42,29 @@ def _envelope(**changes: object) -> WireEnvelope:
     }
     values.update(changes)
     return WireEnvelope(**values)
+
+
+def _header(**changes: object) -> HeaderView:
+    values: dict[str, object] = {
+        "operating_mode": OperatingMode.UNKNOWN,
+        "operating_mode_freshness": Freshness.LOADING,
+        "operating_mode_reason": None,
+        "data_freshness": Freshness.LOADING,
+        "data_age_seconds": None,
+        "regime_label": "unknown",
+        "regime_confidence": None,
+        "portfolio_value": None,
+        "next_rebalance_at_utc": None,
+        "rebalance_blockers": (),
+        "active_agent": None,
+        "agent_queue_length": 0,
+        "qwen_state": "stopped",
+        "qwen_context_percent": None,
+        "current_time_utc": datetime(2026, 8, 3, tzinfo=timezone.utc),
+        "market_session": "closed",
+    }
+    values.update(changes)
+    return HeaderView(**values)
 
 
 def test_envelope_round_trips_and_rejects_unknown_fields() -> None:
@@ -107,18 +141,101 @@ def test_decode_payload_maps_only_the_matching_exact_model() -> None:
         LeaseRequestPayload(action="release")
 
 
-def test_unknown_fields_only_reach_a_synchronous_untrusted_callback() -> None:
+def test_untrusted_diagnostic_scrubs_retained_references_and_cannot_serialize() -> None:
     wire = (
         b'{"schema_version":1,"message_id":"server:1","sequence":1,'
         b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
         b'"message_type":"lease-request",'
         b'"payload":{"action":"take-control","secret":"x"}}'
     )
-    diagnostics: list[UntrustedProtocolDiagnostic] = []
+    seen_during_callback: list[dict[str, object]] = []
+    retained: list[UntrustedProtocolDiagnostic] = []
+
+    def receive(diagnostic: UntrustedProtocolDiagnostic) -> None:
+        seen_during_callback.append(dict(diagnostic.unknown_fields))
+        retained.append(diagnostic)
 
     with pytest.raises(ValidationError):
-        decode_envelope_json(wire, diagnostics.append)
+        decode_envelope_json(wire, receive)
 
-    assert len(diagnostics) == 1
-    assert diagnostics[0].unknown_fields == {"secret": "x"}
-    assert len(diagnostics[0].frame_sha256) == 64
+    assert seen_during_callback == [{"secret": "x"}]
+    assert retained[0].unknown_fields == {}
+    with pytest.raises(TypeError):
+        json.dumps(retained[0])
+    with pytest.raises(TypeError):
+        pickle.dumps(retained[0])
+
+
+def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> None:
+    wire = json.dumps(
+        {
+            "schema_version": 1,
+            "message_id": "server:1",
+            "sequence": 1,
+            "state_version": 0,
+            "timestamp_utc": "2026-08-03T00:00:00Z",
+            "message_type": "snapshot",
+            "payload": {
+                "snapshot": {
+                    "state_version": 0,
+                    "generated_at_utc": "2026-08-03T00:00:00Z",
+                    "header": {
+                        "operating_mode": "unknown",
+                        "operating_mode_freshness": "loading",
+                        "operating_mode_reason": None,
+                        "data_freshness": "loading",
+                        "data_age_seconds": None,
+                        "regime_label": "unknown",
+                        "regime_confidence": None,
+                        "portfolio_value": None,
+                        "next_rebalance_at_utc": None,
+                        "rebalance_blockers": [],
+                        "active_agent": None,
+                        "agent_queue_length": 0,
+                        "qwen_state": "stopped",
+                        "qwen_context_percent": None,
+                        "current_time_utc": "2026-08-03T00:00:00Z",
+                        "market_session": "closed",
+                        "secret": "x",
+                    },
+                    "alerts": [],
+                    "capabilities": [],
+                }
+            },
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    seen_during_callback: list[dict[str, object]] = []
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(wire, lambda diagnostic: seen_during_callback.append(dict(diagnostic.unknown_fields)))
+
+    assert seen_during_callback == [{"snapshot": {"header": {"secret": "x"}}}]
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_non_finite_floats_are_rejected_in_shell_models_and_wire_json(value: float) -> None:
+    with pytest.raises(ValidationError):
+        _header(data_age_seconds=value)
+    with pytest.raises(ValidationError):
+        _envelope(payload={"value": value})
+    with pytest.raises(ValidationError):
+        _envelope(payload={"value": [{"nested": value}]})
+
+
+def test_canonical_fixture_and_schema_receipt_have_exact_bytes_and_hashes() -> None:
+    expected_fixture = (
+        b'{"schema_version":1,"message_id":"server:1","sequence":1,'
+        b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
+        b'"message_type":"server-hello",'
+        b'"payload":{"server_version":"0.1.0","requires_setup":true}}'
+    )
+
+    assert CANONICAL_WIRE_FIXTURE == expected_fixture
+    assert CANONICAL_WIRE_FIXTURE_SHA256 == "791c289ab55ac2183712e2305d3d6652b274592f86b72c25508b02a48bfa050d"
+    assert hashlib.sha256(CANONICAL_WIRE_FIXTURE).hexdigest() == CANONICAL_WIRE_FIXTURE_SHA256
+    assert WIRE_SCHEMA_RECEIPT == json.dumps(
+        WireEnvelope.model_json_schema(), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    assert WIRE_SCHEMA_RECEIPT_SHA256 == "ab1d90e0538558b0f13f7c18c96539ae602a01c36639791b324a649ae7f1361e"
+    assert hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest() == WIRE_SCHEMA_RECEIPT_SHA256
