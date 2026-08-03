@@ -29,6 +29,57 @@ class SpecialistRole(StrEnum):
     RISK_REVIEW = "v20-risk-review"
 
 
+class AgentRole(StrEnum):
+    PRODUCT = "v20-product"
+    DEVELOPMENT = "v20-development"
+    RISK_REVIEW = "v20-risk-review"
+    QUANT_RESEARCH_LEAD = "v20-quant-research-lead"
+    MODEL_RESEARCHER = "v20-model-researcher"
+    INDEPENDENT_QUANT_VALIDATOR = "v20-independent-quant-validator"
+    PORTFOLIO_RESEARCHER = "v20-portfolio-researcher"
+    EXECUTION_PERFORMANCE_ANALYST = "v20-execution-performance-analyst"
+
+
+class ProposalCapability(StrEnum):
+    RESEARCH = "research"
+    DOCUMENTATION = "documentation"
+    TEST = "test"
+    CODE_CHANGE = "code-change"
+    MODEL_TRAINING = "model-training"
+    MODEL_PROMOTION = "model-promotion"
+    RISK_CHANGE = "risk-change"
+    TRADING_ACTION = "trading-action"
+    SCHEDULER_CHANGE = "scheduler-change"
+    PROVIDER_CHANGE = "provider-change"
+    PROTECTED_DATA_WRITE = "protected-data-write"
+    DESTRUCTIVE_ACTION = "destructive-action"
+
+
+class AuthorityClass(StrEnum):
+    SAFE = "safe"
+    PROTECTED = "protected"
+    DENIED = "denied"
+
+
+class ProposalStatus(StrEnum):
+    PROPOSED = "proposed"
+    ADMITTED = "admitted"
+    APPROVAL_REQUIRED = "approval-required"
+    DENIED = "denied"
+
+
+class JournalEventType(StrEnum):
+    OBSERVATION = "observation"
+    PROPOSAL_CREATED = "proposal-created"
+    ROUTING_DECISION = "routing-decision"
+    TOOL_REQUEST = "tool-request"
+    TOOL_RESULT = "tool-result"
+    VALIDATION = "validation"
+    RISK_REVIEW = "risk-review"
+    OPERATOR_DECISION = "operator-decision"
+    CORRECTION = "correction"
+
+
 class SandboxMode(StrEnum):
     READ_ONLY = "read-only"
     WORKSPACE_WRITE = "workspace-write"
@@ -161,6 +212,48 @@ class TaskRequest(RunContract):
     objective: NonEmptyStr
     repository_root: RelativePath
     acceptance_checks: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+
+
+class AgentProposal(RunContract):
+    proposal_id: NonEmptyStr
+    role: AgentRole
+    capability: ProposalCapability
+    summary: NonEmptyStr
+    rationale: NonEmptyStr
+    evidence_ids: tuple[NonEmptyStr, ...] = ()
+
+
+class ProposalRoutingDecision(RunContract):
+    proposal_id: NonEmptyStr
+    role: AgentRole
+    authority: AuthorityClass
+    status: ProposalStatus
+    operator_approval_required: bool
+    routed_to: AgentRole | None = None
+    reasons: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def decision_is_consistent(self) -> ProposalRoutingDecision:
+        expected = self.status is ProposalStatus.APPROVAL_REQUIRED
+        if self.operator_approval_required != expected:
+            raise ValueError("operator approval flag must match routing status")
+        if self.status is ProposalStatus.ADMITTED and self.authority is not AuthorityClass.SAFE:
+            raise ValueError("only safe proposals may be admitted automatically")
+        if self.status is ProposalStatus.ADMITTED and self.routed_to is None:
+            raise ValueError("admitted proposals require a controller route")
+        return self
+
+
+class JournalEvent(RunContract):
+    event_id: NonEmptyStr
+    role: AgentRole
+    session_id: NonEmptyStr
+    sequence: Annotated[int, Field(ge=1)]
+    event_type: JournalEventType
+    payload: dict[NonEmptyStr, str | int | float | bool | None]
+    previous_hash: Sha256 | None = None
+    event_hash: Sha256
+    correction_of: NonEmptyStr | None = None
 
 
 class DataResearchResult(RunContract):

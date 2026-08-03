@@ -60,6 +60,36 @@ class PlatformService(Protocol):
 
     def knowledge_status(self): ...
 
+    def agent_roster(self): ...
+
+    def run_agent(
+        self,
+        role: str,
+        session_id: str,
+        objective: str,
+        repository_revision: str,
+        evidence: dict[str, object],
+        prior_session_date: str,
+    ): ...
+
+    def render_agent_digest(self, session_date: str): ...
+
+    def acknowledge_agent_digest(self, session_date: str, operator_id: str): ...
+
+    def agent_gate_status(self, prior_session_date: str): ...
+
+    def enqueue_agent_work(self, role: str, session_id: str, objective: str, priority: int): ...
+
+    def list_agent_work(self): ...
+
+    def run_next_agent_work(
+        self,
+        worker_id: str,
+        repository_revision: str,
+        evidence: dict[str, object],
+        prior_session_date: str,
+    ): ...
+
 
 class PlatformRuntimeUnavailable(RuntimeError):
     """A requested platform capability has no configured local runtime."""
@@ -163,7 +193,7 @@ def build_app(
         runtime: str = typer.Option(
             "docker-codex",
             "--runtime",
-            help="Specialist runtime: docker-codex or opencode.",
+            help="Specialist runtime: ollama-qwen, docker-codex, or opencode.",
         ),
         model: str | None = typer.Option(
             None,
@@ -257,6 +287,96 @@ def build_app(
     def list_active_runs(context: typer.Context) -> None:
         """List running or crash-interrupted runs and active runtime metadata."""
         _call(context, "list_active_runs")
+
+    @app.command("agent-roster")
+    def agent_roster(context: typer.Context) -> None:
+        """List all eight roles and their current runtime route."""
+        _call(context, "agent_roster")
+
+    @app.command("agent-run")
+    def run_agent(
+        context: typer.Context,
+        role: str = typer.Option(..., "--role"),
+        session_id: str = typer.Option(..., "--session-id"),
+        objective: str = typer.Option(..., "--objective"),
+        repository_revision: str = typer.Option(..., "--repository-revision"),
+        evidence_json: str = typer.Option("{}", "--evidence-json"),
+        prior_session_date: str = typer.Option(..., "--prior-session-date"),
+    ) -> None:
+        """Run one bounded quant agent through local qwen:64k; no scheduler."""
+        try:
+            evidence = json.loads(evidence_json)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter("evidence-json must be valid JSON") from exc
+        if not isinstance(evidence, dict):
+            raise typer.BadParameter("evidence-json must be a JSON object")
+        _call(
+            context,
+            "run_agent",
+            role,
+            session_id,
+            objective,
+            repository_revision,
+            evidence,
+            prior_session_date,
+        )
+
+    @app.command("agent-digest")
+    def render_agent_digest(context: typer.Context, session_date: str) -> None:
+        """Render the immutable eight-role daily review digest."""
+        _call(context, "render_agent_digest", session_date)
+
+    @app.command("agent-review")
+    def acknowledge_agent_digest(
+        context: typer.Context, session_date: str, operator_id: str
+    ) -> None:
+        """Acknowledge a rendered daily digest as the operator."""
+        _call(context, "acknowledge_agent_digest", session_date, operator_id)
+
+    @app.command("agent-gate")
+    def agent_gate_status(context: typer.Context, prior_session_date: str) -> None:
+        """Show whether new proposals pass the prior-session review gate."""
+        _call(context, "agent_gate_status", prior_session_date)
+
+    @app.command("agent-enqueue")
+    def enqueue_agent_work(
+        context: typer.Context,
+        role: str = typer.Option(..., "--role"),
+        session_id: str = typer.Option(..., "--session-id"),
+        objective: str = typer.Option(..., "--objective"),
+        priority: int = typer.Option(50, "--priority", min=0, max=100),
+    ) -> None:
+        """Persist event-driven work; does not start an agent or scheduler."""
+        _call(context, "enqueue_agent_work", role, session_id, objective, priority)
+
+    @app.command("agent-queue")
+    def list_agent_work(context: typer.Context) -> None:
+        """List persisted agent work and claims."""
+        _call(context, "list_agent_work")
+
+    @app.command("agent-run-next")
+    def run_next_agent_work(
+        context: typer.Context,
+        worker_id: str = typer.Option(..., "--worker-id"),
+        repository_revision: str = typer.Option(..., "--repository-revision"),
+        evidence_json: str = typer.Option("{}", "--evidence-json"),
+        prior_session_date: str = typer.Option(..., "--prior-session-date"),
+    ) -> None:
+        """Claim one queued item and run it through the serialized Qwen lease."""
+        try:
+            evidence = json.loads(evidence_json)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter("evidence-json must be valid JSON") from exc
+        if not isinstance(evidence, dict):
+            raise typer.BadParameter("evidence-json must be a JSON object")
+        _call(
+            context,
+            "run_next_agent_work",
+            worker_id,
+            repository_revision,
+            evidence,
+            prior_session_date,
+        )
 
     @app.command("knowledge-sync")
     def sync_knowledge(context: typer.Context) -> None:

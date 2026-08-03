@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from vesper.platform.contracts import (
+    AgentRole,
     CodexExecutionReceipt,
     DataResearchResult,
     DevelopmentSpecialistOutput,
@@ -29,6 +31,7 @@ from vesper.platform.contracts import (
     ValidationCheck,
     ValidationResult,
 )
+from vesper.platform.journals import AgentJournal
 from vesper.platform.persistence import PlatformPaths, open_persistence
 from vesper.platform.opencode import _process_identity
 from vesper.platform.sandbox_runtime import DockerCodexRuntime
@@ -57,6 +60,24 @@ def copy_model_evaluation_fixture(repository: Path) -> None:
     models.mkdir(exist_ok=True)
     shutil.copy2(REPOSITORY_ROOT / "models" / "xgb_ranker.json", models)
     shutil.copy2(REPOSITORY_ROOT / "models" / "xgb_ranker.metadata.json", models)
+
+
+def create_research_data_fixture(root: Path) -> Path:
+    massive = root / "massive"
+    database = massive / "sp500" / "sp500_ohlcv.sqlite"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """CREATE TABLE sp500_ohlcv (
+                   ticker TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL
+               )"""
+        )
+        connection.execute(
+            "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("AAA", "2026-01-02", 10.0, 11.0, 9.0, 10.5, 100.0),
+        )
+    (massive / "split_adjustments.json").write_text("{}", encoding="utf-8")
+    return massive
 
 
 def create_knowledge_fixture(repository: Path) -> Path:
@@ -663,6 +684,7 @@ def test_service_loads_selected_production_composition_without_real_provider(
         require_disposable_worktree=False,
         require_clean_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),
+        research_data_root=create_research_data_fixture(tmp_path / "research"),
         clock=lambda: NOW,
         id_factory=lambda: next(identifiers),
     )
@@ -688,8 +710,12 @@ def test_service_loads_selected_production_composition_without_real_provider(
         runtime = persisted.store.get(("system", "run-runtime"), "run-001")
         assert runtime["specialist_runtime"] == specialist_runtime
         assert runtime["specialist_model"] == model
-        assert runtime["research_data_root"] == str(REPOSITORY_ROOT / "vesper" / "data" / "massive")
+        assert runtime["research_data_root"] == str(tmp_path / "research" / "massive")
         assert runtime["knowledge_root"] == str(knowledge)
+        journal = AgentJournal(persisted.store)
+        assert len(journal.list(AgentRole.PRODUCT, "run-001")) == 1
+        assert len(journal.list(AgentRole.DEVELOPMENT, "run-001")) == 1
+        assert len(journal.list(AgentRole.RISK_REVIEW, "run-001")) == 1
         assert (
             persisted.store.get(
                 ("runs", "run-001", "knowledge"),
@@ -786,6 +812,7 @@ def test_opencode_service_allows_explicit_clean_disposable_clone_root(tmp_path):
         specialist_runtime="opencode",
         opencode_model="opencode/mimo-v2.5-free",
         allow_repository_root_workspace=True,
+        research_data_root=create_research_data_fixture(tmp_path / "research"),
         clock=lambda: NOW,
         id_factory=lambda: next(identifiers),
     )
@@ -1137,6 +1164,7 @@ def test_cancel_run_signals_active_sandbox_from_another_controller_thread(tmp_pa
         adapter_factory=adapter_factory,
         require_disposable_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),
+        research_data_root=create_research_data_fixture(tmp_path / "research"),
         clock=lambda: NOW,
         id_factory=lambda: next(identifiers),
     )
@@ -1215,6 +1243,7 @@ def test_read_only_inspection_survives_removed_worktree_and_profile_catalog(tmp_
         require_disposable_worktree=False,
         require_clean_worktree=False,
         approved_workspace_relative_paths=(Path("exercise"),),
+        research_data_root=create_research_data_fixture(tmp_path / "research"),
         clock=lambda: NOW,
         id_factory=lambda: next(identifiers),
     )

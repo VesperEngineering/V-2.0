@@ -8,13 +8,20 @@ import subprocess
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from .composition import NativeSpecialistComposition
+from .agent_profiles import AgentProfileCatalog, AUTONOMOUS_AGENT_ROLES
+from .agent_queue import AgentWorkQueue
+from .agent_runner import AutonomousAgentRunner
+from .agent_tools import AgentToolGateway
+from .authority import ProposalRouter
 from .contracts import (
     ApprovalDecision,
+    AgentRole,
+    JournalEventType,
     HumanApprovalDecision,
     HumanApprovalRequest,
     RunStatus,
@@ -23,6 +30,8 @@ from .contracts import (
     TaskRequest,
 )
 from .control import RuntimeControl
+from .journals import AgentJournal
+from .ollama import OllamaClient, QWEN_MODEL, QwenSpecialistAdapter
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .knowledge import ObsidianKnowledgeService
@@ -33,6 +42,8 @@ from .opencode import (
     _terminate_process_tree,
 )
 from .profiles import ProfileCatalog
+from .qwen_runtime import QwenTurnRunner
+from .review import DailyDigest, DailyReviewService, HybridReviewGate
 from .research import LocalDataResearcher, LocalModelEvaluator
 from .sandbox_runtime import DockerCodexRuntime
 from .validation import LocalDeterministicValidator, validate_acceptance_checks
@@ -48,6 +59,7 @@ RUN_RUNTIME_NAMESPACE = ("system", "run-runtime")
 M2_APPROVED_WORKSPACE = Path("docs/m2-controlled-exercise")
 DOCKER_CODEX_RUNTIME = "docker-codex"
 OPENCODE_RUNTIME = "opencode"
+OLLAMA_QWEN_RUNTIME = "ollama-qwen"
 ROOT_WORKSPACE_PROTECTED_PATHS = (
     Path(".git"),
     Path(".state"),
@@ -436,6 +448,7 @@ class LocalPlatformService:
                     decision=ApprovalDecision.APPROVE,
                 )
                 controller.record_decision(run_id, decision)
+                self._journal_operator_decision(persistence, decision)
                 payload = self._view_payload(controller.inspect(run_id))
                 self.control.set_run_status(run_id, str(payload["status"]))
         payload["resume_required"] = True
@@ -460,6 +473,7 @@ class LocalPlatformService:
                     decision=ApprovalDecision.REJECT,
                 )
                 controller.record_decision(run_id, decision)
+                self._journal_operator_decision(persistence, decision)
                 rejected = controller.resume(run_id)
                 self.control.set_run_status(run_id, rejected.state.status.value)
         return self._view_payload(rejected)
@@ -512,6 +526,215 @@ class LocalPlatformService:
                 index=persistence.knowledge_index,
             ).status()
 
+    def agent_roster(self) -> dict[str, object]:
+        autonomous = AgentProfileCatalog(self._profiles_root).load_all()
+        rows = [
+            {
+                "role": role.value,
+                "status": "existing-workflow",
+                "runtime": "operator-selected",
+                "route": "seven-node governed workflow",
+            }
+            for role in (AgentRole.PRODUCT, AgentRole.DEVELOPMENT, AgentRole.RISK_REVIEW)
+        ]
+        rows.extend(
+            {
+                "role": profile.profile_id.value,
+                "status": "bounded-action-only",
+                "runtime": profile.model,
+                "route": "proposal router -> journal -> operator review",
+            }
+            for profile in autonomous
+        )
+        return {"count": len(rows), "agents": rows, "scheduler_active": False}
+
+    def run_agent(
+        self,
+        role: str,
+        session_id: str,
+        objective: str,
+        repository_revision: str,
+        evidence: dict[str, object],
+        prior_session_date: str,
+    ) -> dict[str, object]:
+        try:
+            agent_role = AgentRole(role)
+            prior_date = date.fromisoformat(prior_session_date)
+        except ValueError as exc:
+            raise SpecialistRuntimeUnavailable("invalid agent role or prior session date") from exc
+        if agent_role not in AUTONOMOUS_AGENT_ROLES:
+            raise SpecialistRuntimeUnavailable(
+                "agent run supports the five bounded quant roles only"
+            )
+        repository_root = Path.cwd().resolve()
+        created_at = self._clock()
+        run_id = self._id_factory()
+        task_id = self._id_factory()
+        rendered_digest = self.render_agent_digest(prior_session_date)
+        with open_persistence(self.paths) as persistence:
+            gate = HybridReviewGate(persistence.store)
+            if not gate.can_admit(prior_date, digest_sha256=str(rendered_digest["sha256"])):
+                raise SpecialistRuntimeUnavailable(
+                    f"daily review for {prior_date.isoformat()} is not acknowledged"
+                )
+            journal = AgentJournal(persistence.store)
+            result = AutonomousAgentRunner(
+                repository_root=repository_root,
+                profiles=AgentProfileCatalog(self._profiles_root),
+                qwen=QwenTurnRunner(
+                    OllamaClient(),
+                    AgentToolGateway(repository_root),
+                    self.paths.root,
+                    wait_seconds=900,
+                ),
+                journal=journal,
+                router=ProposalRouter(),
+            ).run(
+                role=agent_role,
+                session_id=session_id,
+                run_id=run_id,
+                task_id=task_id,
+                repository_revision=repository_revision,
+                created_at=created_at,
+                objective=objective,
+                evidence=evidence,
+            )
+        return {
+            "run_id": run_id,
+            "task_id": task_id,
+            "role": agent_role.value,
+            "output": result.output.model_dump(mode="json"),
+            "decisions": [decision.model_dump(mode="json") for decision in result.decisions],
+            "runtime": "qwen:64k",
+        }
+
+    def enqueue_agent_work(
+        self, role: str, session_id: str, objective: str, priority: int
+    ) -> dict[str, object]:
+        try:
+            agent_role = AgentRole(role)
+        except ValueError as exc:
+            raise SpecialistRuntimeUnavailable(f"unknown agent role: {role}") from exc
+        if agent_role not in AUTONOMOUS_AGENT_ROLES:
+            raise SpecialistRuntimeUnavailable("only bounded quant roles enter the Qwen queue")
+        work_id = self._id_factory()
+        with open_persistence(self.paths) as persistence:
+            item = AgentWorkQueue(persistence.store).enqueue(
+                work_id, agent_role, session_id, objective, priority, self._clock()
+            )
+        return item.model_dump(mode="json")
+
+    def list_agent_work(self) -> dict[str, object]:
+        with open_persistence(self.paths) as persistence:
+            items = AgentWorkQueue(persistence.store).list()
+        ordered = sorted(items, key=lambda item: (-item.priority, item.created_at, item.work_id))
+        return {"work": [item.model_dump(mode="json") for item in ordered]}
+
+    def run_next_agent_work(
+        self,
+        worker_id: str,
+        repository_revision: str,
+        evidence: dict[str, object],
+        prior_session_date: str,
+    ) -> dict[str, object]:
+        with open_persistence(self.paths) as persistence:
+            claimed = AgentWorkQueue(persistence.store).claim(
+                worker_id, self._clock(), lease_seconds=900
+            )
+        result = self.run_agent(
+            claimed.role.value,
+            claimed.session_id,
+            claimed.objective,
+            repository_revision,
+            evidence,
+            prior_session_date,
+        )
+        with open_persistence(self.paths) as persistence:
+            completed = AgentWorkQueue(persistence.store).complete(claimed.work_id, worker_id)
+        return {**result, "work": completed.model_dump(mode="json")}
+
+    def render_agent_digest(self, session_date: str) -> dict[str, object]:
+        target = self._session_date(session_date)
+        with open_persistence(self.paths) as persistence:
+            journal = AgentJournal(persistence.store)
+            grouped: dict[AgentRole, list] = {}
+            for role, session_id in journal.sessions():
+                if not journal.verify(role, session_id):
+                    raise SpecialistRuntimeUnavailable(
+                        f"agent journal integrity failed: {role.value}/{session_id}"
+                    )
+                events = [
+                    event
+                    for event in journal.list(role, session_id)
+                    if event.created_at.date() == target
+                ]
+                grouped.setdefault(role, []).extend(events)
+            ordered = {
+                role: tuple(sorted(events, key=lambda event: (event.session_id, event.sequence)))
+                for role, events in grouped.items()
+            }
+            digest = DailyReviewService(persistence.store, self.paths.root / "daily-review").render(
+                target, ordered
+            )
+        return {
+            "session_date": target.isoformat(),
+            "sha256": digest.sha256,
+            "json_path": str(digest.json_path),
+            "markdown_path": str(digest.markdown_path),
+            "sections": [
+                {"role": section.role.value, "event_count": section.event_count}
+                for section in digest.sections
+            ],
+        }
+
+    def acknowledge_agent_digest(self, session_date: str, operator_id: str) -> dict[str, object]:
+        target = self._session_date(session_date)
+        rendered = self.render_agent_digest(session_date)
+        with open_persistence(self.paths) as persistence:
+            review = DailyReviewService(persistence.store, self.paths.root / "daily-review")
+            digest = DailyDigest(
+                target,
+                (),
+                str(rendered["sha256"]),
+                Path(str(rendered["json_path"])),
+                Path(str(rendered["markdown_path"])),
+            )
+            review.acknowledge(digest, operator_id, self._clock())
+        return {"session_date": session_date, "acknowledged": True, "operator_id": operator_id}
+
+    def agent_gate_status(self, prior_session_date: str) -> dict[str, object]:
+        target = self._session_date(prior_session_date)
+        with open_persistence(self.paths) as persistence:
+            admitted = HybridReviewGate(persistence.store).can_admit(target)
+        return {"prior_session_date": prior_session_date, "new_proposals_admitted": admitted}
+
+    @staticmethod
+    def _session_date(value: str) -> date:
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise SpecialistRuntimeUnavailable("session date must use YYYY-MM-DD") from exc
+
+    @staticmethod
+    def _journal_operator_decision(
+        persistence: PlatformPersistence, decision: HumanApprovalDecision
+    ) -> None:
+        AgentJournal(persistence.store).append(
+            event_id=f"{decision.run_id}:operator:{decision.approval_id}",
+            role=AgentRole.RISK_REVIEW,
+            session_id=decision.run_id,
+            run_id=decision.run_id,
+            task_id=decision.task_id,
+            repository_revision=decision.repository_revision,
+            created_at=decision.decided_at,
+            event_type=JournalEventType.OPERATOR_DECISION,
+            payload={
+                "decision": decision.decision.value,
+                "operator_id": decision.operator_id,
+                "reason": decision.reason,
+            },
+        )
+
     def _controller(
         self,
         persistence: PlatformPersistence,
@@ -545,7 +768,9 @@ class LocalPlatformService:
             loaded = profiles.load_all()
             profile_models = tuple(sorted({profile.model.name for profile in loaded}))
             approved_models = (
-                (opencode_model,) if runtime_name == OPENCODE_RUNTIME else profile_models
+                (opencode_model,)
+                if runtime_name == OPENCODE_RUNTIME
+                else ((QWEN_MODEL,) if runtime_name == OLLAMA_QWEN_RUNTIME else profile_models)
             )
             protected_paths = (
                 *(repository_root / relative for relative in ROOT_WORKSPACE_PROTECTED_PATHS),
@@ -572,6 +797,13 @@ class LocalPlatformService:
                     control=self.control,
                     clock=self._clock,
                 )
+            elif runtime_name == OLLAMA_QWEN_RUNTIME:
+                adapter = QwenSpecialistAdapter(
+                    repository_root,
+                    self.paths.root,
+                    clock=self._clock,
+                    journal=AgentJournal(persistence.store),
+                )
             else:
                 adapter = DockerCodexRuntime(
                     repository_root=repository_root,
@@ -585,14 +817,31 @@ class LocalPlatformService:
                 adapter=adapter,
                 evidence=persistence.evidence,
                 turn_store=persistence.store,
+                agent_journal=AgentJournal(persistence.store),
                 protected_paths=protected_paths,
-                model_override=(opencode_model if runtime_name == OPENCODE_RUNTIME else None),
-                execution_runtime=("opencode" if runtime_name == OPENCODE_RUNTIME else "codex"),
+                model_override=(
+                    opencode_model
+                    if runtime_name == OPENCODE_RUNTIME
+                    else (QWEN_MODEL if runtime_name == OLLAMA_QWEN_RUNTIME else None)
+                ),
+                execution_runtime=(
+                    "opencode"
+                    if runtime_name == OPENCODE_RUNTIME
+                    else ("ollama-qwen" if runtime_name == OLLAMA_QWEN_RUNTIME else "codex")
+                ),
                 authentication_type=(
-                    "opencode-local" if runtime_name == OPENCODE_RUNTIME else "chatgpt"
+                    "opencode-local"
+                    if runtime_name == OPENCODE_RUNTIME
+                    else ("local-ollama" if runtime_name == OLLAMA_QWEN_RUNTIME else "chatgpt")
                 ),
                 permission_profile=(
-                    "opencode-host" if runtime_name == OPENCODE_RUNTIME else "docker-one-shot"
+                    "opencode-host"
+                    if runtime_name == OPENCODE_RUNTIME
+                    else (
+                        "controller-tools"
+                        if runtime_name == OLLAMA_QWEN_RUNTIME
+                        else "docker-one-shot"
+                    )
                 ),
                 allow_repository_root_workspace=allow_repository_root_workspace,
                 knowledge_context_reader=ObsidianKnowledgeService(
@@ -820,7 +1069,11 @@ class LocalPlatformService:
         opencode_model: str | None,
         credential_environment_key: str | None,
     ) -> None:
-        if specialist_runtime not in {DOCKER_CODEX_RUNTIME, OPENCODE_RUNTIME}:
+        if specialist_runtime not in {
+            DOCKER_CODEX_RUNTIME,
+            OPENCODE_RUNTIME,
+            OLLAMA_QWEN_RUNTIME,
+        }:
             raise SpecialistRuntimeUnavailable(
                 f"unsupported specialist runtime: {specialist_runtime}"
             )

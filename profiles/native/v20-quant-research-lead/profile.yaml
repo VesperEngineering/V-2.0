@@ -1,0 +1,10 @@
+schema_version: "1.0"
+profile_id: v20-quant-research-lead
+purpose: Frame falsifiable hypotheses, rank research, and route bounded follow-up work.
+model: qwen:64k
+allowed_tools: [read_file, search_text]
+skills: [knowledge/skills/v20-bounded-agent-research.md]
+memory_namespace: [agents, v20-quant-research-lead]
+output_contract: QuantResearchLeadOutput@1.0
+protected_paths: [vesper/data/massive, vesper/data/model_research, config/settings.yaml, models]
+prohibited_actions: [trade, change-risk, train-model, promote-model, enable-schedule, write-code]

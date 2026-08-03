@@ -19,12 +19,14 @@ from typing import Protocol
 from pydantic import BaseModel, ValidationError
 
 from .contracts import (
+    AgentRole,
     CodexExecutionReceipt,
     DataResearchResult,
     DevelopmentSpecialistOutput,
     EvidenceArtifactRef,
     ExecutionStatus,
     KnowledgeContext,
+    JournalEventType,
     MemoryCandidate,
     MemoryProposal,
     MemoryType,
@@ -43,6 +45,7 @@ from .contracts import (
     ValidationResult,
 )
 from .evidence import FilesystemEvidenceStore
+from .journals import AgentJournal
 from .profiles import LoadedProfile, ProfileCatalog
 
 
@@ -154,6 +157,7 @@ class NativeSpecialistComposition:
         adapter: SpecialistTurnAdapter,
         evidence: FilesystemEvidenceStore,
         turn_store: TurnJournalStore | None = None,
+        agent_journal: AgentJournal | None = None,
         protected_paths: tuple[Path, ...] = (),
         model_override: str | None = None,
         execution_runtime: str = "codex",
@@ -171,6 +175,7 @@ class NativeSpecialistComposition:
         self.adapter = adapter
         self.evidence = evidence
         self.turn_store = turn_store
+        self.agent_journal = agent_journal
         self.model_override = model_override
         self.execution_runtime = execution_runtime
         self.authentication_type = authentication_type
@@ -225,6 +230,7 @@ class NativeSpecialistComposition:
         if receipt.status is not ExecutionStatus.COMPLETED:
             self._rollback_turn(before)
         self._complete_turn(request, receipt)
+        self._journal_receipt(request, receipt)
         return receipt
 
     def review(
@@ -329,6 +335,7 @@ class NativeSpecialistComposition:
                 self._rollback_turn(before)
         if receipt.status is not ExecutionStatus.COMPLETED:
             self._complete_turn(item, receipt)
+            self._journal_receipt(item, receipt)
             return RiskReviewExecution(receipt=receipt)
         if not isinstance(receipt.output, RiskSpecialistOutput):
             raise SpecialistOutputError("Risk Review did not produce a completed typed output")
@@ -347,6 +354,7 @@ class NativeSpecialistComposition:
                 error_code="risk-changed-files-mismatch",
             )
             self._complete_turn(item, invalid)
+            self._journal_receipt(item, invalid)
             return RiskReviewExecution(receipt=invalid)
         decision = RiskReviewDecision(
             run_id=output.run_id,
@@ -364,7 +372,33 @@ class NativeSpecialistComposition:
             residual_risks=output.residual_risks,
         )
         self._complete_turn(item, receipt)
+        self._journal_receipt(item, receipt)
         return RiskReviewExecution(receipt=receipt, decision=decision)
+
+    def _journal_receipt(self, request: SpecialistInput, receipt: SpecialistReceipt) -> None:
+        if self.agent_journal is None:
+            return
+        role = AgentRole(request.role.value)
+        event_type = (
+            JournalEventType.RISK_REVIEW
+            if role is AgentRole.RISK_REVIEW
+            else JournalEventType.OBSERVATION
+        )
+        self.agent_journal.append(
+            event_id=f"{request.run_id}:{role.value}:{request.attempt}:{receipt.receipt_id}",
+            role=role,
+            session_id=request.run_id,
+            run_id=request.run_id,
+            task_id=request.task_id,
+            repository_revision=request.repository_revision,
+            created_at=receipt.created_at,
+            event_type=event_type,
+            payload={
+                "receipt_id": receipt.receipt_id,
+                "status": receipt.status.value,
+                "attempt": receipt.attempt,
+            },
+        )
 
     def _prepare_turn(
         self,

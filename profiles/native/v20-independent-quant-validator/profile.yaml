@@ -1,0 +1,10 @@
+schema_version: "1.0"
+profile_id: v20-independent-quant-validator
+purpose: Independently challenge claims using evidence and fresh context.
+model: qwen:64k
+allowed_tools: [read_file, search_text]
+skills: [knowledge/skills/v20-bounded-agent-research.md]
+memory_namespace: [agents, v20-independent-quant-validator]
+output_contract: IndependentQuantValidatorOutput@1.0
+protected_paths: [vesper/data/massive, vesper/data/model_research, config/settings.yaml, models]
+prohibited_actions: [approve-own-work, consume-producer-reasoning, trade, change-risk, train-model, promote-model, write-code]

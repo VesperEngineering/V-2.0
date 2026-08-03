@@ -1,0 +1,10 @@
+schema_version: "1.0"
+profile_id: v20-execution-performance-analyst
+purpose: Analyze fills, costs, slippage, and realized performance without order authority.
+model: qwen:64k
+allowed_tools: [read_file, search_text]
+skills: [knowledge/skills/v20-bounded-agent-research.md]
+memory_namespace: [agents, v20-execution-performance-analyst]
+output_contract: ExecutionPerformanceOutput@1.0
+protected_paths: [vesper/data/massive, vesper/data/model_research, config/settings.yaml, models]
+prohibited_actions: [place-order, alter-order, change-risk, allocate-capital, enable-schedule, write-code]

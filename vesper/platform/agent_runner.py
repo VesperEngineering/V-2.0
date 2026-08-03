@@ -1,0 +1,194 @@
+"""Controller runner for the five proposal-only quant agents."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Mapping
+
+from .agent_profiles import AgentProfileCatalog
+from .authority import ProposalRouter
+from .contracts import AgentRole, JournalEventType, ProposalRoutingDecision
+from .journals import AgentJournal
+from .quant_agents import OUTPUT_MODELS, QuantAgentOutput
+from .qwen_runtime import QwenTurnResult
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunResult:
+    output: QuantAgentOutput
+    decisions: tuple[ProposalRoutingDecision, ...]
+    turn: QwenTurnResult
+
+
+class AutonomousAgentRunner:
+    def __init__(
+        self,
+        *,
+        repository_root: Path,
+        profiles: AgentProfileCatalog,
+        qwen,
+        journal: AgentJournal,
+        router: ProposalRouter | None = None,
+    ) -> None:
+        self.repository_root = repository_root.resolve()
+        self.profiles = profiles
+        self.qwen = qwen
+        self.journal = journal
+        self.router = router or ProposalRouter()
+
+    def run(
+        self,
+        *,
+        role: AgentRole,
+        session_id: str,
+        run_id: str,
+        task_id: str,
+        repository_revision: str,
+        created_at: datetime,
+        objective: str,
+        evidence: Mapping[str, object],
+    ) -> AgentRunResult:
+        profile = self.profiles.load(role)
+        bounded_evidence = self._without_producer_reasoning(evidence)
+        prompt = self._prompt(profile, objective, bounded_evidence)
+        self.journal.append(
+            event_id=f"{run_id}:{role.value}:observation",
+            role=role,
+            session_id=session_id,
+            run_id=run_id,
+            task_id=task_id,
+            repository_revision=repository_revision,
+            created_at=created_at,
+            event_type=JournalEventType.OBSERVATION,
+            payload={"objective": objective, "evidence_count": len(bounded_evidence)},
+        )
+        tool_index = 0
+
+        def audit_tool(payload: dict[str, str | int]) -> None:
+            nonlocal tool_index
+            tool_index += 1
+            self.journal.append(
+                event_id=f"{run_id}:{role.value}:tool:{tool_index}",
+                role=role,
+                session_id=session_id,
+                run_id=run_id,
+                task_id=task_id,
+                repository_revision=repository_revision,
+                created_at=created_at,
+                event_type=JournalEventType.TOOL_RESULT,
+                payload=payload,
+            )
+
+        def record_validation_failure(error_type: str) -> None:
+            self.journal.append(
+                event_id=f"{run_id}:{role.value}:validation-failed",
+                role=role,
+                session_id=session_id,
+                run_id=run_id,
+                task_id=task_id,
+                repository_revision=repository_revision,
+                created_at=created_at,
+                event_type=JournalEventType.VALIDATION,
+                payload={"status": "failed", "error_type": error_type},
+            )
+
+        try:
+            turn = self.qwen.run(
+                role,
+                prompt,
+                allowed_tools=profile.allowed_tools,
+                audit=audit_tool,
+            )
+            output = OUTPUT_MODELS[role].model_validate_json(turn.content)
+        except Exception as exc:
+            record_validation_failure(type(exc).__name__)
+            raise
+        if (
+            output.session_id != session_id
+            or output.run_id != run_id
+            or output.task_id != task_id
+            or output.repository_revision != repository_revision
+        ):
+            record_validation_failure("AuthorityMismatch")
+            raise ValueError("agent output authority does not match the controller request")
+        available_evidence = set(bounded_evidence)
+        if not set(output.evidence_ids).issubset(available_evidence):
+            record_validation_failure("UnboundEvidence")
+            raise ValueError("agent output cites evidence not supplied by the controller")
+        if any(
+            not set(proposal.evidence_ids).issubset(available_evidence)
+            for proposal in output.proposals
+        ):
+            record_validation_failure("UnboundProposalEvidence")
+            raise ValueError("agent proposal cites evidence not supplied by the controller")
+        decisions: list[ProposalRoutingDecision] = []
+        for index, proposal in enumerate(output.proposals, start=1):
+            self.journal.append(
+                event_id=f"{run_id}:{role.value}:proposal:{index}",
+                role=role,
+                session_id=session_id,
+                run_id=run_id,
+                task_id=task_id,
+                repository_revision=repository_revision,
+                created_at=created_at,
+                event_type=JournalEventType.PROPOSAL_CREATED,
+                payload={
+                    "proposal_id": proposal.proposal_id,
+                    "capability": proposal.capability.value,
+                    "summary": proposal.summary,
+                    "rationale": proposal.rationale,
+                    "evidence_ids": ",".join(proposal.evidence_ids),
+                },
+            )
+            decision = self.router.route(proposal)
+            decisions.append(decision)
+            self.journal.append(
+                event_id=f"{run_id}:{role.value}:routing:{index}",
+                role=role,
+                session_id=session_id,
+                run_id=run_id,
+                task_id=task_id,
+                repository_revision=repository_revision,
+                created_at=created_at,
+                event_type=JournalEventType.ROUTING_DECISION,
+                payload={
+                    "proposal_id": proposal.proposal_id,
+                    "status": decision.status.value,
+                    "routed_to": (None if decision.routed_to is None else decision.routed_to.value),
+                },
+            )
+        return AgentRunResult(output, tuple(decisions), turn)
+
+    def _prompt(self, profile, objective: str, evidence: Mapping[str, object]) -> str:
+        skill_text: list[str] = []
+        for relative in profile.skills:
+            path = (self.repository_root / relative).resolve()
+            if self.repository_root not in path.parents or path.is_symlink() or not path.is_file():
+                raise ValueError(f"profile skill is missing or unsafe: {relative}")
+            skill_text.append(path.read_text(encoding="utf-8")[:32_000])
+        return "\n\n".join(
+            (
+                profile.soul,
+                f"Role: {profile.profile_id.value}",
+                f"Objective: {objective}",
+                "Approved skills:\n" + "\n---\n".join(skill_text),
+                "Evidence:\n" + json.dumps(evidence, sort_keys=True),
+                f"Return only JSON matching {profile.output_contract}:\n"
+                + json.dumps(OUTPUT_MODELS[profile.profile_id].model_json_schema(), sort_keys=True),
+            )
+        )
+
+    @classmethod
+    def _without_producer_reasoning(cls, value):
+        if isinstance(value, Mapping):
+            return {
+                key: cls._without_producer_reasoning(item)
+                for key, item in value.items()
+                if key != "producer_reasoning"
+            }
+        if isinstance(value, list):
+            return [cls._without_producer_reasoning(item) for item in value]
+        return value

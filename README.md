@@ -1,5 +1,26 @@
 # VESPER 2.0
 
+## Bounded local agent team
+
+The native platform exposes eight roles. Product, Development, and Risk Review remain in the
+governed seven-node workflow. Five proposal-only quant roles are available through one serialized
+local `qwen:64k` runtime: Quant Research Lead, Model Researcher, Independent Quant Validator,
+Portfolio Researcher, and Execution & Performance Analyst.
+
+Useful manual commands:
+
+```powershell
+uv run --locked vesper-agent agent-roster
+uv run --locked vesper-agent agent-queue
+uv run --locked vesper-agent agent-digest 2026-08-01
+uv run --locked vesper-agent agent-review 2026-08-01 operator-id
+uv run --locked vesper-agent agent-gate 2026-08-01
+```
+
+`agent-enqueue`, `agent-run`, and `agent-run-next` are action-only controls. No scheduler is
+installed or activated. New autonomous proposals remain blocked until the prior session digest is
+acknowledged. Protected proposals still require their separate explicit approval.
+
 Market-hours trading system for US equities with a local Tkinter dashboard.
 
 ## Development setup

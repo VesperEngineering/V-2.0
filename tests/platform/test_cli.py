@@ -65,6 +65,76 @@ class FakeService:
         self.calls.append(("knowledge-status",))
         return {"documents": 1, "memory": 0, "skill": 1}
 
+    def agent_roster(self):
+        self.calls.append(("agent-roster",))
+        return {"count": 8, "agents": []}
+
+    def run_agent(self, role, session_id, objective, revision, evidence, prior_date):
+        self.calls.append(
+            ("agent-run", role, session_id, objective, revision, evidence, prior_date)
+        )
+        return {"run_id": "agent-run-1", "role": role}
+
+    def render_agent_digest(self, session_date):
+        self.calls.append(("agent-digest", session_date))
+        return {"session_date": session_date, "sha256": "a" * 64}
+
+    def acknowledge_agent_digest(self, session_date, operator_id):
+        self.calls.append(("agent-review", session_date, operator_id))
+        return {"session_date": session_date, "acknowledged": True}
+
+    def agent_gate_status(self, prior_session_date):
+        self.calls.append(("agent-gate", prior_session_date))
+        return {"prior_session_date": prior_session_date, "new_proposals_admitted": False}
+
+
+def test_cli_exposes_manual_agent_controls_without_scheduler(cli):
+    runner, app, service, _ = cli
+    commands = (
+        (["agent-roster"], ("agent-roster",)),
+        (["agent-digest", "2026-08-01"], ("agent-digest", "2026-08-01")),
+        (["agent-review", "2026-08-01", "operator"], ("agent-review", "2026-08-01", "operator")),
+        (["agent-gate", "2026-08-01"], ("agent-gate", "2026-08-01")),
+    )
+    for arguments, expected in commands:
+        result = runner.invoke(app, arguments)
+        assert result.exit_code == 0, result.output
+        assert service.calls.pop(0) == expected
+
+
+def test_cli_routes_bounded_agent_run_json(cli):
+    runner, app, service, _ = cli
+    result = runner.invoke(
+        app,
+        [
+            "agent-run",
+            "--role",
+            "v20-model-researcher",
+            "--session-id",
+            "s1",
+            "--objective",
+            "Inspect",
+            "--repository-revision",
+            "abc123",
+            "--evidence-json",
+            '{"artifact":{"available":true}}',
+            "--prior-session-date",
+            "2026-08-01",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert service.calls == [
+        (
+            "agent-run",
+            "v20-model-researcher",
+            "s1",
+            "Inspect",
+            "abc123",
+            {"artifact": {"available": True}},
+            "2026-08-01",
+        )
+    ]
+
 
 @pytest.fixture
 def cli():
