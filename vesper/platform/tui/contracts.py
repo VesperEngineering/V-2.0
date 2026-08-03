@@ -645,18 +645,26 @@ def decode_envelope_json(
     unknown = _unknown_fields(raw_value, WireEnvelope)
     try:
         envelope = WireEnvelope.model_validate_json(raw_bytes)
-    except ValidationError:
+    except ValidationError as error:
+        envelope_error = error
+    else:
+        envelope_error = None
+    if envelope_error is not None:
         _report_untrusted(raw_bytes, unknown, on_untrusted)
-        raise
+        raise envelope_error
     try:
         decode_payload(envelope)
     except ValidationError as error:
+        payload_error = error
         payload = raw_value.get("payload")
         if isinstance(payload, dict):
-            _report_untrusted(
-                raw_bytes,
-                _unknown_fields_from_validation(envelope.payload, error),
-                on_untrusted,
-            )
-        raise
+            payload_unknown = _unknown_fields_from_validation(envelope.payload, error)
+        else:
+            payload_unknown = {}
+    else:
+        payload_error = None
+        payload_unknown = {}
+    if payload_error is not None:
+        _report_untrusted(raw_bytes, payload_unknown, on_untrusted)
+        raise payload_error
     return envelope

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import pickle
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -149,21 +150,40 @@ def test_untrusted_diagnostic_scrubs_retained_references_and_cannot_serialize() 
         b'"payload":{"action":"take-control","secret":"x"}}'
     )
     seen_during_callback: list[bool] = []
+    retained_exceptions: list[BaseException | None] = []
     retained: list[UntrustedProtocolDiagnostic] = []
 
     def receive(diagnostic: UntrustedProtocolDiagnostic) -> None:
         seen_during_callback.append(diagnostic.unknown_fields["secret"] == "x")
+        retained_exceptions.append(sys.exception())
         retained.append(diagnostic)
 
     with pytest.raises(ValidationError):
         decode_envelope_json(wire, receive)
 
     assert seen_during_callback == [True]
+    assert retained_exceptions == [None]
     assert retained[0].unknown_fields == {}
     with pytest.raises(TypeError):
         json.dumps(retained[0])
     with pytest.raises(TypeError):
         pickle.dumps(retained[0])
+
+
+def test_top_level_unknown_callback_has_no_active_validation_error() -> None:
+    wire = (
+        b'{"schema_version":1,"message_id":"server:1","sequence":1,'
+        b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
+        b'"message_type":"server-hello",'
+        b'"payload":{"server_version":"0.1.0","requires_setup":true},'
+        b'"secret":"x"}'
+    )
+    retained_exceptions: list[BaseException | None] = []
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(wire, lambda diagnostic: retained_exceptions.append(sys.exception()))
+
+    assert retained_exceptions == [None]
 
 
 def test_retained_unknown_field_view_is_empty_after_callback() -> None:
