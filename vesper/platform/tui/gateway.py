@@ -125,6 +125,7 @@ class Gateway:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sessions: dict[str, GatewaySession] = {}
         self._sessions_lock = threading.Lock()
+        self._snapshot = self._unavailable_snapshot()
 
     @property
     def controller_id(self) -> str | None:
@@ -227,6 +228,9 @@ class Gateway:
             return (self._error(session, "direction", "Message type is not accepted from clients."),)
 
     def snapshot(self) -> ShellSnapshot:
+        return self._snapshot
+
+    def _unavailable_snapshot(self) -> ShellSnapshot:
         now = self._clock().astimezone(timezone.utc)
         capabilities = tuple(
             CapabilityView(
@@ -249,15 +253,15 @@ class Gateway:
                 regime_confidence=None,
                 portfolio_value=None,
                 next_rebalance_at_utc=None,
-                rebalance_blockers=(),
+                rebalance_blockers=None,
                 active_agent=None,
-                agent_queue_length=0,
+                agent_queue_length=None,
                 qwen_state="Unavailable",
                 qwen_context_percent=None,
                 current_time_utc=now,
                 market_session="Unavailable",
             ),
-            alerts=(),
+            alerts=None,
             capabilities=capabilities,
         )
 

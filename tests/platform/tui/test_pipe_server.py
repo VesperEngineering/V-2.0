@@ -111,34 +111,33 @@ def test_create_parameters_are_explicit_and_bounded(monkeypatch: pytest.MonkeyPa
     assert captured[7] is security_attributes
 
 
-def test_preconsumed_bootstrap_instance_aborts_before_readiness(
+def test_current_logon_connection_before_readiness_is_queued(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = WindowsPipeServer(pipe_name(current_logon_sid()))
     handles = tuple(object() for _ in range(4))
-    closed: list[object] = []
     monkeypatch.setattr(server, "_create_pipe_set", lambda: handles)
     monkeypatch.setattr(
         pipe_server.win32pipe,
         "ConnectNamedPipe",
         lambda handle, overlapped: winerror.ERROR_PIPE_CONNECTED,
     )
-    monkeypatch.setattr(server, "_close_untracked_handle", closed.append)
+    listeners = server._bootstrap_listeners()
+    try:
+        assert len(listeners) == 4
+        assert all(listener.already_connected for listener in listeners.values())
+        assert not server.ready_event.is_set()
+    finally:
+        for listener in listeners.values():
+            server._cancel_listener(listener)
 
-    with pytest.raises(RuntimeError, match="consumed before secure readiness"):
-        server._bootstrap_listeners()
 
-    assert closed == list(handles)
-    assert not server.ready_event.is_set()
-
-
-def test_consumption_after_all_listeners_are_armed_aborts_before_readiness(
+def test_consumption_after_all_listeners_are_armed_waits_for_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     name = pipe_name(current_logon_sid())
     server = WindowsPipeServer(name)
     stop = threading.Event()
-    errors: list[BaseException] = []
     handler_calls: list[bytes] = []
     clients: list[object] = []
     ready_sets: list[bool] = []
@@ -148,33 +147,84 @@ def test_consumption_after_all_listeners_are_armed_aborts_before_readiness(
     def consume_then_gate(listeners: object) -> None:
         clients.append(_connect(name))
         original_gate(listeners)
+        assert server.active_client_count == 1
+        assert not server.ready_event.is_set()
 
     def record_ready() -> None:
         ready_sets.append(True)
         original_ready_set()
 
     def run() -> None:
-        try:
-            server.serve(lambda body: handler_calls.append(body) or body, stop)
-        except BaseException as error:
-            errors.append(error)
+        server.serve(
+            lambda body: handler_calls.append(body) or body,
+            stop,
+        )
 
     monkeypatch.setattr(server, "_pre_readiness_gate", consume_then_gate)
     monkeypatch.setattr(server.ready_event, "set", record_ready)
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
+    assert server.ready_event.wait(5)
+    assert clients
+    _write_frame(clients[0], b"early")
+    assert _read_frame(clients[0]) == b"early"
+    assert handler_calls == [b"early"]
+    assert ready_sets == [True]
+    win32file.CloseHandle(clients[0])
+    stop.set()
+    server.stop()
     thread.join(timeout=5)
-    for client in clients:
-        win32file.CloseHandle(client)
-
     assert not thread.is_alive()
-    assert len(errors) == 1
-    assert isinstance(errors[0], RuntimeError)
-    assert "before readiness" in str(errors[0])
-    assert ready_sets == []
-    assert handler_calls == []
     assert server.active_handle_count == 0
     assert server.pending_cancellation_count == 0
+
+
+def test_connection_factory_opens_fresh_context_and_closes_once_per_client() -> None:
+    name = pipe_name(current_logon_sid())
+    opened: list[int] = []
+    closed: list[int] = []
+
+    def factory():
+        connection_id = len(opened) + 1
+        opened.append(connection_id)
+
+        def handle(body: bytes) -> bytes:
+            return f"{connection_id}:".encode() + body
+
+        return handle, lambda: closed.append(connection_id)
+
+    server = WindowsPipeServer(name)
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=server.serve,
+        args=(lambda body: body, stop),
+        kwargs={"connection_factory": factory},
+    )
+    thread.start()
+    assert server.ready_event.wait(5)
+
+    first = _connect(name)
+    _write_frame(first, b"one")
+    assert _read_frame(first) == b"1:one"
+    win32file.CloseHandle(first)
+    deadline = time.monotonic() + 2
+    while closed != [1] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    second = _connect(name)
+    _write_frame(second, b"two")
+    assert _read_frame(second) == b"2:two"
+    win32file.CloseHandle(second)
+    deadline = time.monotonic() + 2
+    while closed != [1, 2] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    stop.set()
+    server.stop()
+    thread.join(timeout=5)
+    assert opened == [1, 2]
+    assert closed == [1, 2]
+    assert not thread.is_alive()
 
 
 def test_incomplete_cancellation_retains_event_until_completion(

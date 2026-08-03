@@ -10,15 +10,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 from .contracts import SafeId, WireEnvelope
 from .gateway import Gateway
 from .pipe_security import current_logon_sid, pipe_name
-from .pipe_server import WindowsPipeServer
+from .pipe_server import ConnectionFactory, WindowsPipeServer
 
 _PARENT_IDLE_SECONDS = 30.0
-_PIPE_PREFIX = r"\\.\pipe\vesper-v20-tui-"
+_COORDINATOR_WAIT_SECONDS = 10.0
 
 
 def default_pipe_name() -> str:
@@ -32,13 +32,34 @@ def _default_state_root() -> Path:
     return Path(local) / "Vesper" / "v20" / "tui"
 
 
+def _normalize_state_root(value: Path) -> Path:
+    if not value.is_absolute():
+        raise ValueError("state root must be absolute")
+    try:
+        if value.is_symlink():
+            raise ValueError("state root cannot be a symbolic link")
+        normalized = value.resolve(strict=False)
+    except OSError as error:
+        raise ValueError("state root cannot be resolved safely") from error
+    if normalized == Path(normalized.anchor):
+        raise ValueError("state root cannot be a filesystem root")
+    if normalized.exists() and not normalized.is_dir():
+        raise ValueError("state root must be a directory")
+    return normalized
+
+
 @dataclass
 class _Request:
     client_id: SafeId
-    envelope: WireEnvelope
+    operation: Literal["handle", "disconnect"]
     completed: threading.Event
+    envelope: WireEnvelope | None = None
     result: tuple[WireEnvelope, ...] | None = None
     error: BaseException | None = None
+
+
+class CoordinatorClosedError(RuntimeError):
+    """The bounded gateway coordinator no longer accepts work."""
 
 
 class _GatewayCoordinator:
@@ -47,21 +68,44 @@ class _GatewayCoordinator:
     def __init__(self, gateway: Gateway) -> None:
         self._gateway = gateway
         self._requests: queue.Queue[_Request | None] = queue.Queue()
+        self._admission_lock = threading.Lock()
+        self._closed = False
         self._thread = threading.Thread(target=self._run, name="v20-tui-gateway", daemon=True)
         self._thread.start()
 
+    @property
+    def closed(self) -> bool:
+        with self._admission_lock:
+            return self._closed
+
     def handle(self, client_id: SafeId, envelope: WireEnvelope) -> tuple[WireEnvelope, ...]:
-        request = _Request(client_id, envelope, threading.Event())
-        self._requests.put(request)
-        request.completed.wait()
+        request = _Request(client_id, "handle", threading.Event(), envelope=envelope)
+        self._submit(request)
         if request.error is not None:
             raise request.error
         assert request.result is not None
         return request.result
 
+    def disconnect(self, client_id: SafeId) -> None:
+        request = _Request(client_id, "disconnect", threading.Event())
+        self._submit(request)
+        if request.error is not None:
+            raise request.error
+
+    def _submit(self, request: _Request) -> None:
+        with self._admission_lock:
+            if self._closed:
+                raise CoordinatorClosedError("gateway coordinator is closed")
+            self._requests.put(request)
+        if not request.completed.wait(_COORDINATOR_WAIT_SECONDS):
+            raise CoordinatorClosedError("gateway coordinator request did not complete")
+
     def stop(self) -> None:
-        self._requests.put(None)
-        self._thread.join(timeout=2)
+        with self._admission_lock:
+            if not self._closed:
+                self._closed = True
+                self._requests.put(None)
+        self._thread.join(timeout=_COORDINATOR_WAIT_SECONDS)
 
     def _run(self) -> None:
         while True:
@@ -69,25 +113,36 @@ class _GatewayCoordinator:
             if request is None:
                 return
             try:
-                request.result = self._gateway.handle(request.client_id, request.envelope)
+                if request.operation == "disconnect":
+                    self._gateway.disconnect(request.client_id)
+                else:
+                    assert request.envelope is not None
+                    request.result = self._gateway.handle(request.client_id, request.envelope)
             except BaseException as error:
                 request.error = error
             finally:
                 request.completed.set()
 
 
-class _ConnectionIdentity:
-    """Give one worker connection an unguessable ID and release it on exit."""
+def _gateway_connection_factory(coordinator: _GatewayCoordinator) -> ConnectionFactory:
+    """Create one explicit authenticated-session boundary per pipe connection."""
 
-    def __init__(self, gateway: Gateway) -> None:
-        self.client_id = f"pipe-{secrets.token_hex(16)}"
-        self._gateway = gateway
+    def factory():
+        client_id = f"pipe-{secrets.token_hex(16)}"
 
-    def __del__(self) -> None:
-        try:
-            self._gateway.disconnect(self.client_id)
-        except Exception:
-            pass
+        def handle(body: bytes) -> bytes | None:
+            envelope = WireEnvelope.model_validate_json(body)
+            responses = coordinator.handle(client_id, envelope)
+            if len(responses) != 1:
+                raise RuntimeError("phase-1 gateway emitted an invalid response count")
+            return responses[0].model_dump_json().encode("utf-8")
+
+        def close() -> None:
+            coordinator.disconnect(client_id)
+
+        return handle, close
+
+    return factory
 
 
 class _ParentExitLatch:
@@ -116,7 +171,7 @@ def _parent_exists(parent_pid: int) -> bool:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="vesper-tui-gateway")
+    parser = argparse.ArgumentParser(prog="vesper-tui-gateway", allow_abbrev=False)
     parser.add_argument("--state-root", type=Path)
     parser.add_argument("--pipe-name")
     parser.add_argument("--parent-pid", type=int)
@@ -135,33 +190,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.parent_pid is not None and args.parent_pid <= 0:
         parser.error("--parent-pid must be positive")
 
-    selected_pipe = args.pipe_name or default_pipe_name()
-    if not selected_pipe.startswith(_PIPE_PREFIX):
-        parser.error("--pipe-name must use the V20 console prefix")
-    gateway = Gateway(args.state_root or _default_state_root())
+    expected_pipe = default_pipe_name()
+    selected_pipe = args.pipe_name or expected_pipe
+    if selected_pipe != expected_pipe:
+        parser.error("--pipe-name must equal the current logon pipe name")
+    try:
+        state_root = _normalize_state_root(args.state_root or _default_state_root())
+    except ValueError as error:
+        parser.error(str(error))
+    gateway = Gateway(state_root)
     coordinator = _GatewayCoordinator(gateway)
     server = WindowsPipeServer(selected_pipe)
     stop_event = threading.Event()
-    connection_local = threading.local()
-
-    def handle(body: bytes) -> bytes | None:
-        envelope = WireEnvelope.model_validate_json(body)
-        identity = getattr(connection_local, "identity", None)
-        if identity is None:
-            identity = _ConnectionIdentity(gateway)
-            connection_local.identity = identity
-        responses = coordinator.handle(identity.client_id, envelope)
-        if len(responses) != 1:
-            raise RuntimeError("phase-1 gateway emitted an invalid response count")
-        return responses[0].model_dump_json().encode("utf-8")
+    connection_factory = _gateway_connection_factory(coordinator)
 
     def watch_parent() -> None:
         exit_latch = _ParentExitLatch()
+        while not stop_event.is_set() and not server.ready_event.wait(0.1):
+            pass
         while not stop_event.wait(0.1):
             parent_alive = args.parent_pid is None or _parent_exists(args.parent_pid)
             if exit_latch.observe(
                 parent_alive=parent_alive,
-                client_count=server.active_worker_count,
+                client_count=server.active_client_count,
                 now=time.monotonic(),
             ):
                 stop_event.set()
@@ -171,7 +222,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     watcher = threading.Thread(target=watch_parent, name="v20-tui-parent-watch", daemon=True)
     watcher.start()
     try:
-        server.serve(handle, stop_event)
+        server.serve(
+            lambda body: body,
+            stop_event,
+            connection_factory=connection_factory,
+        )
     except KeyboardInterrupt:
         stop_event.set()
         server.stop()

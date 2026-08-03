@@ -148,9 +148,9 @@ class HeaderView(StrictModel):
     regime_confidence: float | None
     portfolio_value: float | None
     next_rebalance_at_utc: datetime | None
-    rebalance_blockers: tuple[str, ...]
+    rebalance_blockers: tuple[str, ...] | None
     active_agent: str | None
-    agent_queue_length: int
+    agent_queue_length: int | None
     qwen_state: str
     qwen_context_percent: float | None
     current_time_utc: datetime
@@ -180,7 +180,7 @@ class ShellSnapshot(StrictModel):
     state_version: int
     generated_at_utc: datetime
     header: HeaderView
-    alerts: tuple[AlertView, ...]
+    alerts: tuple[AlertView, ...] | None
     capabilities: tuple[CapabilityView, ...]
 
     @field_validator("generated_at_utc")

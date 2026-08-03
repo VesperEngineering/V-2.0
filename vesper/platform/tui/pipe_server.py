@@ -27,6 +27,8 @@ if sys.platform == "win32":
     import winerror
 
 PipeHandler = Callable[[bytes], bytes | None]
+ConnectionClose = Callable[[], None]
+ConnectionFactory = Callable[[], tuple[PipeHandler, ConnectionClose]]
 
 _LENGTH = struct.Struct(">I")
 _PIPE_BUFFER_BYTES = 1_048_576
@@ -67,6 +69,8 @@ class WindowsPipeServer:
         self._handles: set[object] = set()
         self._workers: set[threading.Thread] = set()
         self._worker_handles: dict[threading.Thread, object] = {}
+        self._visible_listeners: dict[object, _PendingConnect] = {}
+        self._dispatching_clients = 0
         self._pending_cancellations: list[_PendingCancellation] = []
         self._retired_event_ids: set[int] = set()
         self._cancellation_reaper: threading.Thread | None = None
@@ -83,6 +87,27 @@ class WindowsPipeServer:
             return sum(worker.is_alive() for worker in self._workers)
 
     @property
+    def active_client_count(self) -> int:
+        """Count workers plus connected listeners not yet dispatched."""
+
+        with self._lock:
+            count = self._dispatching_clients + sum(
+                worker.is_alive() for worker in self._workers
+            )
+            for listener in self._visible_listeners.values():
+                if listener.already_connected:
+                    count += 1
+                    continue
+                try:
+                    result = win32event.WaitForSingleObject(listener.event, 0)
+                except BaseException:
+                    count += 1
+                    continue
+                if result != win32event.WAIT_TIMEOUT:
+                    count += 1
+            return count
+
+    @property
     def pending_cancellation_count(self) -> int:
         with self._lock:
             return len(self._pending_cancellations)
@@ -92,7 +117,13 @@ class WindowsPipeServer:
 
         self._stop_requested.set()
 
-    def serve(self, handler: PipeHandler, stop_event: threading.Event) -> None:
+    def serve(
+        self,
+        handler: PipeHandler,
+        stop_event: threading.Event,
+        *,
+        connection_factory: ConnectionFactory | None = None,
+    ) -> None:
         """Accept up to four concurrent local connections until stopped."""
 
         if self._should_stop(stop_event):
@@ -102,34 +133,52 @@ class WindowsPipeServer:
             listeners = self._bootstrap_listeners()
             for listener in listeners.values():
                 self._track_handle(listener.handle)
+            with self._lock:
+                self._visible_listeners.update(listeners)
             self._pre_readiness_gate(listeners)
             self.ready_event.set()
             while not self._should_stop(stop_event):
                 for handle in self._reap_workers():
-                    listeners[handle] = self._arm_connect(handle, reject_preconnected=False)
+                    listener = self._arm_connect(handle)
+                    listeners[handle] = listener
+                    with self._lock:
+                        self._visible_listeners[handle] = listener
                 accepted = self._completed_listener(listeners)
                 if accepted is None:
                     stop_event.wait(_POLL_MILLISECONDS / 1000)
                     continue
                 listener = listeners.pop(accepted)
-                if not self._finish_listener(listener):
-                    break
-                if self._should_stop(stop_event):
-                    break
-                worker = threading.Thread(
-                    target=self._serve_connection,
-                    args=(accepted, handler),
-                    name="v20-tui-pipe-worker",
-                    daemon=True,
-                )
                 with self._lock:
-                    self._workers.add(worker)
-                    self._worker_handles[worker] = accepted
-                worker.start()
+                    self._visible_listeners.pop(accepted, None)
+                    self._dispatching_clients += 1
+                dispatched = False
+                try:
+                    if not self._finish_listener(listener):
+                        break
+                    if self._should_stop(stop_event):
+                        break
+                    worker = threading.Thread(
+                        target=self._serve_connection,
+                        args=(accepted, handler, connection_factory),
+                        name="v20-tui-pipe-worker",
+                        daemon=True,
+                    )
+                    with self._lock:
+                        self._workers.add(worker)
+                        self._worker_handles[worker] = accepted
+                        self._dispatching_clients -= 1
+                    dispatched = True
+                    worker.start()
+                finally:
+                    if not dispatched:
+                        with self._lock:
+                            self._dispatching_clients -= 1
         finally:
             self.ready_event.clear()
             self._stop_requested.set()
             for listener in tuple(listeners.values()):
+                with self._lock:
+                    self._visible_listeners.pop(listener.handle, None)
                 self._cancel_listener(listener)
             self._join_workers_bounded()
             self._close_all_handles()
@@ -139,27 +188,21 @@ class WindowsPipeServer:
             self._start_cancellation_reaper()
 
     def _pre_readiness_gate(self, listeners: dict[object, _PendingConnect]) -> None:
-        """Quarantine armed listeners and reject any state change before readiness."""
+        """Queue same-logon early clients without dispatching before readiness.
+
+        The launcher can legitimately connect while the server finishes startup.
+        Every pipe already has its final current-logon-only DACL at this point.
+        """
 
         if len(listeners) != _MAX_INSTANCES:
             raise RuntimeError("all pipe instances must be armed before readiness")
         for check in range(2):
             for listener in listeners.values():
                 if listener.already_connected:
-                    raise RuntimeError("pipe instance was consumed before readiness")
-                result = win32event.WaitForSingleObject(listener.event, 0)
-                if result == win32event.WAIT_TIMEOUT:
                     continue
-                if result == win32event.WAIT_OBJECT_0:
-                    try:
-                        win32file.GetOverlappedResult(
-                            listener.handle,
-                            listener.overlapped,
-                            False,
-                        )
-                    except pywintypes.error:
-                        pass
-                    raise RuntimeError("pipe instance changed state before readiness")
+                result = win32event.WaitForSingleObject(listener.event, 0)
+                if result in {win32event.WAIT_TIMEOUT, win32event.WAIT_OBJECT_0}:
+                    continue
                 raise RuntimeError("pipe listener entered an abnormal state before readiness")
             if check == 0:
                 time.sleep(0.025)
@@ -169,7 +212,7 @@ class WindowsPipeServer:
         listeners: dict[object, _PendingConnect] = {}
         try:
             for handle in handles:
-                listener = self._arm_connect(handle, reject_preconnected=True)
+                listener = self._arm_connect(handle)
                 listeners[handle] = listener
         except BaseException:
             for listener in listeners.values():
@@ -222,7 +265,7 @@ class WindowsPipeServer:
             attributes,
         )
 
-    def _arm_connect(self, handle: object, reject_preconnected: bool) -> _PendingConnect:
+    def _arm_connect(self, handle: object) -> _PendingConnect:
         overlapped, event = self._new_overlapped()
         try:
             try:
@@ -235,8 +278,6 @@ class WindowsPipeServer:
                 else:
                     raise
             connected = status in {None, 0, winerror.ERROR_PIPE_CONNECTED}
-            if connected and reject_preconnected:
-                raise RuntimeError("pipe instance was consumed before secure readiness")
             if not connected and status != winerror.ERROR_IO_PENDING:
                 raise OSError(status, "ConnectNamedPipe returned an unexpected status")
             return _PendingConnect(handle, overlapped, event, connected)
@@ -285,8 +326,17 @@ class WindowsPipeServer:
             if event_owned:
                 win32file.CloseHandle(listener.event)
 
-    def _serve_connection(self, handle: object, handler: PipeHandler) -> None:
+    def _serve_connection(
+        self,
+        handle: object,
+        handler: PipeHandler,
+        connection_factory: ConnectionFactory | None = None,
+    ) -> None:
+        connection_handler = handler
+        close: ConnectionClose | None = None
         try:
+            if connection_factory is not None:
+                connection_handler, close = connection_factory()
             while not self._stop_requested.is_set():
                 header = self._read_exact(handle, _LENGTH.size)
                 if header is None:
@@ -298,7 +348,7 @@ class WindowsPipeServer:
                 if body is None:
                     return
                 try:
-                    response = handler(body)
+                    response = connection_handler(body)
                 except BaseException:
                     return
                 if response is None:
@@ -311,6 +361,12 @@ class WindowsPipeServer:
                     return
         except pywintypes.error:
             return
+        finally:
+            if close is not None:
+                try:
+                    close()
+                except BaseException:
+                    pass
 
     def _read_exact(self, handle: object, size: int) -> bytes | None:
         data = bytearray()

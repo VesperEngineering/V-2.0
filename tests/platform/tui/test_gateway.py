@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -183,9 +184,19 @@ def test_initial_snapshot_is_unknown_unavailable(gateway: Gateway) -> None:
     assert snapshot.header.data_freshness is Freshness.UNAVAILABLE
     assert snapshot.header.portfolio_value is None
     assert snapshot.header.regime_label == "Unavailable"
-    assert snapshot.alerts == ()
+    assert snapshot.header.agent_queue_length is None
+    assert snapshot.header.rebalance_blockers is None
+    assert snapshot.alerts is None
     assert len(snapshot.capabilities) == 31
     assert all(item.state.value == "disabled" and item.reason == PHASE_ONE_REASON for item in snapshot.capabilities)
+
+
+def test_state_version_zero_snapshot_is_one_cached_immutable_value(gateway: Gateway) -> None:
+    first = gateway.snapshot()
+    time.sleep(0.01)
+    second = gateway.snapshot()
+    assert first is second
+    assert first.model_dump_json() == second.model_dump_json()
 
 
 def test_sequences_are_strict_incoming_and_monotonic_outgoing(gateway: Gateway) -> None:
@@ -265,6 +276,150 @@ def test_cli_parser_rejects_unapproved_arguments() -> None:
 
     with pytest.raises(SystemExit):
         cli.main(["--mode", "paper"])
+    with pytest.raises(SystemExit):
+        cli.main(["--state", "C:\\safe"])
+
+
+def test_cli_requires_exact_current_pipe_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from vesper.platform.tui import cli
+
+    expected = r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
+    monkeypatch.setattr(cli, "default_pipe_name", lambda: expected)
+    monkeypatch.setattr(cli, "Gateway", lambda *args, **kwargs: pytest.fail("state opened"))
+    with pytest.raises(SystemExit):
+        cli.main([
+            "--state-root",
+            str(tmp_path.resolve()),
+            "--pipe-name",
+            r"\\.\pipe\vesper-v20-tui-fedcba9876543210",
+        ])
+
+
+def test_state_root_must_be_absolute_and_is_normalized(tmp_path: Path) -> None:
+    from vesper.platform.tui.cli import _normalize_state_root
+
+    with pytest.raises(ValueError, match="absolute"):
+        _normalize_state_root(Path("relative/state"))
+    nested = tmp_path / "one" / ".." / "state"
+    assert _normalize_state_root(nested) == (tmp_path / "state").resolve()
+
+
+def test_coordinator_closes_admission_before_shutdown_sentinel(tmp_path: Path) -> None:
+    from vesper.platform.tui.cli import CoordinatorClosedError, _GatewayCoordinator
+
+    entered = threading.Event()
+    release = threading.Event()
+    real = Gateway(tmp_path, clock=lambda: NOW)
+
+    class BlockingGateway:
+        def handle(self, client_id: str, message: WireEnvelope):
+            entered.set()
+            release.wait(2)
+            return real.handle(client_id, message)
+
+        def disconnect(self, client_id: str) -> None:
+            real.disconnect(client_id)
+
+    coordinator = _GatewayCoordinator(BlockingGateway())  # type: ignore[arg-type]
+    result: list[tuple[WireEnvelope, ...]] = []
+    admitted = threading.Thread(
+        target=lambda: result.append(
+            coordinator.handle(
+                "admitted",
+                envelope(MessageType.PING, 1, {"nonce": "admitted"}),
+            )
+        )
+    )
+    admitted.start()
+    assert entered.wait(1)
+    stopping = threading.Thread(target=coordinator.stop)
+    stopping.start()
+    deadline = time.monotonic() + 1
+    while not coordinator.closed and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert coordinator.closed
+    with pytest.raises(CoordinatorClosedError):
+        coordinator.handle("late", envelope(MessageType.PING, 1, {"nonce": "late"}))
+    release.set()
+    admitted.join(2)
+    stopping.join(2)
+    assert decode_payload(result[0][0]) == PongPayload(nonce="admitted")
+
+
+def test_coordinator_serializes_disconnect_with_messages() -> None:
+    from vesper.platform.tui.cli import _GatewayCoordinator
+
+    calls: list[tuple[str, str, int]] = []
+
+    class RecordingGateway:
+        def handle(self, client_id: str, message: WireEnvelope):
+            calls.append(("handle", client_id, threading.get_ident()))
+            return (message,)
+
+        def disconnect(self, client_id: str) -> None:
+            calls.append(("disconnect", client_id, threading.get_ident()))
+
+    coordinator = _GatewayCoordinator(RecordingGateway())  # type: ignore[arg-type]
+    coordinator.handle("client", envelope(MessageType.PING, 1, {"nonce": "one"}))
+    coordinator.disconnect("client")
+    coordinator.stop()
+    assert [call[:2] for call in calls] == [
+        ("handle", "client"),
+        ("disconnect", "client"),
+    ]
+    assert calls[0][2] == calls[1][2]
+
+
+def test_connection_close_releases_controller_and_new_context_starts_at_sequence_one(
+    gateway: Gateway,
+) -> None:
+    from vesper.platform.tui.cli import _GatewayCoordinator, _gateway_connection_factory
+
+    setup(gateway, "seed")
+    gateway.disconnect("seed")
+    coordinator = _GatewayCoordinator(gateway)
+    factory = _gateway_connection_factory(coordinator)
+
+    first_handle, first_close = factory()
+
+    def round_trip(handler, message: WireEnvelope) -> WireEnvelope:
+        body = handler(message.model_dump_json().encode("utf-8"))
+        assert body is not None
+        return WireEnvelope.model_validate_json(body)
+
+    round_trip(
+        first_handle,
+        envelope(
+            MessageType.CLIENT_HELLO,
+            1,
+            {"client_version": "0.1.0", "supported_schema_versions": [1]},
+        ),
+    )
+    round_trip(
+        first_handle,
+        envelope(MessageType.AUTH_UNLOCK, 2, {"password": "correct horse"}),
+    )
+    acquired = round_trip(
+        first_handle,
+        envelope(MessageType.LEASE_REQUEST, 3, {"action": "take-control"}),
+    )
+    assert decode_payload(acquired).status == "controller"
+    assert gateway.controller_id is not None
+    first_close()
+    assert gateway.controller_id is None
+
+    second_handle, second_close = factory()
+    hello = round_trip(
+        second_handle,
+        envelope(
+            MessageType.CLIENT_HELLO,
+            1,
+            {"client_version": "0.1.0", "supported_schema_versions": [1]},
+        ),
+    )
+    assert hello.sequence == 1
+    second_close()
+    coordinator.stop()
 
 
 def test_parent_exit_requires_thirty_continuous_seconds_without_clients() -> None:
