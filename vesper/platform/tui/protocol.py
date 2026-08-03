@@ -27,6 +27,14 @@ class ProtocolViolation(Exception):
         self.safe_message = safe_message
 
 
+class _DiagnosticCallbackFailure(Exception):
+    """Keep callback failures out of parser and validation classification."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__("diagnostic callback failed")
+        self.error = error
+
+
 class FrameDecoder:
     """Incrementally decode complete, bounded wire frames in arrival order."""
 
@@ -103,10 +111,15 @@ class FrameDecoder:
                 nonlocal untrusted_seen
                 untrusted_seen = True
                 if self._on_untrusted is not None:
-                    self._on_untrusted(diagnostic)
+                    try:
+                        self._on_untrusted(diagnostic)
+                    except BaseException as error:
+                        raise _DiagnosticCallbackFailure(error) from None
 
             try:
                 return decode_envelope_json(body, report)
+            except _DiagnosticCallbackFailure as failure:
+                raise failure.error
             except ValidationError:
                 if untrusted_seen:
                     self._fatal("unknown-field", "Message contains unsupported fields.")

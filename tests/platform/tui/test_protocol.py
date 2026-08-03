@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from hashlib import sha256
 import json
 import struct
@@ -9,6 +10,7 @@ import sys
 from datetime import datetime, timezone
 
 import pytest
+from pydantic import ValidationError
 
 import vesper.platform.tui.protocol as protocol
 from vesper.platform.tui.contracts import MessageType, UntrustedProtocolDiagnostic, WireEnvelope
@@ -18,6 +20,18 @@ from vesper.platform.tui.protocol import (
     ProtocolViolation,
     encode_frame,
 )
+
+
+class _CallbackBaseException(BaseException):
+    pass
+
+
+def _callback_validation_error() -> ValidationError:
+    try:
+        WireEnvelope.model_validate({})
+    except ValidationError as error:
+        return error
+    raise AssertionError("WireEnvelope validation must fail")
 
 
 @pytest.fixture
@@ -199,6 +213,41 @@ def test_callback_reentry_then_failure_clears_the_outer_decoder(
     with pytest.raises(RuntimeError, match="callback failure"):
         decoder.feed(struct.pack(">I", len(raw)) + raw)
 
+    assert decoder.feed(encode_frame(server_hello)) == (server_hello,)
+
+
+@pytest.mark.parametrize(
+    "make_failure",
+    [
+        lambda: ValueError("callback value failure"),
+        lambda: RecursionError("callback recursion failure"),
+        _callback_validation_error,
+        lambda: _CallbackBaseException("callback base failure"),
+    ],
+    ids=("value", "recursion", "validation", "base"),
+)
+def test_callback_failures_escape_unchanged_and_clear_the_decoder(
+    make_failure: Callable[[], BaseException],
+    server_hello: WireEnvelope,
+) -> None:
+    raw = (
+        b'{"schema_version":1,"message_id":"lease:1","sequence":1,'
+        b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
+        b'"message_type":"lease-request",'
+        b'"payload":{"action":"take-control","secret":"x"}}'
+    )
+    failure = make_failure()
+
+    def receive(_: UntrustedProtocolDiagnostic) -> None:
+        raise failure
+
+    decoder = FrameDecoder(on_untrusted=receive)
+
+    with pytest.raises(type(failure)) as raised:
+        decoder.feed(struct.pack(">I", len(raw)) + raw)
+
+    assert raised.value is failure
+    assert str(raised.value) == str(failure)
     assert decoder.feed(encode_frame(server_hello)) == (server_hello,)
 
 
