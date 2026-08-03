@@ -209,7 +209,6 @@ def test_runner_response_schema_is_compact_and_bounded_for_ollama(role):
         "$ref",
         "default",
         "format",
-        "maxLength",
         "pattern",
         "title",
     }
@@ -217,6 +216,8 @@ def test_runner_response_schema_is_compact_and_bounded_for_ollama(role):
     def assert_compact(value):
         if isinstance(value, dict):
             assert forbidden_keywords.isdisjoint(value)
+            if value.get("type") == "string" and "const" not in value and "enum" not in value:
+                assert value["maxLength"] == 256
             if value.get("type") == "array":
                 assert value["maxItems"] <= 3
                 if "minItems" in value:
@@ -240,6 +241,7 @@ def test_runner_response_schema_is_compact_and_bounded_for_ollama(role):
 
 def test_ollama_generation_budgets_do_not_narrow_pydantic_output_contract():
     document = output_document(AgentRole.QUANT_RESEARCH_LEAD)
+    document["summary"] = "s" * 512
     document["limitations"] = [f"limitation-{index}" for index in range(4)]
     document["hypotheses"] = [f"hypothesis-{index}" for index in range(4)]
     document["priorities"] = [f"priority-{index}" for index in range(4)]
@@ -250,6 +252,7 @@ def test_ollama_generation_budgets_do_not_narrow_pydantic_output_contract():
     parsed = OUTPUT_MODELS[AgentRole.QUANT_RESEARCH_LEAD].model_validate_json(json.dumps(document))
 
     assert len(parsed.limitations) == 4
+    assert len(parsed.summary) == 512
     assert len(parsed.hypotheses) == 4
     assert len(parsed.priorities) == 4
     assert len(parsed.proposals) == 3

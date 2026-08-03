@@ -18,6 +18,7 @@ from .qwen_runtime import QwenTurnResult
 
 
 # Ollama grammar-generation budgets only; the Pydantic output contracts stay unchanged.
+_OLLAMA_GENERATION_MAX_TEXT_CHARS = 256
 _OLLAMA_GENERATION_MAX_LIST_ITEMS = 3
 _OLLAMA_GENERATION_MAX_PROPOSALS = 2
 
@@ -263,6 +264,11 @@ class AutonomousAgentRunner:
                     value.pop(keyword, None)
                 if "const" in value:
                     value.pop("enum", None)
+                if value.get("type") == "string" and "const" not in value and "enum" not in value:
+                    value["maxLength"] = min(
+                        int(value.get("maxLength", _OLLAMA_GENERATION_MAX_TEXT_CHARS)),
+                        _OLLAMA_GENERATION_MAX_TEXT_CHARS,
+                    )
                 if value.get("type") == "array":
                     limit = (
                         _OLLAMA_GENERATION_MAX_PROPOSALS
