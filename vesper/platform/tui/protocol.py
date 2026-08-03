@@ -116,10 +116,11 @@ class FrameDecoder:
                     except BaseException as error:
                         raise _DiagnosticCallbackFailure(error) from None
 
+            callback_error: BaseException | None = None
             try:
                 return decode_envelope_json(body, report)
             except _DiagnosticCallbackFailure as failure:
-                raise failure.error
+                callback_error = failure.error
             except ValidationError:
                 if untrusted_seen:
                     self._fatal("unknown-field", "Message contains unsupported fields.")
@@ -138,6 +139,8 @@ class FrameDecoder:
                 ValueError,
             ):
                 self._fatal("invalid-json", "Message JSON is invalid.")
+            if callback_error is not None:
+                raise callback_error
         finally:
             self._decode_depth -= 1
 

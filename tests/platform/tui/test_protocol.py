@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 import struct
 import sys
+import traceback
 from datetime import datetime, timezone
 
 import pytest
@@ -24,6 +25,21 @@ from vesper.platform.tui.protocol import (
 
 class _CallbackBaseException(BaseException):
     pass
+
+
+def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
+    chain: list[BaseException] = []
+    pending = [error.__context__, error.__cause__]
+    seen = {id(error)}
+    while pending:
+        current = pending.pop()
+        if current is None:
+            continue
+        assert id(current) not in seen
+        seen.add(id(current))
+        chain.append(current)
+        pending.extend((current.__context__, current.__cause__))
+    return tuple(chain)
 
 
 def _callback_validation_error() -> ValidationError:
@@ -248,6 +264,13 @@ def test_callback_failures_escape_unchanged_and_clear_the_decoder(
 
     assert raised.value is failure
     assert str(raised.value) == str(failure)
+    assert all(
+        not isinstance(error, protocol._DiagnosticCallbackFailure)
+        for error in _exception_chain(raised.value)
+    )
+    assert "_DiagnosticCallbackFailure" not in "".join(
+        traceback.format_exception(raised.value)
+    )
     assert decoder.feed(encode_frame(server_hello)) == (server_hello,)
 
 
