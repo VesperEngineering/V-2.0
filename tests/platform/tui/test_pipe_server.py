@@ -227,6 +227,77 @@ def test_connection_factory_opens_fresh_context_and_closes_once_per_client() -> 
     assert not thread.is_alive()
 
 
+def test_registered_worker_counts_active_until_start_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = pipe_name(current_logon_sid())
+    server = WindowsPipeServer(name)
+    stop = threading.Event()
+    thread = threading.Thread(target=server.serve, args=(lambda body: body, stop))
+    thread.start()
+    assert server.ready_event.wait(5)
+    entered = threading.Event()
+    release = threading.Event()
+    original_start = threading.Thread.start
+
+    def blocking_start(worker: threading.Thread) -> None:
+        if worker.name == "v20-tui-pipe-worker":
+            entered.set()
+            release.wait(2)
+        original_start(worker)
+
+    monkeypatch.setattr(threading.Thread, "start", blocking_start)
+    client = _connect(name)
+    assert entered.wait(2)
+    active_during_start = server.active_client_count
+    release.set()
+    _write_frame(client, b"started")
+    assert _read_frame(client) == b"started"
+    win32file.CloseHandle(client)
+    stop.set()
+    server.stop()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert server.active_client_count == 0
+    assert active_during_start == 1
+
+
+def test_worker_start_failure_clears_registered_client_and_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = pipe_name(current_logon_sid())
+    server = WindowsPipeServer(name)
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            server.serve(lambda body: body, stop)
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert server.ready_event.wait(5)
+    original_start = threading.Thread.start
+
+    def failing_start(worker: threading.Thread) -> None:
+        if worker.name == "v20-tui-pipe-worker":
+            raise RuntimeError("worker start failed")
+        original_start(worker)
+
+    monkeypatch.setattr(threading.Thread, "start", failing_start)
+    client = _connect(name)
+    thread.join(timeout=5)
+    win32file.CloseHandle(client)
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert str(errors[0]) == "worker start failed"
+    assert server.active_client_count == 0
+    assert server.active_worker_count == 0
+    assert server.active_handle_count == 0
+
+
 def test_incomplete_cancellation_retains_event_until_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

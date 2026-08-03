@@ -151,7 +151,7 @@ class WindowsPipeServer:
                 with self._lock:
                     self._visible_listeners.pop(accepted, None)
                     self._dispatching_clients += 1
-                dispatched = False
+                dispatching = True
                 try:
                     if not self._finish_listener(listener):
                         break
@@ -166,11 +166,20 @@ class WindowsPipeServer:
                     with self._lock:
                         self._workers.add(worker)
                         self._worker_handles[worker] = accepted
+                    try:
+                        worker.start()
+                    except BaseException:
+                        with self._lock:
+                            self._workers.discard(worker)
+                            self._worker_handles.pop(worker, None)
+                            self._dispatching_clients -= 1
+                        dispatching = False
+                        raise
+                    with self._lock:
                         self._dispatching_clients -= 1
-                    dispatched = True
-                    worker.start()
+                    dispatching = False
                 finally:
-                    if not dispatched:
+                    if dispatching:
                         with self._lock:
                             self._dispatching_clients -= 1
         finally:

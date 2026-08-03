@@ -6,6 +6,7 @@ import argparse
 import os
 import queue
 import secrets
+import stat
 import threading
 import time
 from dataclasses import dataclass
@@ -32,12 +33,30 @@ def _default_state_root() -> Path:
     return Path(local) / "Vesper" / "v20" / "tui"
 
 
+def _contains_reparse_point(value: Path) -> bool:
+    current = Path(value.anchor)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    for part in value.parts[1:]:
+        current /= part
+        if not os.path.lexists(current):
+            continue
+        try:
+            attributes = getattr(os.lstat(current), "st_file_attributes", 0)
+        except OSError as error:
+            raise ValueError("state root cannot be inspected safely") from error
+        if attributes & reparse_flag:
+            return True
+    return False
+
+
 def _normalize_state_root(value: Path) -> Path:
     if not value.is_absolute():
         raise ValueError("state root must be absolute")
+    if str(value).startswith("\\\\"):
+        raise ValueError("state root cannot be a UNC path")
     try:
-        if value.is_symlink():
-            raise ValueError("state root cannot be a symbolic link")
+        if _contains_reparse_point(value):
+            raise ValueError("state root cannot contain a reparse-point alias")
         normalized = value.resolve(strict=False)
     except OSError as error:
         raise ValueError("state root cannot be resolved safely") from error
@@ -46,6 +65,14 @@ def _normalize_state_root(value: Path) -> Path:
     if normalized.exists() and not normalized.is_dir():
         raise ValueError("state root must be a directory")
     return normalized
+
+
+def _serving_state_root(value: Path | None) -> Path:
+    canonical = _normalize_state_root(_default_state_root())
+    selected = canonical if value is None else _normalize_state_root(value)
+    if selected != canonical:
+        raise ValueError("state root must equal the canonical LocalAppData path")
+    return canonical
 
 
 @dataclass
@@ -92,6 +119,15 @@ class _GatewayCoordinator:
         if request.error is not None:
             raise request.error
 
+    def disconnect_after_stop(self, client_id: SafeId) -> None:
+        """Release a late-closing session only after queued work is fully drained."""
+
+        with self._admission_lock:
+            if not self._closed:
+                raise RuntimeError("coordinator is still accepting disconnects")
+        self._thread.join()
+        self._gateway.disconnect(client_id)
+
     def _submit(self, request: _Request) -> None:
         with self._admission_lock:
             if self._closed:
@@ -105,7 +141,7 @@ class _GatewayCoordinator:
             if not self._closed:
                 self._closed = True
                 self._requests.put(None)
-        self._thread.join(timeout=_COORDINATOR_WAIT_SECONDS)
+        self._thread.join()
 
     def _run(self) -> None:
         while True:
@@ -129,6 +165,8 @@ def _gateway_connection_factory(coordinator: _GatewayCoordinator) -> ConnectionF
 
     def factory():
         client_id = f"pipe-{secrets.token_hex(16)}"
+        close_lock = threading.Lock()
+        closed = False
 
         def handle(body: bytes) -> bytes | None:
             envelope = WireEnvelope.model_validate_json(body)
@@ -138,7 +176,15 @@ def _gateway_connection_factory(coordinator: _GatewayCoordinator) -> ConnectionF
             return responses[0].model_dump_json().encode("utf-8")
 
         def close() -> None:
-            coordinator.disconnect(client_id)
+            nonlocal closed
+            with close_lock:
+                if closed:
+                    return
+                closed = True
+            try:
+                coordinator.disconnect(client_id)
+            except CoordinatorClosedError:
+                coordinator.disconnect_after_stop(client_id)
 
         return handle, close
 
@@ -195,7 +241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if selected_pipe != expected_pipe:
         parser.error("--pipe-name must equal the current logon pipe name")
     try:
-        state_root = _normalize_state_root(args.state_root or _default_state_root())
+        state_root = _serving_state_root(args.state_root)
     except ValueError as error:
         parser.error(str(error))
     gateway = Gateway(state_root)

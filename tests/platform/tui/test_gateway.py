@@ -265,6 +265,7 @@ def test_cli_print_pipe_name_is_exclusive_and_opens_no_state(monkeypatch: pytest
 
     monkeypatch.setattr(cli, "default_pipe_name", lambda: r"\\.\pipe\vesper-v20-tui-0123456789abcdef")
     monkeypatch.setattr(cli, "Gateway", lambda *args, **kwargs: pytest.fail("state opened"))
+    monkeypatch.setattr(cli, "_default_state_root", lambda: pytest.fail("LocalAppData touched"))
     assert cli.main(["--print-pipe-name"]) == 0
     assert capsys.readouterr().out.strip() == r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
     with pytest.raises(SystemExit):
@@ -295,13 +296,39 @@ def test_cli_requires_exact_current_pipe_name(monkeypatch: pytest.MonkeyPatch, t
         ])
 
 
-def test_state_root_must_be_absolute_and_is_normalized(tmp_path: Path) -> None:
-    from vesper.platform.tui.cli import _normalize_state_root
+def test_serving_state_root_must_equal_canonical_local_appdata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui.cli import _serving_state_root
 
-    with pytest.raises(ValueError, match="absolute"):
-        _normalize_state_root(Path("relative/state"))
-    nested = tmp_path / "one" / ".." / "state"
-    assert _normalize_state_root(nested) == (tmp_path / "state").resolve()
+    local = tmp_path / "local"
+    canonical = (local / "Vesper" / "v20" / "tui").resolve()
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    assert _serving_state_root(None) == canonical
+    assert _serving_state_root(canonical) == canonical
+    with pytest.raises(ValueError, match="canonical"):
+        _serving_state_root(tmp_path / "arbitrary")
+    with pytest.raises(ValueError, match="canonical"):
+        _serving_state_root(Path.cwd() / "vesper" / "data" / "massive")
+    with pytest.raises(ValueError):
+        _serving_state_root(Path("relative/state"))
+    with pytest.raises(ValueError):
+        _serving_state_root(Path(r"\\server\share\Vesper\v20\tui"))
+
+
+def test_serving_state_root_rejects_reparse_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+
+    local = tmp_path / "local"
+    canonical = local / "Vesper" / "v20" / "tui"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(cli, "_contains_reparse_point", lambda path: path == canonical)
+    with pytest.raises(ValueError, match="reparse"):
+        cli._serving_state_root(canonical)
 
 
 def test_coordinator_closes_admission_before_shutdown_sentinel(tmp_path: Path) -> None:
@@ -370,6 +397,50 @@ def test_coordinator_serializes_disconnect_with_messages() -> None:
     assert calls[0][2] == calls[1][2]
 
 
+def test_coordinator_stop_waits_until_all_admitted_work_is_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vesper.platform.tui import cli
+
+    entered = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+
+    class BlockingGateway:
+        def handle(self, client_id: str, message: WireEnvelope):
+            entered.set()
+            release.wait(2)
+            completed.set()
+            return (message,)
+
+        def disconnect(self, client_id: str) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "_COORDINATOR_WAIT_SECONDS", 0.01)
+    coordinator = cli._GatewayCoordinator(BlockingGateway())  # type: ignore[arg-type]
+    errors: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            coordinator.handle("client", envelope(MessageType.PING, 1, {"nonce": "one"}))
+        except BaseException as error:
+            errors.append(error)
+
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    assert entered.wait(1)
+    stopping = threading.Thread(target=coordinator.stop)
+    stopping.start()
+    time.sleep(0.05)
+    assert stopping.is_alive()
+    release.set()
+    caller.join(2)
+    stopping.join(2)
+    assert completed.is_set()
+    assert not stopping.is_alive()
+    assert len(errors) <= 1
+
+
 def test_connection_close_releases_controller_and_new_context_starts_at_sequence_one(
     gateway: Gateway,
 ) -> None:
@@ -420,6 +491,41 @@ def test_connection_close_releases_controller_and_new_context_starts_at_sequence
     assert hello.sequence == 1
     second_close()
     coordinator.stop()
+
+
+def test_connection_close_after_coordinator_stop_releases_controller_exactly_once(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vesper.platform.tui.cli import _GatewayCoordinator, _gateway_connection_factory
+
+    setup(gateway, "seed")
+    gateway.disconnect("seed")
+    disconnects: list[str] = []
+    original_disconnect = gateway.disconnect
+
+    def record_disconnect(client_id: str) -> None:
+        disconnects.append(client_id)
+        original_disconnect(client_id)
+
+    monkeypatch.setattr(gateway, "disconnect", record_disconnect)
+    coordinator = _GatewayCoordinator(gateway)
+    handle, close = _gateway_connection_factory(coordinator)()
+
+    def round_trip(message: WireEnvelope) -> WireEnvelope:
+        body = handle(message.model_dump_json().encode("utf-8"))
+        assert body is not None
+        return WireEnvelope.model_validate_json(body)
+
+    round_trip(envelope(MessageType.CLIENT_HELLO, 1, {"client_version": "0.1.0", "supported_schema_versions": [1]}))
+    round_trip(envelope(MessageType.AUTH_UNLOCK, 2, {"password": "correct horse"}))
+    round_trip(envelope(MessageType.LEASE_REQUEST, 3, {"action": "take-control"}))
+    assert gateway.controller_id is not None
+    coordinator.stop()
+    close()
+    close()
+    assert gateway.controller_id is None
+    assert len(disconnects) == 1
 
 
 def test_parent_exit_requires_thirty_continuous_seconds_without_clients() -> None:
