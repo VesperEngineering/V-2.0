@@ -1,6 +1,6 @@
 # V20 Ratatui Operations Console Design
 
-Status: design choices approved; written-spec review pending; implementation not started
+Status: approved; implementation not started
 Date: 2026-08-03
 Location: `C:\Users\bgonn\Desktop\v20\TUI testing`
 
