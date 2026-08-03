@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .agent_tools import AgentToolGateway, ToolPermissionError
 from .context_budget import ContextBudgetGuard, MAX_TOOL_CALLS
@@ -92,6 +92,7 @@ class QwenTurnRunner:
         prompt: str,
         *,
         allowed_tools: Sequence[str] | None = None,
+        response_format: Mapping[str, object] | None = None,
         audit: Callable[[dict[str, str | int]], None] | None = None,
     ) -> QwenTurnResult:
         agent_role = AgentRole(role)
@@ -108,7 +109,18 @@ class QwenTurnRunner:
                     prompt_tokens=observed, tool_calls=used + len(response.tool_calls)
                 )
                 if not response.tool_calls:
-                    return QwenTurnResult(response.content, observed, used)
+                    if response_format is None:
+                        return QwenTurnResult(response.content, observed, used)
+                    final = self.client.chat(messages, response_format=response_format)
+                    observed = final.prompt_tokens
+                    self.guard.validate(
+                        prompt_tokens=observed, tool_calls=used + len(final.tool_calls)
+                    )
+                    if final.tool_calls:
+                        raise ToolPermissionError(
+                            "tools are disabled during the final structured response"
+                        )
+                    return QwenTurnResult(final.content, observed, used)
                 messages.append(
                     {
                         "role": "assistant",

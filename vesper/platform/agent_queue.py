@@ -69,41 +69,92 @@ class AgentWorkQueue:
         return tuple(_load(raw) for raw in self.store.search(_NAMESPACE, limit=10_000))
 
     def claim(self, worker_id: str, now: datetime, *, lease_seconds: int) -> AgentWorkItem:
-        candidates = [
-            item
-            for item in self.list()
-            if item.status == "queued"
-            or (
-                item.status == "claimed"
-                and item.lease_expires_at is not None
-                and item.lease_expires_at <= now
+        def claim_one(records) -> tuple[str, dict[str, object]]:
+            items = (_load(raw) for _, raw in records)
+            candidates = [
+                item
+                for item in items
+                if item.status == "queued"
+                or (
+                    item.status == "claimed"
+                    and item.lease_expires_at is not None
+                    and item.lease_expires_at <= now
+                )
+            ]
+            if not candidates:
+                raise WorkQueueEmpty("no agent work is ready")
+            item = sorted(
+                candidates, key=lambda value: (-value.priority, value.created_at, value.work_id)
+            )[0]
+            claimed = item.model_copy(
+                update={
+                    "status": "claimed",
+                    "attempt": item.attempt + 1,
+                    "claimed_by": worker_id,
+                    "lease_expires_at": now + timedelta(seconds=lease_seconds),
+                }
             )
-        ]
-        if not candidates:
-            raise WorkQueueEmpty("no agent work is ready")
-        item = sorted(
-            candidates, key=lambda value: (-value.priority, value.created_at, value.work_id)
-        )[0]
-        claimed = item.model_copy(
-            update={
-                "status": "claimed",
-                "attempt": item.attempt + 1,
-                "claimed_by": worker_id,
-                "lease_expires_at": now + timedelta(seconds=lease_seconds),
-            }
-        )
-        self.store.put(_NAMESPACE, claimed.work_id, claimed.model_dump(mode="json"))
-        return claimed
+            return claimed.work_id, claimed.model_dump(mode="json")
 
-    def complete(self, work_id: str, worker_id: str) -> AgentWorkItem:
-        raw = self.store.get(_NAMESPACE, work_id)
-        if raw is None:
-            raise WorkQueueEmpty(f"unknown work item: {work_id}")
-        item = _load(raw)
-        if item.status != "claimed" or item.claimed_by != worker_id:
-            raise WorkQueueEmpty("work item is not owned by this worker")
-        completed = item.model_copy(
-            update={"status": "completed", "claimed_by": None, "lease_expires_at": None}
-        )
-        self.store.put(_NAMESPACE, work_id, completed.model_dump(mode="json"))
-        return completed
+        return _load(self.store.atomic_replace(_NAMESPACE, claim_one))
+
+    def complete(self, work_id: str, worker_id: str, claim_attempt: int) -> AgentWorkItem:
+        return self._finish(work_id, worker_id, claim_attempt, status="completed")
+
+    def renew(
+        self,
+        work_id: str,
+        worker_id: str,
+        claim_attempt: int,
+        now: datetime,
+        *,
+        lease_seconds: float,
+    ) -> AgentWorkItem:
+        def renew_one(records) -> tuple[str, dict[str, object]]:
+            raw = next((raw for key, raw in records if key == work_id), None)
+            if raw is None:
+                raise WorkQueueEmpty(f"unknown work item: {work_id}")
+            item = _load(raw)
+            if (
+                item.status != "claimed"
+                or item.claimed_by != worker_id
+                or item.attempt != claim_attempt
+                or item.lease_expires_at is None
+                or item.lease_expires_at <= now
+            ):
+                raise WorkQueueEmpty("work item is not owned by this worker")
+            renewed = item.model_copy(
+                update={"lease_expires_at": now + timedelta(seconds=lease_seconds)}
+            )
+            return work_id, renewed.model_dump(mode="json")
+
+        return _load(self.store.atomic_replace(_NAMESPACE, renew_one))
+
+    def fail(self, work_id: str, worker_id: str, claim_attempt: int) -> AgentWorkItem:
+        return self._finish(work_id, worker_id, claim_attempt, status="failed")
+
+    def _finish(
+        self,
+        work_id: str,
+        worker_id: str,
+        claim_attempt: int,
+        *,
+        status: Literal["completed", "failed"],
+    ) -> AgentWorkItem:
+        def finish_one(records) -> tuple[str, dict[str, object]]:
+            raw = next((raw for key, raw in records if key == work_id), None)
+            if raw is None:
+                raise WorkQueueEmpty(f"unknown work item: {work_id}")
+            item = _load(raw)
+            if (
+                item.status != "claimed"
+                or item.claimed_by != worker_id
+                or item.attempt != claim_attempt
+            ):
+                raise WorkQueueEmpty("work item is not owned by this worker")
+            finished = item.model_copy(
+                update={"status": status, "claimed_by": None, "lease_expires_at": None}
+            )
+            return work_id, finished.model_dump(mode="json")
+
+        return _load(self.store.atomic_replace(_NAMESPACE, finish_one))

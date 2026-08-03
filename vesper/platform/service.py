@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -14,7 +15,7 @@ from typing import Callable
 
 from .composition import NativeSpecialistComposition
 from .agent_profiles import AgentProfileCatalog, AUTONOMOUS_AGENT_ROLES
-from .agent_queue import AgentWorkQueue
+from .agent_queue import AgentWorkQueue, WorkQueueEmpty
 from .agent_runner import AutonomousAgentRunner
 from .agent_tools import AgentToolGateway
 from .authority import ProposalRouter
@@ -30,7 +31,7 @@ from .contracts import (
     TaskRequest,
 )
 from .control import RuntimeControl
-from .journals import AgentJournal
+from .journals import AgentJournal, JournalConflictError
 from .ollama import OllamaClient, QWEN_MODEL, QwenSpecialistAdapter
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
@@ -60,6 +61,10 @@ M2_APPROVED_WORKSPACE = Path("docs/m2-controlled-exercise")
 DOCKER_CODEX_RUNTIME = "docker-codex"
 OPENCODE_RUNTIME = "opencode"
 OLLAMA_QWEN_RUNTIME = "ollama-qwen"
+_QWEN_INFERENCE_WAIT_SECONDS = 900
+_AGENT_WORK_LEASE_SECONDS = 300
+_AGENT_WORK_HEARTBEAT_SECONDS = 60
+_AGENT_WORK_HEARTBEAT_JOIN_SECONDS = 35
 ROOT_WORKSPACE_PROTECTED_PATHS = (
     Path(".git"),
     Path(".state"),
@@ -82,6 +87,47 @@ class SpecialistRuntimeUnavailable(RuntimeError):
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@contextmanager
+def _agent_work_lease_heartbeat(
+    paths: PlatformPaths,
+    work_id: str,
+    worker_id: str,
+    claim_attempt: int,
+    clock: Callable[[], datetime],
+):
+    stop = threading.Event()
+    failures: list[Exception] = []
+
+    def maintain_lease() -> None:
+        while not stop.wait(_AGENT_WORK_HEARTBEAT_SECONDS):
+            try:
+                with open_persistence(paths) as persistence:
+                    AgentWorkQueue(persistence.store).renew(
+                        work_id,
+                        worker_id,
+                        claim_attempt,
+                        clock(),
+                        lease_seconds=_AGENT_WORK_LEASE_SECONDS,
+                    )
+            except Exception as exc:
+                failures.append(exc)
+                return
+
+    thread = threading.Thread(
+        target=maintain_lease,
+        name=f"v20-agent-work-lease:{work_id}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield failures
+    finally:
+        stop.set()
+        thread.join(timeout=_AGENT_WORK_HEARTBEAT_JOIN_SECONDS)
+        if thread.is_alive():
+            failures.append(RuntimeError("agent work lease heartbeat did not stop"))
 
 
 @contextmanager
@@ -585,7 +631,7 @@ class LocalPlatformService:
                     OllamaClient(),
                     AgentToolGateway(repository_root),
                     self.paths.root,
-                    wait_seconds=900,
+                    wait_seconds=_QWEN_INFERENCE_WAIT_SECONDS,
                 ),
                 journal=journal,
                 router=ProposalRouter(),
@@ -639,18 +685,42 @@ class LocalPlatformService:
     ) -> dict[str, object]:
         with open_persistence(self.paths) as persistence:
             claimed = AgentWorkQueue(persistence.store).claim(
-                worker_id, self._clock(), lease_seconds=900
+                worker_id, self._clock(), lease_seconds=_AGENT_WORK_LEASE_SECONDS
             )
-        result = self.run_agent(
-            claimed.role.value,
-            claimed.session_id,
-            claimed.objective,
-            repository_revision,
-            evidence,
-            prior_session_date,
-        )
+        try:
+            with _agent_work_lease_heartbeat(
+                self.paths, claimed.work_id, worker_id, claimed.attempt, self._clock
+            ) as renewal_failures:
+                result = self.run_agent(
+                    claimed.role.value,
+                    claimed.session_id,
+                    claimed.objective,
+                    repository_revision,
+                    evidence,
+                    prior_session_date,
+                )
+        except Exception as agent_error:
+            try:
+                with open_persistence(self.paths) as persistence:
+                    AgentWorkQueue(persistence.store).fail(
+                        claimed.work_id, worker_id, claimed.attempt
+                    )
+            except Exception as cleanup_error:
+                agent_error.add_note(f"queue fail cleanup failed: {type(cleanup_error).__name__}")
+            raise
+        if renewal_failures:
+            with open_persistence(self.paths) as persistence:
+                try:
+                    AgentWorkQueue(persistence.store).fail(
+                        claimed.work_id, worker_id, claimed.attempt
+                    )
+                except WorkQueueEmpty:
+                    pass
+            raise RuntimeError("agent work lease renewal failed") from renewal_failures[0]
         with open_persistence(self.paths) as persistence:
-            completed = AgentWorkQueue(persistence.store).complete(claimed.work_id, worker_id)
+            completed = AgentWorkQueue(persistence.store).complete(
+                claimed.work_id, worker_id, claimed.attempt
+            )
         return {**result, "work": completed.model_dump(mode="json")}
 
     def render_agent_digest(self, session_date: str) -> dict[str, object]:
@@ -658,7 +728,13 @@ class LocalPlatformService:
         with open_persistence(self.paths) as persistence:
             journal = AgentJournal(persistence.store)
             grouped: dict[AgentRole, list] = {}
-            for role, session_id in journal.sessions():
+            try:
+                sessions = journal.sessions()
+            except JournalConflictError as exc:
+                raise SpecialistRuntimeUnavailable(
+                    "agent journal session discovery failed"
+                ) from exc
+            for role, session_id in sessions:
                 if not journal.verify(role, session_id):
                     raise SpecialistRuntimeUnavailable(
                         f"agent journal integrity failed: {role.value}/{session_id}"

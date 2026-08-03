@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 
+import pytest
 from langgraph.graph import END, START, StateGraph
+from langgraph.store.base import InvalidNamespaceError
 
-from vesper.platform.persistence import PlatformPaths, open_persistence
+from vesper.platform.persistence import AtomicCreatePlan, PlatformPaths, open_persistence
 
 
 class CounterState(TypedDict):
@@ -94,3 +97,86 @@ def test_persistence_creates_only_explicit_local_paths(tmp_path):
         "store.sqlite3",
         "evidence",
     }
+
+
+def _install_deferred_store_failure(connection, trigger_operation: str, prefix: str) -> None:
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("CREATE TABLE commit_parent (id INTEGER PRIMARY KEY)")
+    connection.execute(
+        "CREATE TABLE commit_child ("
+        "parent_id INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED)"
+    )
+    connection.execute(
+        f"CREATE TRIGGER reject_store_commit AFTER {trigger_operation} ON store "
+        f"WHEN NEW.prefix = '{prefix}' BEGIN "
+        "INSERT INTO commit_child(parent_id) VALUES (1); END"
+    )
+
+
+def test_atomic_create_rolls_back_when_commit_fails(tmp_path):
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        connection = persistence.langgraph_store.conn
+        namespace = ("atomic", "create")
+        _install_deferred_store_failure(connection, "INSERT", ".".join(namespace))
+
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            persistence.store.atomic_create(
+                namespace,
+                "item",
+                lambda _records, _existing: AtomicCreatePlan({"version": 1}),
+            )
+
+        assert connection.in_transaction is False
+        assert persistence.store.get(namespace, "item") is None
+        connection.execute("DROP TRIGGER reject_store_commit")
+        stored, created = persistence.store.atomic_create(
+            namespace,
+            "item",
+            lambda _records, _existing: AtomicCreatePlan({"version": 1}),
+        )
+        assert (stored, created) == ({"version": 1}, True)
+
+
+def test_atomic_replace_rolls_back_when_commit_fails(tmp_path):
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        connection = persistence.langgraph_store.conn
+        namespace = ("atomic", "replace")
+        persistence.store.put(namespace, "item", {"version": 1})
+        _install_deferred_store_failure(connection, "UPDATE", ".".join(namespace))
+
+        def replace(_records):
+            return "item", {"version": 2}
+
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            persistence.store.atomic_replace(namespace, replace)
+
+        assert connection.in_transaction is False
+        assert persistence.store.get(namespace, "item") == {"version": 1}
+        connection.execute("DROP TRIGGER reject_store_commit")
+        assert persistence.store.atomic_replace(namespace, replace) == {"version": 2}
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("search_exact_records", "scan_subtree_records", "atomic_replace", "atomic_create"),
+)
+def test_direct_sql_store_operations_preserve_namespace_validation(tmp_path, operation):
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        namespace = ("invalid.label",)
+
+        with pytest.raises(InvalidNamespaceError, match="cannot contain periods"):
+            if operation == "atomic_replace":
+                persistence.store.atomic_replace(
+                    namespace,
+                    lambda _records: ("item", {"version": 2}),
+                )
+            elif operation == "atomic_create":
+                persistence.store.atomic_create(
+                    namespace,
+                    "item",
+                    lambda _records, _existing: AtomicCreatePlan({"version": 1}),
+                )
+            else:
+                getattr(persistence.store, operation)(namespace)
+
+        assert persistence.langgraph_store.conn.in_transaction is False
