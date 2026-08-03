@@ -45,29 +45,35 @@ class _VerifierRecord:
 class PasswordStore:
     """Persist only a scrypt verifier; malformed records always deny access."""
 
+    _path_locks: dict[Path, Lock] = {}
+    _path_locks_lock = Lock()
+
     def __init__(self, path: Path) -> None:
         self._path = path
 
     def setup(self, password: str, confirmation: str) -> None:
-        """Create or explicitly replace the local password verifier atomically."""
+        """Create the first local password verifier atomically."""
 
         password_bytes = self._validated_password_bytes(password)
         confirmation_bytes = self._validated_password_bytes(confirmation)
         if password_bytes != confirmation_bytes:
             raise ValueError("password confirmation does not match")
 
-        salt = os.urandom(_SALT_BYTES)
-        verifier = self._derive(password_bytes, salt)
-        record = {
-            "version": _RECORD_VERSION,
-            "salt": base64.b64encode(salt).decode("ascii"),
-            "n": _SCRYPT_N,
-            "r": _SCRYPT_R,
-            "p": _SCRYPT_P,
-            "dklen": _DKLEN,
-            "verifier": base64.b64encode(verifier).decode("ascii"),
-        }
-        self._write_record(record)
+        with self._setup_lock_for(self._path):
+            if os.path.lexists(self._path):
+                raise ValueError("password verifier is already configured")
+            salt = os.urandom(_SALT_BYTES)
+            verifier = self._derive(password_bytes, salt)
+            record = {
+                "version": _RECORD_VERSION,
+                "salt": base64.b64encode(salt).decode("ascii"),
+                "n": _SCRYPT_N,
+                "r": _SCRYPT_R,
+                "p": _SCRYPT_P,
+                "dklen": _DKLEN,
+                "verifier": base64.b64encode(verifier).decode("ascii"),
+            }
+            self._write_record(record)
 
     def verify(self, password: str) -> bool:
         """Return true only for a valid password and an exact valid verifier record."""
@@ -104,8 +110,8 @@ class PasswordStore:
     def _read_record_fail_closed(self) -> _VerifierRecord:
         try:
             raw = self._path.read_text(encoding="utf-8")
-            body = json.loads(raw)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            body = json.loads(raw, object_pairs_hook=_reject_duplicate_object_pairs)
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("invalid password verifier") from error
         if not isinstance(body, dict) or set(body) != _RECORD_FIELDS:
             raise ValueError("invalid password verifier")
@@ -150,6 +156,25 @@ class PasswordStore:
                 os.unlink(temporary_name)
             except FileNotFoundError:
                 pass
+
+    @classmethod
+    def _setup_lock_for(cls, path: Path) -> Lock:
+        resolved_path = path.resolve()
+        with cls._path_locks_lock:
+            lock = cls._path_locks.get(resolved_path)
+            if lock is None:
+                lock = Lock()
+                cls._path_locks[resolved_path] = lock
+            return lock
+
+
+def _reject_duplicate_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    body: dict[str, object] = {}
+    for key, value in pairs:
+        if key in body:
+            raise ValueError("duplicate password verifier key")
+        body[key] = value
+    return body
 
 
 class ControlLease:

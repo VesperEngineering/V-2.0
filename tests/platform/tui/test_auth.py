@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from threading import Barrier, Thread
 
 import pytest
 
@@ -52,10 +53,9 @@ def test_password_store_rejects_invalid_setup(tmp_path, password: str, confirmat
     assert not (tmp_path / "auth.json").exists()
 
 
-def test_password_store_replaces_verifier_atomically(tmp_path, monkeypatch) -> None:
+def test_password_store_writes_first_verifier_atomically(tmp_path, monkeypatch) -> None:
     path = tmp_path / "auth.json"
     store = PasswordStore(path)
-    store.setup("first password", "first password")
     replaced: list[tuple[str, str]] = []
     real_replace = os.replace
 
@@ -65,14 +65,54 @@ def test_password_store_replaces_verifier_atomically(tmp_path, monkeypatch) -> N
         real_replace(source, destination)
 
     monkeypatch.setattr("vesper.platform.tui.auth.os.replace", capture_replace)
-    store.setup("second password", "second password")
+    store.setup("first password", "first password")
 
     assert len(replaced) == 1
     assert os.path.exists(replaced[0][0]) is False
     assert replaced[0][1] == path
-    assert store.verify("first password") is False
-    assert store.verify("second password") is True
+    assert store.verify("first password") is True
     assert not list(tmp_path.glob(".auth.json.*.tmp"))
+
+
+def test_password_store_setup_cannot_replace_existing_verifier(tmp_path) -> None:
+    path = tmp_path / "auth.json"
+    store = PasswordStore(path)
+    store.setup("first password", "first password")
+
+    with pytest.raises(ValueError, match="already configured"):
+        store.setup("second password", "second password")
+
+    assert store.verify("first password") is True
+    assert store.verify("second password") is False
+
+
+def test_concurrent_first_run_setup_allows_one_winner(tmp_path) -> None:
+    store = PasswordStore(tmp_path / "auth.json")
+    barrier = Barrier(2)
+    successes: list[str] = []
+    failures: list[Exception] = []
+
+    def attempt(password: str) -> None:
+        barrier.wait()
+        try:
+            store.setup(password, password)
+        except ValueError as error:
+            failures.append(error)
+        else:
+            successes.append(password)
+
+    first = Thread(target=attempt, args=("first contender",))
+    second = Thread(target=attempt, args=("second contender",))
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert store.verify(successes[0]) is True
+    assert store.verify("first contender") is (successes[0] == "first contender")
+    assert store.verify("second contender") is (successes[0] == "second contender")
 
 
 def test_password_store_corrupt_record_fails_closed(tmp_path) -> None:
@@ -80,6 +120,21 @@ def test_password_store_corrupt_record_fails_closed(tmp_path) -> None:
     path.write_text('{"version":1,"salt":"bad"}', encoding="utf-8")
 
     assert PasswordStore(path).verify("anything") is False
+
+
+@pytest.mark.parametrize("duplicate_key", ["version", "verifier"])
+def test_password_store_rejects_duplicate_record_keys(tmp_path, duplicate_key: str) -> None:
+    path = tmp_path / "auth.json"
+    store = PasswordStore(path)
+    store.setup("duplicate key", "duplicate key")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(
+        json.dumps(record, separators=(",", ":"))[:-1]
+        + f',"{duplicate_key}":{json.dumps(record[duplicate_key])}}}',
+        encoding="utf-8",
+    )
+
+    assert store.verify("duplicate key") is False
 
 
 def test_password_is_required_after_each_console_reopen(tmp_path) -> None:
