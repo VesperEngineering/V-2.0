@@ -1,6 +1,8 @@
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use windows_sys::Win32::Foundation::SYSTEMTIME;
+use windows_sys::Win32::System::SystemInformation::GetSystemTime;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafeId(String);
@@ -8,6 +10,10 @@ pub struct SafeId(String);
 impl SafeId {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn client_message(sequence: u64) -> Self {
+        Self(format!("client:{sequence}"))
     }
 }
 
@@ -48,6 +54,22 @@ pub struct UtcTimestamp(String);
 impl UtcTimestamp {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn now_utc() -> Self {
+        let mut current = SYSTEMTIME::default();
+        // SAFETY: current is a valid writable SYSTEMTIME for this synchronous call.
+        unsafe { GetSystemTime(&raw mut current) };
+        Self(format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            current.wYear,
+            current.wMonth,
+            current.wDay,
+            current.wHour,
+            current.wMinute,
+            current.wSecond,
+            current.wMilliseconds,
+        ))
     }
 }
 
@@ -130,6 +152,16 @@ fn is_utc_timestamp(value: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NonEmptyString(String);
 
+impl NonEmptyString {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn literal(value: &'static str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 impl Serialize for NonEmptyString {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -158,6 +190,16 @@ impl<'de> Deserialize<'de> for NonEmptyString {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PasswordString(String);
+
+impl PasswordString {
+    pub(crate) fn from_input(value: String) -> Result<Self, &'static str> {
+        if (1..=1024).contains(&value.len()) {
+            Ok(Self(value))
+        } else {
+            Err("password length is invalid")
+        }
+    }
+}
 
 impl fmt::Debug for PasswordString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
