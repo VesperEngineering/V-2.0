@@ -5,11 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal, TypeAlias
-from types import MappingProxyType
 
 from pydantic import (
     BaseModel,
@@ -355,20 +354,21 @@ def decode_payload(envelope: WireEnvelope) -> StrictPayload:
 class UntrustedProtocolDiagnostic:
     """A synchronous-only view that clears raw unknown fields after callback return."""
 
-    __slots__ = ("frame_sha256", "_unknown_fields")
+    __slots__ = ("frame_sha256", "_state", "_unknown_fields")
 
     def __init__(self, frame_sha256: str, unknown_fields: dict[str, JsonValue]) -> None:
         self.frame_sha256 = frame_sha256
-        self._unknown_fields = _freeze_json_value(unknown_fields)
+        self._state = _UntrustedDiagnosticState(unknown_fields)
+        self._unknown_fields = _RevocableJsonMapping(self._state, unknown_fields)
 
     @property
-    def unknown_fields(self) -> object:
+    def unknown_fields(self) -> Mapping[str, object]:
         """Expose raw fields only while the callback is executing."""
 
         return self._unknown_fields
 
     def _invalidate(self) -> None:
-        self._unknown_fields = MappingProxyType({})
+        self._state.invalidate()
 
     def __getstate__(self) -> object:
         raise TypeError("untrusted protocol diagnostics cannot be serialized")
@@ -380,12 +380,113 @@ class UntrustedProtocolDiagnostic:
 DiagnosticCallback: TypeAlias = Callable[[UntrustedProtocolDiagnostic], None]
 
 
-def _freeze_json_value(value: JsonValue) -> object:
+class _UntrustedDiagnosticState:
+    __slots__ = ("active", "views")
+
+    def __init__(self, values: dict[str, JsonValue]) -> None:
+        self.active = True
+        self.views: list[_RevocableJsonScalar] = []
+
+    def register(self, view: _RevocableJsonScalar) -> None:
+        self.views.append(view)
+
+    def invalidate(self) -> None:
+        self.active = False
+        for view in self.views:
+            view._revoke()
+        self.views.clear()
+
+
+class _RevocableJsonScalar:
+    __slots__ = ("_state", "_value")
+
+    def __init__(self, state: _UntrustedDiagnosticState, value: JsonScalar) -> None:
+        self._state = state
+        self._value: JsonScalar | object = value
+        state.register(self)
+
+    def _revoke(self) -> None:
+        self._value = _MISSING
+
+    def _require_value(self) -> JsonScalar:
+        if not self._state.active or self._value is _MISSING:
+            raise RuntimeError("untrusted diagnostic value has expired")
+        return self._value
+
+    def __eq__(self, other: object) -> bool:
+        return self._require_value() == other
+
+    def __bool__(self) -> bool:
+        return bool(self._require_value())
+
+    def __str__(self) -> str:
+        return str(self._require_value())
+
+    def __repr__(self) -> str:
+        return "<untrusted diagnostic value>" if self._state.active else "<expired diagnostic value>"
+
+    def __getstate__(self) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be serialized")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be pickled")
+
+
+class _RevocableJsonMapping(Mapping[str, object]):
+    __slots__ = ("_state", "_values")
+
+    def __init__(self, state: _UntrustedDiagnosticState, values: dict[str, JsonValue]) -> None:
+        self._state = state
+        self._values = values
+
+    def __getitem__(self, key: str) -> object:
+        if not self._state.active:
+            raise KeyError(key)
+        return _revocable_json_value(self._state, self._values[key])
+
+    def __iter__(self):
+        return iter(self._values if self._state.active else ())
+
+    def __len__(self) -> int:
+        return len(self._values) if self._state.active else 0
+
+    def __getstate__(self) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be serialized")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be pickled")
+
+
+class _RevocableJsonSequence(Sequence[object]):
+    __slots__ = ("_state", "_values")
+
+    def __init__(self, state: _UntrustedDiagnosticState, values: list[JsonValue]) -> None:
+        self._state = state
+        self._values = values
+
+    def __getitem__(self, index: int | slice) -> object:
+        if not self._state.active:
+            raise IndexError(index)
+        if isinstance(index, slice):
+            return tuple(_revocable_json_value(self._state, value) for value in self._values[index])
+        return _revocable_json_value(self._state, self._values[index])
+
+    def __len__(self) -> int:
+        return len(self._values) if self._state.active else 0
+
+    def __getstate__(self) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be serialized")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        raise TypeError("untrusted protocol diagnostics cannot be pickled")
+
+
+def _revocable_json_value(state: _UntrustedDiagnosticState, value: JsonValue) -> object:
     if isinstance(value, dict):
-        return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+        return _RevocableJsonMapping(state, value)
     if isinstance(value, list):
-        return tuple(_freeze_json_value(item) for item in value)
-    return value
+        return _RevocableJsonSequence(state, value)
+    return _RevocableJsonScalar(state, value)
 
 
 def _bounded_json_value(value: JsonValue, depth: int = 0) -> JsonValue:

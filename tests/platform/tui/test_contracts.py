@@ -148,22 +148,56 @@ def test_untrusted_diagnostic_scrubs_retained_references_and_cannot_serialize() 
         b'"message_type":"lease-request",'
         b'"payload":{"action":"take-control","secret":"x"}}'
     )
-    seen_during_callback: list[dict[str, object]] = []
+    seen_during_callback: list[bool] = []
     retained: list[UntrustedProtocolDiagnostic] = []
 
     def receive(diagnostic: UntrustedProtocolDiagnostic) -> None:
-        seen_during_callback.append(dict(diagnostic.unknown_fields))
+        seen_during_callback.append(diagnostic.unknown_fields["secret"] == "x")
         retained.append(diagnostic)
 
     with pytest.raises(ValidationError):
         decode_envelope_json(wire, receive)
 
-    assert seen_during_callback == [{"secret": "x"}]
+    assert seen_during_callback == [True]
     assert retained[0].unknown_fields == {}
     with pytest.raises(TypeError):
         json.dumps(retained[0])
     with pytest.raises(TypeError):
         pickle.dumps(retained[0])
+
+
+def test_retained_unknown_field_view_is_empty_after_callback() -> None:
+    wire = (
+        b'{"schema_version":1,"message_id":"server:1","sequence":1,'
+        b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
+        b'"message_type":"lease-request",'
+        b'"payload":{"action":"take-control","secret":"x"}}'
+    )
+    retained_views: list[object] = []
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(wire, lambda diagnostic: retained_views.append(diagnostic.unknown_fields))
+
+    assert retained_views == [{}]
+
+
+def test_retained_unknown_scalar_view_is_inaccessible_after_callback() -> None:
+    wire = (
+        b'{"schema_version":1,"message_id":"server:1","sequence":1,'
+        b'"state_version":0,"timestamp_utc":"2026-08-03T00:00:00Z",'
+        b'"message_type":"lease-request",'
+        b'"payload":{"action":"take-control","secret":"x"}}'
+    )
+    retained_scalars: list[object] = []
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(
+            wire,
+            lambda diagnostic: retained_scalars.append(diagnostic.unknown_fields["secret"]),
+        )
+
+    with pytest.raises(RuntimeError, match="expired"):
+        str(retained_scalars[0])
 
 
 def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> None:
@@ -205,12 +239,17 @@ def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> No
         },
         separators=(",", ":"),
     ).encode("utf-8")
-    seen_during_callback: list[dict[str, object]] = []
+    seen_during_callback: list[bool] = []
+
+    def receive(diagnostic: UntrustedProtocolDiagnostic) -> None:
+        seen_during_callback.append(
+            diagnostic.unknown_fields["snapshot"]["header"]["secret"] == "x"
+        )
 
     with pytest.raises(ValidationError):
-        decode_envelope_json(wire, lambda diagnostic: seen_during_callback.append(dict(diagnostic.unknown_fields)))
+        decode_envelope_json(wire, receive)
 
-    assert seen_during_callback == [{"snapshot": {"header": {"secret": "x"}}}]
+    assert seen_during_callback == [True]
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
