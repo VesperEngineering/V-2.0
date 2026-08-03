@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Mapping, Sequence
+
+from pydantic import ValidationError
 
 from .agent_profiles import AgentProfileCatalog
 from .authority import ProposalRouter
@@ -21,6 +24,25 @@ from .qwen_runtime import QwenTurnResult
 _OLLAMA_GENERATION_MAX_TEXT_CHARS = 256
 _OLLAMA_GENERATION_MAX_LIST_ITEMS = 3
 _OLLAMA_GENERATION_MAX_PROPOSALS = 2
+_PROHIBITED_MODEL_TEXT_PATTERNS = (
+    re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+\S+"),
+    re.compile(r"(?i)\b(?:api[_-]?key|token|secret)\s*[=:]\s*\S+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]+\b"),
+    re.compile(r"(?i)\braw[\s_-]+protected(?:[\s_-]+market)?[\s_-]+data\s*[=:]\s*\S+"),
+    re.compile(r"(?i)\b(?:raw[\s_-]+prompt|(?:hidden|producer)[\s_-]+reasoning)\s*[=:]"),
+)
+
+
+class ModelContentPolicyError(ValueError):
+    """Typed model output contains content prohibited from persistence."""
+
+
+class ModelOutputParseError(ValueError):
+    """Model output is not valid JSON."""
+
+
+class ModelOutputValidationError(ValueError):
+    """Parsed model output does not satisfy its typed contract."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +143,15 @@ class AutonomousAgentRunner:
                 response_format=response_format,
                 audit=audit_tool,
             )
-            output = OUTPUT_MODELS[role].model_validate_json(turn.content)
+            try:
+                parsed_output = json.loads(turn.content)
+            except json.JSONDecodeError:
+                raise ModelOutputParseError("model output is not valid JSON") from None
+            self._validate_model_text(parsed_output)
+            try:
+                output = OUTPUT_MODELS[role].model_validate_json(turn.content)
+            except ValidationError:
+                raise ModelOutputValidationError("model output failed validation") from None
         except Exception as exc:
             record_validation_failure(type(exc).__name__)
             raise
@@ -330,6 +360,20 @@ class AutonomousAgentRunner:
 
         compact(schema)
         return schema
+
+    @classmethod
+    def _validate_model_text(cls, value) -> None:
+        if isinstance(value, str):
+            if any(pattern.search(value) for pattern in _PROHIBITED_MODEL_TEXT_PATTERNS):
+                raise ModelContentPolicyError("prohibited model content")
+            return
+        if isinstance(value, Mapping):
+            for item in value.values():
+                cls._validate_model_text(item)
+            return
+        if isinstance(value, Sequence):
+            for item in value:
+                cls._validate_model_text(item)
 
     @classmethod
     def _without_producer_reasoning(cls, value):

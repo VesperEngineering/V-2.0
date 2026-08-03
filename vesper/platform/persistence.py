@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Callable, Iterator, Mapping
 
 from .evidence import FilesystemEvidenceStore
 from .knowledge import SqliteKnowledgeIndex
@@ -73,6 +74,44 @@ class LangGraphStoreAdapter:
                 limit=limit,
             )
         return tuple(item.value for item in items)
+
+    def atomic_replace(
+        self,
+        namespace: tuple[str, ...],
+        mutation: Callable[
+            [tuple[tuple[str, Mapping[str, object]], ...]],
+            tuple[str, Mapping[str, object]],
+        ],
+    ) -> Mapping[str, object]:
+        """Select and replace one existing namespace item in one SQLite transaction."""
+
+        prefix = ".".join(namespace)
+        connection = self._store.conn
+        with self._lock:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute(
+                    "SELECT key, value FROM store WHERE prefix = ?", (prefix,)
+                ).fetchall()
+                records = tuple((str(key), json.loads(value)) for key, value in rows)
+                key, value = mutation(records)
+                updated = connection.execute(
+                    "UPDATE store SET value = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE prefix = ? AND key = ?",
+                    (
+                        json.dumps(dict(value), sort_keys=True, separators=(",", ":")),
+                        prefix,
+                        key,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("atomic store replacement target is missing")
+            except Exception:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+            connection.commit()
+        return dict(value)
 
 
 @dataclass(slots=True)

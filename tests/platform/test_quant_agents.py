@@ -93,6 +93,183 @@ def output_document(role: AgentRole):
     return {**base, **extras[role]}
 
 
+PROHIBITED_MODEL_TEXT_CASES = (
+    (AgentRole.MODEL_RESEARCHER, ("summary",), "api_key=[FAKE-REDACTED]"),
+    (
+        AgentRole.MODEL_RESEARCHER,
+        ("limitations", 0),
+        "raw_protected_market_data=[FAKE-REDACTED]",
+    ),
+    (
+        AgentRole.QUANT_RESEARCH_LEAD,
+        ("hypotheses", 0),
+        "authorization: bearer [FAKE-REDACTED]",
+    ),
+    (AgentRole.QUANT_RESEARCH_LEAD, ("priorities", 0), "token=[FAKE-REDACTED]"),
+    (AgentRole.MODEL_RESEARCHER, ("findings", 0), "secret=[FAKE-REDACTED]"),
+    (
+        AgentRole.INDEPENDENT_QUANT_VALIDATOR,
+        ("challenges", 0),
+        "api-key=[FAKE-REDACTED]",
+    ),
+    (AgentRole.PORTFOLIO_RESEARCHER, ("exposures", 0), "token=[FAKE-REDACTED]"),
+    (
+        AgentRole.PORTFOLIO_RESEARCHER,
+        ("constraints", 0),
+        "raw-protected-market-data=[FAKE-REDACTED]",
+    ),
+    (
+        AgentRole.EXECUTION_PERFORMANCE_ANALYST,
+        ("diagnostics", 0),
+        "secret=[FAKE-REDACTED]",
+    ),
+    (
+        AgentRole.MODEL_RESEARCHER,
+        ("proposals", 0, "summary"),
+        "api_key=[FAKE-REDACTED]",
+    ),
+    (
+        AgentRole.MODEL_RESEARCHER,
+        ("proposals", 0, "rationale"),
+        "raw_protected_market_data=[FAKE-REDACTED]",
+    ),
+)
+
+
+@pytest.mark.parametrize(("role", "path", "sentinel"), PROHIBITED_MODEL_TEXT_CASES)
+def test_runner_rejects_prohibited_model_text_without_model_derived_event(
+    tmp_path, role, path, sentinel
+):
+    document = output_document(role)
+    target = document
+    for component in path[:-1]:
+        target = target[component]
+    target[path[-1]] = sentinel
+
+    class Qwen:
+        def run(self, *_args, **_kwargs):
+            return QwenTurnResult(json.dumps(document), 100, 0)
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
+        runner = AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=journal,
+        )
+        with pytest.raises(ValueError, match="prohibited model content"):
+            runner.run(
+                role=role,
+                session_id="session-1",
+                run_id="run-1",
+                task_id="task-1",
+                repository_revision="abc123",
+                created_at=NOW,
+                objective="Inspect bounded financial evidence.",
+                evidence={"artifact-1": {"claim": "bounded"}},
+            )
+
+        events = journal.list(role, "session-1")
+        assert [event.event_type for event in events] == [
+            JournalEventType.OBSERVATION,
+            JournalEventType.VALIDATION,
+        ]
+        assert events[-1].payload == {
+            "status": "failed",
+            "error_type": "ModelContentPolicyError",
+        }
+        assert sentinel not in json.dumps(
+            [event.model_dump(mode="json") for event in events], sort_keys=True
+        )
+
+
+def test_runner_checks_prohibited_text_before_schema_validation(tmp_path):
+    role = AgentRole.MODEL_RESEARCHER
+    sentinel = "api_key=[FAKE-REDACTED]"
+    document = output_document(role)
+    document["confidence"] = sentinel
+
+    class Qwen:
+        def run(self, *_args, **_kwargs):
+            return QwenTurnResult(json.dumps(document), 100, 0)
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
+        runner = AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=journal,
+        )
+        with pytest.raises(ValueError) as captured:
+            runner.run(
+                role=role,
+                session_id="session-1",
+                run_id="run-1",
+                task_id="task-1",
+                repository_revision="abc123",
+                created_at=NOW,
+                objective="Inspect bounded financial evidence.",
+                evidence={"artifact-1": {"claim": "bounded"}},
+            )
+
+        assert str(captured.value) == "prohibited model content"
+        assert sentinel not in str(captured.value)
+        events = journal.list(role, "session-1")
+        assert [event.event_type for event in events] == [
+            JournalEventType.OBSERVATION,
+            JournalEventType.VALIDATION,
+        ]
+        assert events[-1].payload == {
+            "status": "failed",
+            "error_type": "ModelContentPolicyError",
+        }
+        assert sentinel not in json.dumps(
+            [event.model_dump(mode="json") for event in events], sort_keys=True
+        )
+
+
+def test_runner_translates_schema_validation_error_without_raw_input(tmp_path):
+    role = AgentRole.MODEL_RESEARCHER
+    invalid_input = "not-a-number-input"
+    document = output_document(role)
+    document["confidence"] = invalid_input
+
+    class Qwen:
+        def run(self, *_args, **_kwargs):
+            return QwenTurnResult(json.dumps(document), 100, 0)
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
+        runner = AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=journal,
+        )
+        with pytest.raises(ValueError) as captured:
+            runner.run(
+                role=role,
+                session_id="session-1",
+                run_id="run-1",
+                task_id="task-1",
+                repository_revision="abc123",
+                created_at=NOW,
+                objective="Inspect bounded financial evidence.",
+                evidence={"artifact-1": {"claim": "bounded"}},
+            )
+
+        assert str(captured.value) == "model output failed validation"
+        assert captured.value.__cause__ is None
+        assert invalid_input not in str(captured.value)
+        events = journal.list(role, "session-1")
+        assert events[-1].payload == {
+            "status": "failed",
+            "error_type": "ModelOutputValidationError",
+        }
+
+
 @pytest.mark.parametrize("role", NEW_ROLES)
 def test_each_agent_output_is_typed_and_proposal_only(role):
     parsed = OUTPUT_MODELS[role].model_validate_json(json.dumps(output_document(role)))
@@ -369,10 +546,11 @@ def test_runner_rejects_authority_mismatch_without_action_completed(tmp_path):
 
 def test_runner_rejects_malformed_json_without_action_completed(tmp_path):
     role = AgentRole.MODEL_RESEARCHER
+    malformed = "not-json-input"
 
     class Qwen:
         def run(self, *_args, **_kwargs):
-            return QwenTurnResult("not-json", 100, 0)
+            return QwenTurnResult(malformed, 100, 0)
 
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         journal = AgentJournal(persistence.store)
@@ -382,7 +560,7 @@ def test_runner_rejects_malformed_json_without_action_completed(tmp_path):
             qwen=Qwen(),
             journal=journal,
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as captured:
             runner.run(
                 role=role,
                 session_id="session-1",
@@ -393,10 +571,17 @@ def test_runner_rejects_malformed_json_without_action_completed(tmp_path):
                 objective="Inspect model.",
                 evidence={"artifact-1": {"claim": "bounded"}},
             )
+        assert str(captured.value) == "model output is not valid JSON"
+        assert captured.value.__cause__ is None
+        assert malformed not in str(captured.value)
         assert [event.event_type for event in journal.list(role, "session-1")] == [
             JournalEventType.OBSERVATION,
             JournalEventType.VALIDATION,
         ]
+        assert journal.list(role, "session-1")[-1].payload == {
+            "status": "failed",
+            "error_type": "ModelOutputParseError",
+        }
 
 
 def test_runner_rejects_unbound_proposal_evidence_without_action_completed(tmp_path):
