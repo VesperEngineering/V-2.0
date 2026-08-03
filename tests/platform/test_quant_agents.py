@@ -295,7 +295,7 @@ def test_ollama_generation_budgets_do_not_narrow_pydantic_output_contract():
     assert len(parsed.proposals) == 3
 
 
-def test_runner_rejects_model_fabricated_evidence_id(tmp_path):
+def test_runner_rejects_unbound_output_evidence_without_action_completed(tmp_path):
     role = AgentRole.MODEL_RESEARCHER
     document = output_document(role)
     document["evidence_ids"] = ["not-supplied"]
@@ -305,11 +305,12 @@ def test_runner_rejects_model_fabricated_evidence_id(tmp_path):
             return QwenTurnResult(json.dumps(document), 100, 0)
 
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
         runner = AutonomousAgentRunner(
             repository_root=ROOT,
             profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
             qwen=Qwen(),
-            journal=AgentJournal(persistence.store),
+            journal=journal,
         )
         with pytest.raises(ValueError, match="not supplied"):
             runner.run(
@@ -322,9 +323,13 @@ def test_runner_rejects_model_fabricated_evidence_id(tmp_path):
                 objective="Inspect model.",
                 evidence={"artifact-1": {"claim": "bounded"}},
             )
+        assert [event.event_type for event in journal.list(role, "session-1")] == [
+            JournalEventType.OBSERVATION,
+            JournalEventType.VALIDATION,
+        ]
 
 
-def test_runner_rejects_model_timestamp_that_differs_from_controller(tmp_path):
+def test_runner_rejects_authority_mismatch_without_action_completed(tmp_path):
     role = AgentRole.MODEL_RESEARCHER
     document = output_document(role)
     wrong_timestamp = (
@@ -338,11 +343,12 @@ def test_runner_rejects_model_timestamp_that_differs_from_controller(tmp_path):
             return QwenTurnResult(json.dumps(document), 100, 0)
 
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
         runner = AutonomousAgentRunner(
             repository_root=ROOT,
             profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
             qwen=Qwen(),
-            journal=AgentJournal(persistence.store),
+            journal=journal,
         )
         with pytest.raises(ValueError, match="authority"):
             runner.run(
@@ -355,6 +361,76 @@ def test_runner_rejects_model_timestamp_that_differs_from_controller(tmp_path):
                 objective="Inspect model.",
                 evidence={"artifact-1": {"claim": "bounded"}},
             )
+        assert [event.event_type for event in journal.list(role, "session-1")] == [
+            JournalEventType.OBSERVATION,
+            JournalEventType.VALIDATION,
+        ]
+
+
+def test_runner_rejects_malformed_json_without_action_completed(tmp_path):
+    role = AgentRole.MODEL_RESEARCHER
+
+    class Qwen:
+        def run(self, *_args, **_kwargs):
+            return QwenTurnResult("not-json", 100, 0)
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
+        runner = AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=journal,
+        )
+        with pytest.raises(ValueError):
+            runner.run(
+                role=role,
+                session_id="session-1",
+                run_id="run-1",
+                task_id="task-1",
+                repository_revision="abc123",
+                created_at=NOW,
+                objective="Inspect model.",
+                evidence={"artifact-1": {"claim": "bounded"}},
+            )
+        assert [event.event_type for event in journal.list(role, "session-1")] == [
+            JournalEventType.OBSERVATION,
+            JournalEventType.VALIDATION,
+        ]
+
+
+def test_runner_rejects_unbound_proposal_evidence_without_action_completed(tmp_path):
+    role = AgentRole.MODEL_RESEARCHER
+    document = output_document(role)
+    document["proposals"][0]["evidence_ids"] = ["not-supplied"]
+
+    class Qwen:
+        def run(self, *_args, **_kwargs):
+            return QwenTurnResult(json.dumps(document), 100, 0)
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
+        runner = AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=journal,
+        )
+        with pytest.raises(ValueError, match="proposal cites evidence"):
+            runner.run(
+                role=role,
+                session_id="session-1",
+                run_id="run-1",
+                task_id="task-1",
+                repository_revision="abc123",
+                created_at=NOW,
+                objective="Inspect model.",
+                evidence={"artifact-1": {"claim": "bounded"}},
+            )
+        assert [event.event_type for event in journal.list(role, "session-1")] == [
+            JournalEventType.OBSERVATION,
+            JournalEventType.VALIDATION,
+        ]
 
 
 def test_service_reports_eight_roles_and_manual_review_gate(tmp_path):
