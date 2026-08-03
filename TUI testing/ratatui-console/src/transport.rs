@@ -2,8 +2,8 @@ use std::fmt;
 use std::io;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::process::Child;
 use tokio::time::sleep;
 
@@ -19,6 +19,19 @@ pub enum TransportError {
     Io(io::Error),
     Json(serde_json::Error),
     InvalidFrame(&'static str),
+}
+
+trait AsyncStream: AsyncRead + AsyncWrite + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncStream for T {}
+
+enum ReceiveProgress {
+    Header { bytes: [u8; 4], offset: usize },
+    Body { bytes: Vec<u8>, offset: usize },
+}
+
+struct SendProgress {
+    frame: Vec<u8>,
+    offset: usize,
 }
 
 impl fmt::Display for TransportError {
@@ -46,7 +59,10 @@ impl From<serde_json::Error> for TransportError {
 }
 
 pub struct PipeTransport {
-    client: NamedPipeClient,
+    stream: Box<dyn AsyncStream + Send>,
+    receive_progress: ReceiveProgress,
+    send_progress: Option<SendProgress>,
+    poisoned: bool,
     _gateway_child: Option<Child>,
 }
 
@@ -57,7 +73,13 @@ impl PipeTransport {
             match ClientOptions::new().open(name) {
                 Ok(client) => {
                     return Ok(Self {
-                        client,
+                        stream: Box::new(client),
+                        receive_progress: ReceiveProgress::Header {
+                            bytes: [0; 4],
+                            offset: 0,
+                        },
+                        send_progress: None,
+                        poisoned: false,
                         _gateway_child: None,
                     });
                 }
@@ -75,28 +97,134 @@ impl PipeTransport {
         }
     }
 
+    #[doc(hidden)]
+    pub fn from_stream<T>(stream: T) -> Self
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        Self {
+            stream: Box::new(stream),
+            receive_progress: ReceiveProgress::Header {
+                bytes: [0; 4],
+                offset: 0,
+            },
+            send_progress: None,
+            poisoned: false,
+            _gateway_child: None,
+        }
+    }
+
     pub(crate) fn retain_gateway_child(&mut self, child: Child) {
         self._gateway_child = Some(child);
     }
 
     pub async fn send(&mut self, envelope: &Envelope) -> Result<(), TransportError> {
+        self.require_healthy()?;
         let body = serde_json::to_vec(envelope)?;
         let frame = encode_frame_bytes(&body)?;
-        self.client.write_all(&frame).await?;
-        self.client.flush().await?;
-        Ok(())
+        if let Some(pending) = &self.send_progress {
+            if pending.frame == frame {
+                return self.finish_pending_send().await;
+            }
+            self.finish_pending_send().await?;
+        }
+        self.send_progress = Some(SendProgress { frame, offset: 0 });
+        self.finish_pending_send().await
     }
 
     pub async fn recv(&mut self) -> Result<Envelope, TransportError> {
-        let mut header = [0_u8; 4];
-        self.client.read_exact(&mut header).await?;
-        let size = u32::from_be_bytes(header) as usize;
-        if !(1..=MAX_FRAME_BYTES).contains(&size) {
-            return Err(TransportError::InvalidFrame("frame size is invalid"));
+        self.require_healthy()?;
+        loop {
+            match &mut self.receive_progress {
+                ReceiveProgress::Header { bytes, offset } => {
+                    let read = match self.stream.read(&mut bytes[*offset..]).await {
+                        Ok(0) => return Err(self.poison_eof()),
+                        Ok(read) => read,
+                        Err(error) => return Err(self.poison_io(error)),
+                    };
+                    *offset += read;
+                    if *offset == bytes.len() {
+                        let size = u32::from_be_bytes(*bytes) as usize;
+                        if !(1..=MAX_FRAME_BYTES).contains(&size) {
+                            self.poisoned = true;
+                            return Err(TransportError::InvalidFrame("frame size is invalid"));
+                        }
+                        self.receive_progress = ReceiveProgress::Body {
+                            bytes: vec![0; size],
+                            offset: 0,
+                        };
+                    }
+                }
+                ReceiveProgress::Body { bytes, offset } => {
+                    let read = match self.stream.read(&mut bytes[*offset..]).await {
+                        Ok(0) => return Err(self.poison_eof()),
+                        Ok(read) => read,
+                        Err(error) => return Err(self.poison_io(error)),
+                    };
+                    *offset += read;
+                    if *offset == bytes.len() {
+                        let body = match std::mem::replace(
+                            &mut self.receive_progress,
+                            ReceiveProgress::Header {
+                                bytes: [0; 4],
+                                offset: 0,
+                            },
+                        ) {
+                            ReceiveProgress::Body { bytes, .. } => bytes,
+                            ReceiveProgress::Header { .. } => unreachable!(),
+                        };
+                        return match serde_json::from_slice(&body) {
+                            Ok(envelope) => Ok(envelope),
+                            Err(error) => {
+                                self.poisoned = true;
+                                Err(TransportError::Json(error))
+                            }
+                        };
+                    }
+                }
+            }
         }
-        let mut body = vec![0_u8; size];
-        self.client.read_exact(&mut body).await?;
-        Ok(serde_json::from_slice(&body)?)
+    }
+
+    async fn finish_pending_send(&mut self) -> Result<(), TransportError> {
+        loop {
+            let Some(pending) = &mut self.send_progress else {
+                return Ok(());
+            };
+            if pending.offset == pending.frame.len() {
+                self.send_progress = None;
+                return Ok(());
+            }
+            let written = match self.stream.write(&pending.frame[pending.offset..]).await {
+                Ok(0) => return Err(self.poison_eof()),
+                Ok(written) => written,
+                Err(error) => return Err(self.poison_io(error)),
+            };
+            pending.offset += written;
+        }
+    }
+
+    fn require_healthy(&self) -> Result<(), TransportError> {
+        if self.poisoned {
+            Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "pipe transport is poisoned",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn poison_eof(&mut self) -> TransportError {
+        self.poison_io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "pipe closed during frame",
+        ))
+    }
+
+    fn poison_io(&mut self, error: io::Error) -> TransportError {
+        self.poisoned = true;
+        TransportError::Io(error)
     }
 }
 

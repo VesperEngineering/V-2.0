@@ -14,6 +14,7 @@ const PIPE_PREFIX: &str = r"\\.\pipe\vesper-v20-tui-";
 const PIPE_HASH_LENGTH: usize = 16;
 const STDOUT_LIMIT: usize = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum LaunchError {
@@ -54,9 +55,7 @@ impl GatewayLauncher {
             Err(error) if error.raw_os_error() == Some(2) => {
                 let state_root = canonical_state_root()?;
                 let child = start_gateway(repo_root, &state_root, &pipe_name)?;
-                let mut transport = PipeTransport::connect(&pipe_name, CONNECT_TIMEOUT).await?;
-                transport.retain_gateway_child(child);
-                Ok(transport)
+                connect_started_gateway(child, &pipe_name, CONNECT_TIMEOUT).await
             }
             Err(error) => Err(LaunchError::Io(error)),
         }
@@ -64,28 +63,88 @@ impl GatewayLauncher {
 }
 
 async fn discover_pipe_name(repo_root: &Path) -> Result<String, LaunchError> {
-    let mut child = Command::new("uv")
-        .current_dir(repo_root)
-        .args(["run", "--locked", "vesper-tui-gateway", "--print-pipe-name"])
+    let mut command = Command::new("uv");
+    command.current_dir(repo_root).args([
+        "run",
+        "--locked",
+        "vesper-tui-gateway",
+        "--print-pipe-name",
+    ]);
+    discover_pipe_name_from_command(command, DISCOVERY_TIMEOUT).await
+}
+
+enum DiscoveryOutcome {
+    Complete(Vec<u8>, std::process::ExitStatus),
+    Oversized,
+}
+
+#[doc(hidden)]
+pub async fn discover_pipe_name_from_command(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<String, LaunchError> {
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    let stdout = child.stdout.take().ok_or(LaunchError::DiscoveryFailed)?;
-    let mut bytes = Vec::new();
-    stdout
-        .take((STDOUT_LIMIT + 1) as u64)
-        .read_to_end(&mut bytes)
-        .await?;
-    if bytes.len() > STDOUT_LIMIT {
-        let _ = child.kill().await;
-        return Err(LaunchError::InvalidPipeName);
-    }
-    if !child.wait().await?.success() {
+    let Some(stdout) = child.stdout.take() else {
+        terminate_child(&mut child).await;
         return Err(LaunchError::DiscoveryFailed);
+    };
+    let operation = async {
+        let mut bytes = Vec::new();
+        stdout
+            .take((STDOUT_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() > STDOUT_LIMIT {
+            return Ok::<DiscoveryOutcome, io::Error>(DiscoveryOutcome::Oversized);
+        }
+        Ok(DiscoveryOutcome::Complete(bytes, child.wait().await?))
+    };
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(Ok(DiscoveryOutcome::Complete(bytes, status))) if status.success() => {
+            let output = std::str::from_utf8(&bytes).map_err(|_| LaunchError::InvalidPipeName)?;
+            validate_pipe_name(output)
+        }
+        Ok(Ok(DiscoveryOutcome::Complete(_, _))) => Err(LaunchError::DiscoveryFailed),
+        Ok(Ok(DiscoveryOutcome::Oversized)) => {
+            terminate_child(&mut child).await;
+            Err(LaunchError::InvalidPipeName)
+        }
+        Ok(Err(error)) => {
+            terminate_child(&mut child).await;
+            Err(LaunchError::Io(error))
+        }
+        Err(_) => {
+            terminate_child(&mut child).await;
+            Err(LaunchError::DiscoveryFailed)
+        }
     }
-    let output = std::str::from_utf8(&bytes).map_err(|_| LaunchError::InvalidPipeName)?;
-    validate_pipe_name(output)
+}
+
+#[doc(hidden)]
+pub async fn connect_started_gateway(
+    mut child: Child,
+    pipe_name: &str,
+    timeout: Duration,
+) -> Result<PipeTransport, LaunchError> {
+    match PipeTransport::connect(pipe_name, timeout).await {
+        Ok(mut transport) => {
+            transport.retain_gateway_child(child);
+            Ok(transport)
+        }
+        Err(error) => {
+            terminate_child(&mut child).await;
+            Err(LaunchError::Io(error))
+        }
+    }
+}
+
+async fn terminate_child(child: &mut Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 pub fn validate_pipe_name(output: &str) -> Result<String, LaunchError> {
@@ -100,7 +159,6 @@ pub fn validate_pipe_name(output: &str) -> Result<String, LaunchError> {
         || !hash
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        || name.len() + (output.len() - name.len()) != output.len()
     {
         return Err(LaunchError::InvalidPipeName);
     }
@@ -110,7 +168,7 @@ pub fn validate_pipe_name(output: &str) -> Result<String, LaunchError> {
 pub fn canonical_state_root() -> Result<PathBuf, LaunchError> {
     let local = env::var_os("LOCALAPPDATA").ok_or(LaunchError::MissingLocalAppData)?;
     let root = PathBuf::from(local).join("Vesper").join("v20").join("tui");
-    if !root.is_absolute() || root.to_string_lossy().starts_with(r"\\") {
+    if !root.is_absolute() || root.to_string_lossy().starts_with(r"\\") || root.to_str().is_none() {
         return Err(LaunchError::InvalidStateRoot);
     }
     Ok(root)
@@ -131,12 +189,9 @@ pub fn gateway_args(state_root: &Path, pipe_name: &str, parent_pid: u32) -> Vec<
 }
 
 fn start_gateway(repo_root: &Path, state_root: &Path, pipe_name: &str) -> io::Result<Child> {
-    let parent_pid = std::process::id().to_string();
     Command::new("uv")
         .current_dir(repo_root)
-        .args(["run", "--locked", "vesper-tui-gateway", "--state-root"])
-        .arg(state_root)
-        .args(["--pipe-name", pipe_name, "--parent-pid", &parent_pid])
+        .args(gateway_args(state_root, pipe_name, std::process::id()))
         .stdin(Stdio::null())
         .spawn()
 }

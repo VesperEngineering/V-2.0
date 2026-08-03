@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from vesper.platform.tui.contracts import (
     CANONICAL_WIRE_FIXTURE,
     CANONICAL_WIRE_FIXTURE_SHA256,
+    CANONICAL_WIRE_FIXTURES,
     ClientHelloPayload,
     Freshness,
     HeaderView,
@@ -25,6 +26,7 @@ from vesper.platform.tui.contracts import (
     UntrustedProtocolDiagnostic,
     WIRE_SCHEMA_RECEIPT,
     WIRE_SCHEMA_RECEIPT_SHA256,
+    WIRE_CONTRACT_DESCRIPTOR,
     WireEnvelope,
     decode_envelope_json,
     decode_payload,
@@ -339,10 +341,61 @@ def test_canonical_fixture_and_schema_receipt_have_exact_bytes_and_hashes() -> N
     )
 
     assert CANONICAL_WIRE_FIXTURE == expected_fixture
-    assert CANONICAL_WIRE_FIXTURE_SHA256 == "791c289ab55ac2183712e2305d3d6652b274592f86b72c25508b02a48bfa050d"
+    assert (
+        CANONICAL_WIRE_FIXTURE_SHA256
+        == "791c289ab55ac2183712e2305d3d6652b274592f86b72c25508b02a48bfa050d"
+    )
     assert hashlib.sha256(CANONICAL_WIRE_FIXTURE).hexdigest() == CANONICAL_WIRE_FIXTURE_SHA256
     assert WIRE_SCHEMA_RECEIPT == json.dumps(
         WireEnvelope.model_json_schema(), sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    assert WIRE_SCHEMA_RECEIPT_SHA256 == "ab1d90e0538558b0f13f7c18c96539ae602a01c36639791b324a649ae7f1361e"
+    assert (
+        WIRE_SCHEMA_RECEIPT_SHA256
+        == "73a8e7dec7a9c823cedcac57af94086d4fd8bcb4ad9f2f4ab8b296aff8a93829"
+    )
     assert hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest() == WIRE_SCHEMA_RECEIPT_SHA256
+
+
+def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() -> None:
+    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 14
+    assert {decode_envelope_json(frame).message_type for frame in CANONICAL_WIRE_FIXTURES} == set(
+        MessageType
+    )
+    for frame in CANONICAL_WIRE_FIXTURES:
+        envelope = decode_envelope_json(frame)
+        decode_payload(envelope)
+        assert envelope.model_dump_json().encode("utf-8") == frame
+    descriptor = json.loads(WIRE_CONTRACT_DESCRIPTOR)
+    assert descriptor["schema_version"] == 1
+    assert set(descriptor["messages"]) == {message.value for message in MessageType}
+    assert "header.agent_queue_length" in descriptor["nullable_required"]
+    assert descriptor["optional_default"] == ["capability.reason"]
+
+
+@pytest.mark.parametrize("value", [-1, 2**64])
+def test_wire_unsigned_integers_reject_out_of_range(value: int) -> None:
+    with pytest.raises(ValidationError):
+        _envelope(sequence=value)
+    with pytest.raises(ValidationError):
+        _envelope(state_version=value)
+    with pytest.raises(ValidationError):
+        _header(agent_queue_length=value)
+    snapshot_wire = json.loads(CANONICAL_WIRE_FIXTURES[10])
+    snapshot_wire["payload"]["snapshot"]["state_version"] = value
+    envelope = WireEnvelope.model_validate_json(json.dumps(snapshot_wire))
+    with pytest.raises(ValidationError):
+        decode_payload(envelope)
+
+
+def test_wire_unsigned_integers_accept_u64_max() -> None:
+    maximum = 2**64 - 1
+    assert _envelope(sequence=maximum, state_version=maximum).sequence == maximum
+    assert _header(agent_queue_length=maximum).agent_queue_length == maximum
+    snapshot_wire = json.loads(CANONICAL_WIRE_FIXTURES[10])
+    snapshot_wire["payload"]["snapshot"]["state_version"] = maximum
+    assert (
+        decode_payload(
+            WireEnvelope.model_validate_json(json.dumps(snapshot_wire))
+        ).snapshot.state_version
+        == maximum
+    )

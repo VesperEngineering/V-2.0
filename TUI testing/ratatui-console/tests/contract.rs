@@ -1,8 +1,9 @@
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
-use vesper_ratatui_console::contract::{Envelope, Message, MessageType};
+use vesper_ratatui_console::contract::Envelope;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -12,12 +13,17 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn python_receipts() -> (Vec<u8>, Vec<u8>) {
+struct PythonContractBundle {
+    fixtures: Vec<Vec<u8>>,
+    descriptor: Vec<u8>,
+}
+
+fn python_contract_bundle() -> PythonContractBundle {
     let script = r#"import base64, json
-from vesper.platform.tui.contracts import CANONICAL_WIRE_FIXTURE, WIRE_SCHEMA_RECEIPT
+from vesper.platform.tui.contracts import CANONICAL_WIRE_FIXTURES, WIRE_CONTRACT_DESCRIPTOR
 print(json.dumps({
-    'fixture': base64.b64encode(CANONICAL_WIRE_FIXTURE).decode('ascii'),
-    'schema': base64.b64encode(WIRE_SCHEMA_RECEIPT).decode('ascii'),
+    'fixtures': [base64.b64encode(value).decode('ascii') for value in CANONICAL_WIRE_FIXTURES],
+    'descriptor': base64.b64encode(WIRE_CONTRACT_DESCRIPTOR).decode('ascii'),
 }, separators=(',', ':')))
 "#;
     let output = Command::new("uv")
@@ -31,10 +37,15 @@ print(json.dumps({
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt: Value = serde_json::from_slice(&output.stdout).expect("receipt JSON");
-    (
-        decode_base64(receipt["fixture"].as_str().expect("fixture string")),
-        decode_base64(receipt["schema"].as_str().expect("schema string")),
-    )
+    PythonContractBundle {
+        fixtures: receipt["fixtures"]
+            .as_array()
+            .expect("fixture list")
+            .iter()
+            .map(|value| decode_base64(value.as_str().expect("fixture string")))
+            .collect(),
+        descriptor: decode_base64(receipt["descriptor"].as_str().expect("descriptor string")),
+    }
 }
 
 fn decode_base64(value: &str) -> Vec<u8> {
@@ -75,31 +86,288 @@ fn decode_base64(value: &str) -> Vec<u8> {
 }
 
 #[test]
-fn consumes_python_fixture_and_schema_receipt_byte_for_byte() {
-    let (fixture, schema_receipt) = python_receipts();
-    let envelope: Envelope =
-        serde_json::from_slice(&fixture).expect("Python fixture parses in Rust");
-    assert_eq!(envelope.message_type(), MessageType::ServerHello);
-    assert!(matches!(envelope.message, Message::ServerHello(_)));
-    assert_eq!(serde_json::to_vec(&envelope).unwrap(), fixture);
-
-    let schema: Value =
-        serde_json::from_slice(&schema_receipt).expect("Python schema receipt parses");
-    assert_eq!(serde_json::to_vec(&schema).unwrap(), schema_receipt);
-    let properties = schema["properties"]
-        .as_object()
-        .expect("envelope properties");
-    for name in [
-        "schema_version",
-        "message_id",
-        "sequence",
-        "state_version",
-        "timestamp_utc",
-        "message_type",
-        "payload",
-    ] {
-        assert!(properties.contains_key(name), "missing schema field {name}");
+fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
+    let bundle = python_contract_bundle();
+    assert_eq!(bundle.fixtures.len(), 14);
+    let mut seen = Vec::new();
+    for fixture in bundle.fixtures {
+        let envelope: Envelope =
+            serde_json::from_slice(&fixture).expect("Python fixture parses in Rust");
+        seen.push(envelope.message_type());
+        assert_eq!(serde_json::to_vec(&envelope).unwrap(), fixture);
     }
+    seen.sort_by_key(|value| value.to_string());
+    seen.dedup();
+    assert_eq!(seen.len(), 14);
+    assert_eq!(rust_contract_descriptor(), bundle.descriptor);
+}
+
+fn rust_contract_descriptor() -> Vec<u8> {
+    let descriptor = serde_json::json!({
+        "envelope_required": ["schema_version", "message_id", "sequence", "state_version", "timestamp_utc", "message_type", "payload"],
+        "integer_fields": ["envelope.sequence", "envelope.state_version", "snapshot.state_version", "header.agent_queue_length"],
+        "messages": {
+            "auth-result": ["success", "access_state", "reason"],
+            "auth-setup": ["password", "confirmation"],
+            "auth-unlock": ["password"],
+            "client-hello": ["client_version", "supported_schema_versions"],
+            "lease-request": ["action"],
+            "lease-result": ["status", "reason"],
+            "lock-request": ["action"],
+            "lock-result": ["locked"],
+            "ping": ["nonce"],
+            "pong": ["nonce"],
+            "protocol-error": ["code", "safe_message"],
+            "server-hello": ["server_version", "requires_setup"],
+            "snapshot": ["snapshot"],
+            "snapshot-request": [],
+        },
+        "nullable_required": [
+            "auth-result.reason", "lease-result.reason", "snapshot.alerts",
+            "alert.resolved_at_utc", "header.operating_mode_reason",
+            "header.data_age_seconds", "header.regime_confidence", "header.portfolio_value",
+            "header.next_rebalance_at_utc", "header.rebalance_blockers", "header.active_agent",
+            "header.agent_queue_length", "header.qwen_context_percent"
+        ],
+        "optional_default": ["capability.reason"],
+        "schema_version": 1,
+        "shell_required": {
+            "alert": ["alert_id", "severity", "summary", "created_at_utc", "resolved_at_utc"],
+            "capability": ["capability_id", "state"],
+            "header": [
+                "operating_mode", "operating_mode_freshness", "operating_mode_reason", "data_freshness",
+                "data_age_seconds", "regime_label", "regime_confidence", "portfolio_value",
+                "next_rebalance_at_utc", "rebalance_blockers", "active_agent", "agent_queue_length",
+                "qwen_state", "qwen_context_percent", "current_time_utc", "market_session"
+            ],
+            "snapshot": ["state_version", "generated_at_utc", "header", "alerts", "capabilities"]
+        }
+    });
+    serde_json::to_vec(&descriptor).unwrap()
+}
+
+fn python_acceptance(corpus: &[Value]) -> Vec<bool> {
+    let script = r#"import json, sys
+from pydantic import ValidationError
+from vesper.platform.tui.contracts import WireEnvelope, decode_payload
+result = []
+for value in json.load(sys.stdin):
+    try:
+        envelope = WireEnvelope.model_validate_json(json.dumps(value, separators=(',', ':')))
+        decode_payload(envelope)
+        result.append(True)
+    except (ValidationError, TypeError, ValueError):
+        result.append(False)
+json.dump(result, sys.stdout, separators=(',', ':'))
+"#;
+    let mut child = Command::new("uv")
+        .current_dir(repo_root())
+        .args(["run", "--locked", "python", "-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run Python differential validator");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(corpus).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn differential_corpus_matches_python_for_required_unknown_and_ranges() {
+    let bundle = python_contract_bundle();
+    let mut corpus: Vec<Value> = bundle
+        .fixtures
+        .iter()
+        .map(|fixture| serde_json::from_slice(fixture).unwrap())
+        .collect();
+    let valid = corpus.clone();
+    for source in &valid {
+        for field in [
+            "schema_version",
+            "message_id",
+            "sequence",
+            "state_version",
+            "timestamp_utc",
+            "message_type",
+            "payload",
+        ] {
+            let mut value = source.clone();
+            value.as_object_mut().unwrap().remove(field);
+            corpus.push(value);
+        }
+        let mut unknown = source.clone();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".into(), Value::Bool(true));
+        corpus.push(unknown);
+        let mut payload_unknown = source.clone();
+        payload_unknown["payload"]
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".into(), Value::Bool(true));
+        corpus.push(payload_unknown);
+        for field in source["payload"].as_object().unwrap().keys() {
+            let mut value = source.clone();
+            value["payload"].as_object_mut().unwrap().remove(field);
+            corpus.push(value);
+        }
+    }
+    for (index, source) in valid.iter().enumerate() {
+        let mut mismatched = source.clone();
+        mismatched["payload"] = valid[(index + 1) % valid.len()]["payload"].clone();
+        corpus.push(mismatched);
+    }
+    let snapshot = valid
+        .iter()
+        .find(|value| value["message_type"] == "snapshot")
+        .unwrap();
+    for (path, fields) in [
+        (
+            &["payload", "snapshot"][..],
+            &[
+                "state_version",
+                "generated_at_utc",
+                "header",
+                "alerts",
+                "capabilities",
+            ][..],
+        ),
+        (
+            &["payload", "snapshot", "header"][..],
+            &[
+                "operating_mode",
+                "operating_mode_freshness",
+                "operating_mode_reason",
+                "data_freshness",
+                "data_age_seconds",
+                "regime_label",
+                "regime_confidence",
+                "portfolio_value",
+                "next_rebalance_at_utc",
+                "rebalance_blockers",
+                "active_agent",
+                "agent_queue_length",
+                "qwen_state",
+                "qwen_context_percent",
+                "current_time_utc",
+                "market_session",
+            ][..],
+        ),
+    ] {
+        for field in fields {
+            let mut value = snapshot.clone();
+            let mut target = &mut value;
+            for part in path {
+                target = &mut target[*part];
+            }
+            target.as_object_mut().unwrap().remove(*field);
+            corpus.push(value);
+        }
+    }
+    for (path, fields) in [
+        (
+            &["payload", "snapshot", "alerts", "0"][..],
+            &[
+                "alert_id",
+                "severity",
+                "summary",
+                "created_at_utc",
+                "resolved_at_utc",
+            ][..],
+        ),
+        (
+            &["payload", "snapshot", "capabilities", "0"][..],
+            &["capability_id", "state", "reason"][..],
+        ),
+    ] {
+        for field in fields {
+            let mut value = snapshot.clone();
+            let mut target = &mut value;
+            for part in path {
+                target = if let Ok(index) = part.parse::<usize>() {
+                    &mut target[index]
+                } else {
+                    &mut target[*part]
+                };
+            }
+            target.as_object_mut().unwrap().remove(*field);
+            corpus.push(value);
+        }
+    }
+    for field in ["sequence", "state_version"] {
+        for number in [
+            serde_json::json!(-1),
+            serde_json::json!(u64::MAX),
+            serde_json::json!("18446744073709551616"),
+        ] {
+            let mut value = valid[0].clone();
+            value[field] = if number.is_string() {
+                serde_json::from_str(number.as_str().unwrap()).unwrap()
+            } else {
+                number
+            };
+            corpus.push(value);
+        }
+    }
+    for (path, number) in [
+        (
+            &["payload", "snapshot", "state_version"][..],
+            serde_json::json!(-1),
+        ),
+        (
+            &["payload", "snapshot", "state_version"][..],
+            serde_json::json!(u64::MAX),
+        ),
+        (
+            &["payload", "snapshot", "state_version"][..],
+            serde_json::from_str("18446744073709551616").unwrap(),
+        ),
+        (
+            &["payload", "snapshot", "header", "agent_queue_length"][..],
+            serde_json::json!(-1),
+        ),
+        (
+            &["payload", "snapshot", "header", "agent_queue_length"][..],
+            serde_json::json!(u64::MAX),
+        ),
+        (
+            &["payload", "snapshot", "header", "agent_queue_length"][..],
+            serde_json::from_str("18446744073709551616").unwrap(),
+        ),
+    ] {
+        let mut value = snapshot.clone();
+        let (last, parents) = path.split_last().unwrap();
+        let mut target = &mut value;
+        for part in parents {
+            target = &mut target[*part];
+        }
+        target[*last] = number;
+        corpus.push(value);
+    }
+    let python = python_acceptance(&corpus);
+    let rust: Vec<bool> = corpus
+        .iter()
+        .map(|value| serde_json::from_value::<Envelope>(value.clone()).is_ok())
+        .collect();
+    let mismatches: Vec<_> = rust
+        .iter()
+        .zip(&python)
+        .enumerate()
+        .filter(|(_, (rust, python))| rust != python)
+        .map(|(index, (rust, python))| (index, *rust, *python, &corpus[index]))
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
 #[test]
@@ -110,7 +378,7 @@ fn rejects_unknown_contract_field() {
 
 #[test]
 fn rejects_wrong_schema_negative_versions_and_invalid_ids() {
-    let (fixture, _) = python_receipts();
+    let fixture = python_contract_bundle().fixtures[1].clone();
     let text = String::from_utf8(fixture).unwrap();
     for bad in [
         text.replace("\"schema_version\":1", "\"schema_version\":2"),
@@ -175,7 +443,7 @@ fn parses_all_fourteen_strict_payloads() {
 
 #[test]
 fn rejects_non_utc_timestamp_and_non_finite_or_coerced_numbers() {
-    let (fixture, _) = python_receipts();
+    let fixture = python_contract_bundle().fixtures[1].clone();
     let text = String::from_utf8(fixture).unwrap();
     assert!(serde_json::from_str::<Envelope>(&text.replace("Z\"", "-04:00\"")).is_err());
     assert!(
@@ -217,7 +485,7 @@ fn matches_python_literal_and_string_constraints() {
 
 #[test]
 fn normalizes_zero_offset_timestamp_to_python_z_form() {
-    let (fixture, _) = python_receipts();
+    let fixture = python_contract_bundle().fixtures[1].clone();
     let wire = String::from_utf8(fixture)
         .unwrap()
         .replace("00:00:00Z", "00:00:00+00:00");
@@ -231,7 +499,7 @@ fn normalizes_zero_offset_timestamp_to_python_z_form() {
 
 #[test]
 fn rejects_dates_python_would_reject_and_redacts_password_debug() {
-    let (fixture, _) = python_receipts();
+    let fixture = python_contract_bundle().fixtures[1].clone();
     let text = String::from_utf8(fixture).unwrap();
     for invalid in [
         "2026-13-03T00:00:00Z",

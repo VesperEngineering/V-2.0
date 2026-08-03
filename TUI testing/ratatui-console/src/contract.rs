@@ -238,6 +238,14 @@ where
     }
 }
 
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MessageType {
@@ -351,11 +359,14 @@ pub enum AccessState {
     Viewer,
 }
 
-strict_struct!(AuthResultPayload {
-    success: bool,
-    access_state: AccessState,
-    reason: Option<String>,
-});
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthResultPayload {
+    pub success: bool,
+    pub access_state: AccessState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub reason: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum TakeControlAction {
@@ -374,10 +385,13 @@ pub enum LeaseStatus {
     Transferred,
     LeaseHeld,
 }
-strict_struct!(LeaseResultPayload {
-    status: LeaseStatus,
-    reason: Option<String>,
-});
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseResultPayload {
+    pub status: LeaseStatus,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub reason: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum LockAction {
@@ -429,11 +443,13 @@ pub enum CapabilityState {
     Disabled,
 }
 
-strict_struct!(CapabilityView {
-    capability_id: NonEmptyString,
-    state: CapabilityState,
-    reason: Option<NonEmptyString>,
-});
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityView {
+    pub capability_id: NonEmptyString,
+    pub state: CapabilityState,
+    pub reason: Option<NonEmptyString>,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -445,19 +461,23 @@ pub enum AlertSeverity {
     Resolved,
 }
 
-strict_struct!(AlertView {
-    alert_id: NonEmptyString,
-    severity: AlertSeverity,
-    summary: NonEmptyString,
-    created_at_utc: UtcTimestamp,
-    resolved_at_utc: Option<UtcTimestamp>,
-});
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertView {
+    pub alert_id: NonEmptyString,
+    pub severity: AlertSeverity,
+    pub summary: NonEmptyString,
+    pub created_at_utc: UtcTimestamp,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub resolved_at_utc: Option<UtcTimestamp>,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderView {
     pub operating_mode: OperatingMode,
     pub operating_mode_freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub operating_mode_reason: Option<String>,
     pub data_freshness: Freshness,
     #[serde(deserialize_with = "deserialize_optional_finite")]
@@ -467,10 +487,14 @@ pub struct HeaderView {
     pub regime_confidence: Option<f64>,
     #[serde(deserialize_with = "deserialize_optional_finite")]
     pub portfolio_value: Option<f64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub next_rebalance_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub rebalance_blockers: Option<Vec<String>>,
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub active_agent: Option<String>,
-    pub agent_queue_length: Option<i64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub agent_queue_length: Option<u64>,
     pub qwen_state: String,
     #[serde(deserialize_with = "deserialize_optional_finite")]
     pub qwen_context_percent: Option<f64>,
@@ -478,13 +502,16 @@ pub struct HeaderView {
     pub market_session: String,
 }
 
-strict_struct!(ShellSnapshot {
-    state_version: i64,
-    generated_at_utc: UtcTimestamp,
-    header: HeaderView,
-    alerts: Option<Vec<AlertView>>,
-    capabilities: Vec<CapabilityView>,
-});
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellSnapshot {
+    pub state_version: u64,
+    pub generated_at_utc: UtcTimestamp,
+    pub header: HeaderView,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub alerts: Option<Vec<AlertView>>,
+    pub capabilities: Vec<CapabilityView>,
+}
 
 impl fmt::Display for MessageType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

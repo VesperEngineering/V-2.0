@@ -54,7 +54,7 @@ SafeId = Annotated[
     ),
 ]
 Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-NonNegativeInt = Annotated[int, Field(ge=0)]
+WireUInt = Annotated[int, Field(ge=0, le=2**64 - 1)]
 
 
 class StrictModel(BaseModel):
@@ -150,7 +150,7 @@ class HeaderView(StrictModel):
     next_rebalance_at_utc: datetime | None
     rebalance_blockers: tuple[str, ...] | None
     active_agent: str | None
-    agent_queue_length: int | None
+    agent_queue_length: WireUInt | None
     qwen_state: str
     qwen_context_percent: float | None
     current_time_utc: datetime
@@ -177,7 +177,7 @@ class HeaderView(StrictModel):
 
 
 class ShellSnapshot(StrictModel):
-    state_version: int
+    state_version: WireUInt
     generated_at_utc: datetime
     header: HeaderView
     alerts: tuple[AlertView, ...] | None
@@ -196,8 +196,8 @@ class ShellSnapshot(StrictModel):
 class WireEnvelope(StrictModel):
     schema_version: Literal[1]
     message_id: SafeId
-    sequence: NonNegativeInt
-    state_version: NonNegativeInt
+    sequence: WireUInt
+    state_version: WireUInt
     timestamp_utc: datetime
     message_type: MessageType
     payload: dict[str, JsonValue]
@@ -349,6 +349,143 @@ def decode_payload(envelope: WireEnvelope) -> StrictPayload:
     return PAYLOAD_MODELS[envelope.message_type].model_validate_json(
         json.dumps(envelope.payload, separators=(",", ":")),
     )
+
+
+_FIXTURE_SNAPSHOT = {
+    "state_version": 0,
+    "generated_at_utc": "2026-08-03T00:00:00Z",
+    "header": {
+        "operating_mode": "unknown",
+        "operating_mode_freshness": "unavailable",
+        "operating_mode_reason": None,
+        "data_freshness": "unavailable",
+        "data_age_seconds": None,
+        "regime_label": "Unavailable",
+        "regime_confidence": None,
+        "portfolio_value": None,
+        "next_rebalance_at_utc": None,
+        "rebalance_blockers": None,
+        "active_agent": None,
+        "agent_queue_length": None,
+        "qwen_state": "Unavailable",
+        "qwen_context_percent": None,
+        "current_time_utc": "2026-08-03T00:00:00Z",
+        "market_session": "Unavailable",
+    },
+    "alerts": [
+        {
+            "alert_id": "alert:1",
+            "severity": "info",
+            "summary": "Ready",
+            "created_at_utc": "2026-08-03T00:00:00Z",
+            "resolved_at_utc": None,
+        }
+    ],
+    "capabilities": [
+        {
+            "capability_id": "snapshot.read",
+            "state": "read-only",
+            "reason": None,
+        }
+    ],
+}
+
+_FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
+    (MessageType.CLIENT_HELLO, {"client_version": "0.1.0", "supported_schema_versions": [1]}),
+    (MessageType.SERVER_HELLO, {"server_version": "0.1.0", "requires_setup": True}),
+    (MessageType.AUTH_SETUP, {"password": "fixture-password", "confirmation": "fixture-password"}),
+    (MessageType.AUTH_UNLOCK, {"password": "fixture-password"}),
+    (MessageType.AUTH_RESULT, {"success": True, "access_state": "viewer", "reason": None}),
+    (MessageType.LEASE_REQUEST, {"action": "take-control"}),
+    (MessageType.LEASE_RESULT, {"status": "controller", "reason": None}),
+    (MessageType.LOCK_REQUEST, {"action": "lock"}),
+    (MessageType.LOCK_RESULT, {"locked": True}),
+    (MessageType.SNAPSHOT_REQUEST, {}),
+    (MessageType.SNAPSHOT, {"snapshot": _FIXTURE_SNAPSHOT}),
+    (MessageType.PROTOCOL_ERROR, {"code": "locked", "safe_message": "Locked."}),
+    (MessageType.PING, {"nonce": "nonce:1"}),
+    (MessageType.PONG, {"nonce": "nonce:1"}),
+)
+
+
+def _canonical_wire_fixture(message_type: MessageType, payload: dict[str, JsonValue]) -> bytes:
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "message_id": "server:1",
+            "sequence": 1,
+            "state_version": 0,
+            "timestamp_utc": "2026-08-03T00:00:00Z",
+            "message_type": message_type.value,
+            "payload": payload,
+        },
+        separators=(",", ":"),
+    )
+    envelope = WireEnvelope.model_validate_json(raw)
+    decode_payload(envelope)
+    return envelope.model_dump_json().encode("utf-8")
+
+
+CANONICAL_WIRE_FIXTURES = tuple(
+    _canonical_wire_fixture(message_type, payload) for message_type, payload in _FIXTURE_PAYLOADS
+)
+
+WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
+    {
+        "schema_version": 1,
+        "envelope_required": [
+            "schema_version",
+            "message_id",
+            "sequence",
+            "state_version",
+            "timestamp_utc",
+            "message_type",
+            "payload",
+        ],
+        "messages": {
+            message_type.value: [
+                name for name, field in model.model_fields.items() if field.is_required()
+            ]
+            for message_type, model in PAYLOAD_MODELS.items()
+        },
+        "shell_required": {
+            "snapshot": [
+                name for name, field in ShellSnapshot.model_fields.items() if field.is_required()
+            ],
+            "header": [
+                name for name, field in HeaderView.model_fields.items() if field.is_required()
+            ],
+            "alert": [
+                name for name, field in AlertView.model_fields.items() if field.is_required()
+            ],
+            "capability": [
+                name for name, field in CapabilityView.model_fields.items() if field.is_required()
+            ],
+        },
+        "optional_default": ["capability.reason"],
+        "nullable_required": [
+            "auth-result.reason",
+            "lease-result.reason",
+            "snapshot.alerts",
+            "alert.resolved_at_utc",
+            "header.operating_mode_reason",
+            "header.data_age_seconds",
+            "header.regime_confidence",
+            "header.portfolio_value",
+            "header.next_rebalance_at_utc",
+            "header.rebalance_blockers",
+            "header.active_agent",
+            "header.agent_queue_length",
+            "header.qwen_context_percent",
+        ],
+        "integer_fields": [
+            "envelope.sequence",
+            "envelope.state_version",
+            "snapshot.state_version",
+            "header.agent_queue_length",
+        ],
+    }
+)
 
 
 class UntrustedProtocolDiagnostic:
