@@ -1,10 +1,13 @@
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from vesper.platform.agent_queue import AgentWorkQueue
 from vesper.platform.cadence import CadencePolicy
 from vesper.platform.contracts import AgentRole
 from vesper.platform.persistence import PlatformPaths, open_persistence
 from vesper.platform.review import DailyReviewService, HybridReviewGate
+from vesper.platform.service import LocalPlatformService
 
 
 NOW = datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc)
@@ -32,6 +35,31 @@ def test_expired_queue_claim_can_be_reclaimed(tmp_path):
         reclaimed = queue.claim("worker-2", NOW + timedelta(seconds=2), lease_seconds=1)
         assert reclaimed.claimed_by == "worker-2"
         assert reclaimed.attempt == 2
+
+
+def test_service_marks_claimed_work_failed_when_agent_run_raises(tmp_path, monkeypatch):
+    paths = PlatformPaths.below(tmp_path / "state")
+    service = LocalPlatformService(paths, clock=lambda: NOW)
+    enqueued = service.enqueue_agent_work(
+        AgentRole.MODEL_RESEARCHER.value,
+        "session",
+        "inspect synthetic evidence",
+        10,
+    )
+
+    def fail_run(*_args, **_kwargs):
+        raise RuntimeError("invalid model output")
+
+    monkeypatch.setattr(service, "run_agent", fail_run)
+    with pytest.raises(RuntimeError, match="invalid model output"):
+        service.run_next_agent_work("worker-1", "abc123", {"artifact": {}}, "2026-08-01")
+
+    with open_persistence(paths) as persistence:
+        [failed] = AgentWorkQueue(persistence.store).list()
+    assert failed.work_id == enqueued["work_id"]
+    assert failed.status == "failed"
+    assert failed.claimed_by is None
+    assert failed.lease_expires_at is None
 
 
 def test_cadence_is_decision_only_and_digest_is_close_plus_fifteen():

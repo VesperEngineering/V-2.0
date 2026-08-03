@@ -140,6 +140,53 @@ def test_runner_routes_and_journals_agent_output(tmp_path):
         assert "v20-quant-research-lead" in markdown
 
 
+def test_runner_binds_controller_authority_into_prompt_and_response_schema(tmp_path):
+    role = AgentRole.QUANT_RESEARCH_LEAD
+    captured = {}
+
+    class Qwen:
+        def run(self, actual_role, prompt, **kwargs):
+            captured["role"] = actual_role
+            captured["prompt"] = prompt
+            captured["response_format"] = kwargs["response_format"]
+            return QwenTurnResult(json.dumps(output_document(role)), 100, 0)
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=AgentJournal(persistence.store),
+        ).run(
+            role=role,
+            session_id="session-1",
+            run_id="run-1",
+            task_id="task-1",
+            repository_revision="abc123",
+            created_at=NOW,
+            objective="Inspect signal.",
+            evidence={"artifact-1": {"claim": "bounded"}},
+        )
+
+    expected = {
+        "role": role.value,
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "task_id": "task-1",
+        "repository_revision": "abc123",
+        "created_at": NOW.isoformat(),
+    }
+    assert captured["role"] is role
+    assert all(value in captured["prompt"] for value in expected.values())
+    properties = captured["response_format"]["properties"]
+    assert {key: properties[key]["const"] for key in expected} == expected
+    proposal_properties = captured["response_format"]["$defs"]["AgentProposal"]["properties"]
+    proposal_expected = {key: expected[key] for key in expected if key != "session_id"}
+    assert {
+        key: proposal_properties[key]["const"] for key in proposal_expected
+    } == proposal_expected
+
+
 def test_runner_rejects_model_fabricated_evidence_id(tmp_path):
     role = AgentRole.MODEL_RESEARCHER
     document = output_document(role)
@@ -157,6 +204,39 @@ def test_runner_rejects_model_fabricated_evidence_id(tmp_path):
             journal=AgentJournal(persistence.store),
         )
         with pytest.raises(ValueError, match="not supplied"):
+            runner.run(
+                role=role,
+                session_id="session-1",
+                run_id="run-1",
+                task_id="task-1",
+                repository_revision="abc123",
+                created_at=NOW,
+                objective="Inspect model.",
+                evidence={"artifact-1": {"claim": "bounded"}},
+            )
+
+
+def test_runner_rejects_model_timestamp_that_differs_from_controller(tmp_path):
+    role = AgentRole.MODEL_RESEARCHER
+    document = output_document(role)
+    wrong_timestamp = (
+        datetime(2026, 8, 2, 20, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    document["created_at"] = wrong_timestamp
+    document["proposals"][0]["created_at"] = wrong_timestamp
+
+    class Qwen:
+        def run(self, *_args, **_kwargs):
+            return QwenTurnResult(json.dumps(document), 100, 0)
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        runner = AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=AgentJournal(persistence.store),
+        )
+        with pytest.raises(ValueError, match="authority"):
             runner.run(
                 role=role,
                 session_id="session-1",

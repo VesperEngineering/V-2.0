@@ -63,10 +63,15 @@ class LangGraphStoreAdapter:
         self,
         namespace: tuple[str, ...],
         *,
+        filter: Mapping[str, object] | None = None,
         limit: int = 10,
     ) -> tuple[Mapping[str, object], ...]:
         with self._lock:
-            items = self._store.search(namespace, limit=limit)
+            items = self._store.search(
+                namespace,
+                filter=None if filter is None else dict(filter),
+                limit=limit,
+            )
         return tuple(item.value for item in items)
 
 

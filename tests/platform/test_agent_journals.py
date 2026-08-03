@@ -93,3 +93,35 @@ def test_role_namespaces_are_isolated(tmp_path):
             )
         assert len(journal.list(AgentRole.PRODUCT, "same")) == 1
         assert len(journal.list(AgentRole.INDEPENDENT_QUANT_VALIDATOR, "same")) == 1
+
+
+def test_prefix_related_session_names_are_isolated(tmp_path):
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        journal = AgentJournal(persistence.store)
+        for session_id in ("session-1", "session-1-retry"):
+            journal.append(
+                event_id=f"event-{session_id}",
+                role=AgentRole.QUANT_RESEARCH_LEAD,
+                session_id=session_id,
+                run_id=f"run-{session_id}",
+                task_id="task",
+                repository_revision="abc",
+                created_at=NOW,
+                event_type=JournalEventType.OBSERVATION,
+                payload={"session": session_id},
+            )
+
+        assert [
+            event.session_id for event in journal.list(AgentRole.QUANT_RESEARCH_LEAD, "session-1")
+        ] == ["session-1"]
+        assert journal.verify(AgentRole.QUANT_RESEARCH_LEAD, "session-1") is True
+        assert journal.verify(AgentRole.QUANT_RESEARCH_LEAD, "session-1-retry") is True
+
+        persistence.store.put(
+            ("agent-journals", AgentRole.QUANT_RESEARCH_LEAD.value, "session-1-bad"),
+            "malformed",
+            {"role": AgentRole.QUANT_RESEARCH_LEAD.value, "session_id": "session-1-bad"},
+        )
+        assert [
+            event.session_id for event in journal.list(AgentRole.QUANT_RESEARCH_LEAD, "session-1")
+        ] == ["session-1"]

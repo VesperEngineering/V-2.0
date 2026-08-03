@@ -60,6 +60,7 @@ class OllamaClient:
         self,
         messages: Sequence[Mapping[str, object]],
         tools: Sequence[Mapping[str, object]] = (),
+        response_format: Mapping[str, object] | None = None,
     ) -> OllamaResponse:
         payload: dict[str, object] = {
             "model": QWEN_MODEL,
@@ -69,6 +70,9 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = list(tools)
+        if response_format is not None:
+            payload["format"] = dict(response_format)
+            payload["options"]["temperature"] = 0
         raw = self._transport(OLLAMA_CHAT_URL, payload, self._timeout)
         message = raw.get("message")
         prompt_tokens = raw.get("prompt_eval_count")
@@ -174,6 +178,7 @@ class QwenSpecialistAdapter:
             request.role.value,
             prompt + schema_instruction,
             allowed_tools=tuple(tool_names[tool] for tool in request.permissions.allowed_tools),
+            response_format=output_schema,
             audit=audit_tool,
         )
         finished_at = self._clock()

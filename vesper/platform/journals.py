@@ -94,10 +94,19 @@ class AgentJournal:
             return candidate
 
     def list(self, role: AgentRole, session_id: str) -> tuple[JournalEvent, ...]:
-        raw = self._store.search(self._namespace(role, session_id), limit=10_000)
+        raw = self._store.search(
+            self._namespace(role, session_id),
+            filter={"role": role.value, "session_id": session_id},
+            limit=10_000,
+        )
+        events = (JournalEvent.model_validate_json(json.dumps(item)) for item in raw)
         return tuple(
             sorted(
-                (JournalEvent.model_validate_json(json.dumps(item)) for item in raw),
+                (
+                    event
+                    for event in events
+                    if event.role is role and event.session_id == session_id
+                ),
                 key=lambda event: event.sequence,
             )
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +54,16 @@ class AutonomousAgentRunner:
     ) -> AgentRunResult:
         profile = self.profiles.load(role)
         bounded_evidence = self._without_producer_reasoning(evidence)
-        prompt = self._prompt(profile, objective, bounded_evidence)
+        authority = {
+            "role": role.value,
+            "session_id": session_id,
+            "run_id": run_id,
+            "task_id": task_id,
+            "repository_revision": repository_revision,
+            "created_at": created_at.isoformat(),
+        }
+        response_format = self._response_format(role, authority)
+        prompt = self._prompt(profile, objective, bounded_evidence, authority, response_format)
         self.journal.append(
             event_id=f"{run_id}:{role.value}:observation",
             role=role,
@@ -100,6 +110,7 @@ class AutonomousAgentRunner:
                 role,
                 prompt,
                 allowed_tools=profile.allowed_tools,
+                response_format=response_format,
                 audit=audit_tool,
             )
             output = OUTPUT_MODELS[role].model_validate_json(turn.content)
@@ -111,6 +122,7 @@ class AutonomousAgentRunner:
             or output.run_id != run_id
             or output.task_id != task_id
             or output.repository_revision != repository_revision
+            or output.created_at != created_at
         ):
             record_validation_failure("AuthorityMismatch")
             raise ValueError("agent output authority does not match the controller request")
@@ -162,7 +174,14 @@ class AutonomousAgentRunner:
             )
         return AgentRunResult(output, tuple(decisions), turn)
 
-    def _prompt(self, profile, objective: str, evidence: Mapping[str, object]) -> str:
+    def _prompt(
+        self,
+        profile,
+        objective: str,
+        evidence: Mapping[str, object],
+        authority: Mapping[str, str],
+        response_format: Mapping[str, object],
+    ) -> str:
         skill_text: list[str] = []
         for relative in profile.skills:
             path = (self.repository_root / relative).resolve()
@@ -174,12 +193,35 @@ class AutonomousAgentRunner:
                 profile.soul,
                 f"Role: {profile.profile_id.value}",
                 f"Objective: {objective}",
+                "Controller-owned fields; copy these values exactly:\n"
+                + json.dumps(authority, sort_keys=True),
                 "Approved skills:\n" + "\n---\n".join(skill_text),
                 "Evidence:\n" + json.dumps(evidence, sort_keys=True),
                 f"Return only JSON matching {profile.output_contract}:\n"
-                + json.dumps(OUTPUT_MODELS[profile.profile_id].model_json_schema(), sort_keys=True),
+                + json.dumps(response_format, sort_keys=True),
             )
         )
+
+    @staticmethod
+    def _response_format(role: AgentRole, authority: Mapping[str, str]) -> dict[str, object]:
+        schema = deepcopy(OUTPUT_MODELS[role].model_json_schema())
+
+        def bind(value) -> None:
+            if isinstance(value, dict):
+                properties = value.get("properties")
+                if isinstance(properties, dict):
+                    for field, expected in authority.items():
+                        definition = properties.get(field)
+                        if isinstance(definition, dict):
+                            definition["const"] = expected
+                for nested in value.values():
+                    bind(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    bind(nested)
+
+        bind(schema)
+        return schema
 
     @classmethod
     def _without_producer_reasoning(cls, value):

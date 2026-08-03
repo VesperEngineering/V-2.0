@@ -641,14 +641,19 @@ class LocalPlatformService:
             claimed = AgentWorkQueue(persistence.store).claim(
                 worker_id, self._clock(), lease_seconds=900
             )
-        result = self.run_agent(
-            claimed.role.value,
-            claimed.session_id,
-            claimed.objective,
-            repository_revision,
-            evidence,
-            prior_session_date,
-        )
+        try:
+            result = self.run_agent(
+                claimed.role.value,
+                claimed.session_id,
+                claimed.objective,
+                repository_revision,
+                evidence,
+                prior_session_date,
+            )
+        except Exception:
+            with open_persistence(self.paths) as persistence:
+                AgentWorkQueue(persistence.store).fail(claimed.work_id, worker_id)
+            raise
         with open_persistence(self.paths) as persistence:
             completed = AgentWorkQueue(persistence.store).complete(claimed.work_id, worker_id)
         return {**result, "work": completed.model_dump(mode="json")}

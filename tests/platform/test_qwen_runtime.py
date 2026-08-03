@@ -43,6 +43,27 @@ def test_ollama_client_pins_model_context_and_loopback_endpoint():
     assert response.prompt_tokens == 12
 
 
+def test_ollama_client_sends_response_schema_with_deterministic_sampling():
+    calls = []
+    schema = {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}},
+        "required": ["summary"],
+    }
+
+    def transport(url, payload, timeout):
+        calls.append((url, payload, timeout))
+        return {"message": {"content": '{"summary":"done"}'}, "prompt_eval_count": 12}
+
+    OllamaClient(transport=transport).chat(
+        [{"role": "user", "content": "hello"}], response_format=schema
+    )
+
+    payload = calls[0][1]
+    assert payload["format"] == schema
+    assert payload["options"]["temperature"] == 0
+
+
 def test_ollama_client_rejects_missing_observed_usage():
     client = OllamaClient(transport=lambda *_: {"message": {"content": "no usage"}})
     with pytest.raises(OllamaProtocolError):
@@ -148,6 +169,64 @@ def test_turn_executes_allowlisted_tool_then_returns_content(tmp_path):
     assert "output_sha256" in audit[0]
 
 
+def test_turn_separates_tool_calls_from_final_structured_response(tmp_path):
+    schema = {"type": "object", "properties": {"summary": {"type": "string"}}}
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "notes.txt").write_text("bounded", encoding="utf-8")
+    seen = []
+    responses = iter(
+        (
+            type(
+                "Response",
+                (),
+                {
+                    "content": "",
+                    "prompt_tokens": 5,
+                    "tool_calls": (
+                        AgentToolRequest(name="read_file", arguments={"path": "notes.txt"}),
+                    ),
+                },
+            )(),
+            type(
+                "Response",
+                (),
+                {"content": "```json\n{}\n```", "prompt_tokens": 8, "tool_calls": ()},
+            )(),
+            type(
+                "Response",
+                (),
+                {"content": '{"summary":"done"}', "prompt_tokens": 9, "tool_calls": ()},
+            )(),
+        )
+    )
+
+    class Client:
+        def chat(self, _messages, tools=(), response_format=None):
+            seen.append(
+                {
+                    "tools": tuple(tool["function"]["name"] for tool in tools),
+                    "response_format": response_format,
+                    "has_tool_result": any(message.get("role") == "tool" for message in _messages),
+                }
+            )
+            return next(responses)
+
+    result = QwenTurnRunner(Client(), AgentToolGateway(root), tmp_path / "state").run(
+        AgentRole.PRODUCT,
+        "inspect",
+        allowed_tools=("read_file",),
+        response_format=schema,
+    )
+
+    assert result.content == '{"summary":"done"}'
+    assert seen == [
+        {"tools": ("read_file",), "response_format": None, "has_tool_result": False},
+        {"tools": ("read_file",), "response_format": None, "has_tool_result": True},
+        {"tools": (), "response_format": schema, "has_tool_result": True},
+    ]
+
+
 def test_turn_honors_narrower_profile_tool_allowlist(tmp_path):
     seen = []
 
@@ -188,12 +267,16 @@ def test_turn_rejects_model_invented_tool_outside_profile_allowlist(tmp_path):
 
 def test_qwen_specialist_adapter_returns_existing_receipt_contract(tmp_path):
     now = datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc)
-    client = OllamaClient(
-        transport=lambda *_: {
+    payloads = []
+
+    def transport(_url, payload, _timeout):
+        payloads.append(payload)
+        return {
             "message": {"content": "{}", "tool_calls": []},
             "prompt_eval_count": 10,
         }
-    )
+
+    client = OllamaClient(transport=transport)
     adapter = QwenSpecialistAdapter(tmp_path, tmp_path / "state", client=client, clock=lambda: now)
     request = SpecialistInput(
         run_id="run",
@@ -221,6 +304,9 @@ def test_qwen_specialist_adapter_returns_existing_receipt_contract(tmp_path):
     assert receipt.model == "qwen:64k"
     assert receipt.authentication_type == "local-ollama"
     assert receipt.final_response == "{}"
+    assert "tools" in payloads[0] and "format" not in payloads[0]
+    assert payloads[1]["format"] == {"type": "object"}
+    assert "tools" not in payloads[1]
 
 
 def test_service_accepts_qwen_runtime_without_fallback(tmp_path):

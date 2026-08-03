@@ -107,3 +107,16 @@ class AgentWorkQueue:
         )
         self.store.put(_NAMESPACE, work_id, completed.model_dump(mode="json"))
         return completed
+
+    def fail(self, work_id: str, worker_id: str) -> AgentWorkItem:
+        raw = self.store.get(_NAMESPACE, work_id)
+        if raw is None:
+            raise WorkQueueEmpty(f"unknown work item: {work_id}")
+        item = _load(raw)
+        if item.status != "claimed" or item.claimed_by != worker_id:
+            raise WorkQueueEmpty("work item is not owned by this worker")
+        failed = item.model_copy(
+            update={"status": "failed", "claimed_by": None, "lease_expires_at": None}
+        )
+        self.store.put(_NAMESPACE, work_id, failed.model_dump(mode="json"))
+        return failed
