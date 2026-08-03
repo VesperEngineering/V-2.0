@@ -344,6 +344,7 @@ class AutonomousAgentRunner:
                     )
                     value["maxItems"] = min(int(value.get("maxItems", limit)), limit)
                     if field_name == "evidence_ids" and allowed_evidence_ids:
+                        value["minItems"] = max(int(value.get("minItems", 0)), 1)
                         items = value.get("items")
                         if isinstance(items, dict):
                             items["enum"] = allowed_evidence_ids
