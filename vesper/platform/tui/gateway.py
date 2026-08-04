@@ -66,6 +66,7 @@ from .live_readiness import unavailable_live_readiness
 from .snapshot import diff_snapshots, requires_full_snapshot
 from .ports import PlatformRuntimeFacts, SourceSample
 from .projections.platform_runtime import platform_runtime_control_binding
+from .recovery import RecoveryReport, RecoveryService
 from .views import (
     AgentsView,
     ConsoleSnapshot,
@@ -187,10 +188,13 @@ class Gateway:
         search_service: GlobalSearchService | None = None,
         command_registry: CommandRegistry | None = None,
         platform_runtime_reader: _PlatformRuntimeReadPort | None = None,
+        recovery_service: RecoveryService | None = None,
         logon_sid_provider: Callable[[], str] = current_logon_sid,
     ) -> None:
         if not callable(logon_sid_provider):
             raise TypeError("logon_sid_provider must be callable")
+        if recovery_service is not None and type(recovery_service) is not RecoveryService:
+            raise TypeError("recovery_service must be a RecoveryService")
         self._verifier_path = Path(state_root) / "password-verifier.json"
         self._password_store = PasswordStore(self._verifier_path)
         self._lease = ControlLease()
@@ -206,6 +210,7 @@ class Gateway:
         self._command_registry: CommandRegistry | None = None
         self._platform_runtime_reader: _PlatformRuntimeReadPort | None = None
         self._platform_runtime_sample = self._unavailable_platform_runtime_sample()
+        self._recovery_service = recovery_service
         self._logon_sid_provider = logon_sid_provider
         self._operator_id_value: str | None = None
         if search_service is not None:
@@ -222,6 +227,13 @@ class Gateway:
     @property
     def search_service(self) -> GlobalSearchService | None:
         return self._search_service
+
+    def recovery_report(self) -> RecoveryReport | None:
+        """Expose read-only recovery facts; this method cannot resume V20."""
+
+        with self._control_lock:
+            service = self._recovery_service
+        return None if service is None else service.inspect()
 
     @property
     def operator_id(self) -> str:
