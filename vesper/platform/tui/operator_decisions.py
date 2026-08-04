@@ -8,7 +8,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from pydantic import TypeAdapter
 
@@ -97,7 +97,9 @@ class OperatorDecisionStore:
         request: CommandRequest,
         context: CommandContext,
         claim_token: str,
-        decided_at_utc: datetime,
+        decided_at_utc: datetime | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ) -> tuple[OperatorDecision, CommandReceipt]:
         self._require_open()
         if type(request) is not CommandRequest:
@@ -108,21 +110,15 @@ class OperatorDecisionStore:
             raise OperatorDecisionError("operator decisions require approval.hold")
         if request.reason is None:
             raise OperatorDecisionError("approval.hold requires a reason")
-        decided_at = _UTC.validate_python(decided_at_utc, strict=True)
-        decision_id = "tui-decision:" + hashlib.sha256(
-            request.command_id.encode("utf-8")
-        ).hexdigest()
-        decision = OperatorDecision(
-            decision_id=decision_id,
-            command_id=request.command_id,
-            run_id=request.payload.run_id,
-            checkpoint_id=request.payload.checkpoint_id,
-            operator_id=context.operator_id,
-            reason=request.reason,
-            decision="hold",
-            decided_at_utc=decided_at,
+        if (decided_at_utc is None) == (clock is None):
+            raise TypeError("provide exactly one decision timestamp or clock")
+        fixed_decided_at = (
+            None
+            if decided_at_utc is None
+            else _UTC.validate_python(decided_at_utc, strict=True)
         )
-        content_json = canonical_decision_json(decision)
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable")
 
         with self._ledger.transaction() as connection:
             command = connection.execute(
@@ -153,6 +149,25 @@ class OperatorDecisionStore:
                 )
             ):
                 raise OperatorDecisionConflict("accepted request caller identity differs")
+            decided_at = (
+                fixed_decided_at
+                if fixed_decided_at is not None
+                else _UTC.validate_python(clock(), strict=True)
+            )
+            decision_id = "tui-decision:" + hashlib.sha256(
+                request.command_id.encode("utf-8")
+            ).hexdigest()
+            decision = OperatorDecision(
+                decision_id=decision_id,
+                command_id=request.command_id,
+                run_id=request.payload.run_id,
+                checkpoint_id=request.payload.checkpoint_id,
+                operator_id=context.operator_id,
+                reason=request.reason,
+                decision="hold",
+                decided_at_utc=decided_at,
+            )
+            content_json = canonical_decision_json(decision)
             existing = connection.execute(
                 "SELECT * FROM operator_decisions WHERE command_id = ?",
                 (request.command_id,),
