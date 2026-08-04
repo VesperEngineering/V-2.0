@@ -123,9 +123,7 @@ pub fn render_orders(frame: &mut Frame<'_>, area: Rect, view: &OrdersView, state
     );
 
     let mut owner_lines = if view.reconciliation_agents.is_empty() {
-        vec![Line::from(
-            "[?] OWNER UNAVAILABLE - No reconciliation task reported.",
-        )]
+        vec![Line::from("No reconciliation tasks reported.")]
     } else {
         view.reconciliation_agents
             .iter()

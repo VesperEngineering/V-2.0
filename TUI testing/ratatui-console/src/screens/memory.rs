@@ -88,39 +88,43 @@ fn render_rows(
                     vec![Line::from("SEARCHABLE | REVERSIBLE | NEVER DELETED")]
                 }
             };
+            let rows = view
+                .rows
+                .iter()
+                .filter(|row| row.status == wanted)
+                .skip(if focused {
+                    memory_offset(view, state, wanted)
+                } else {
+                    0
+                })
+                .map(|row| {
+                    let (badge, style) = match row.status {
+                        MemoryStatus::Core => ("[OK] CORE", state.theme.palette().resolved),
+                        MemoryStatus::Archived => ("[A] ARCHIVED", base_style(state)),
+                    };
+                    Line::from(vec![
+                        Span::raw(marker(state, row.memory_id.as_str(), DetailKind::Memory)),
+                        Span::styled(badge, style),
+                        Span::raw(format!(
+                            " {} | {} | {} | Evidence {}",
+                            row.memory_id.as_str(),
+                            sanitize(row.summary.as_str()),
+                            format_eastern_time(&row.updated_at_utc),
+                            ids(&row.evidence_ids)
+                        )),
+                    ])
+                })
+                .collect::<Vec<_>>();
             policy
                 .into_iter()
-                .chain(
-                    view.rows
-                        .iter()
-                        .filter(|row| row.status == wanted)
-                        .skip(if focused {
-                            memory_offset(view, state, wanted)
-                        } else {
-                            0
-                        })
-                        .map(|row| {
-                            let (badge, style) = match row.status {
-                                MemoryStatus::Core => ("[OK] CORE", state.theme.palette().resolved),
-                                MemoryStatus::Archived => ("[A] ARCHIVED", base_style(state)),
-                            };
-                            Line::from(vec![
-                                Span::raw(marker(
-                                    state,
-                                    row.memory_id.as_str(),
-                                    DetailKind::Memory,
-                                )),
-                                Span::styled(badge, style),
-                                Span::raw(format!(
-                                    " {} | {} | {} | Evidence {}",
-                                    row.memory_id.as_str(),
-                                    sanitize(row.summary.as_str()),
-                                    format_eastern_time(&row.updated_at_utc),
-                                    ids(&row.evidence_ids)
-                                )),
-                            ])
-                        }),
-                )
+                .chain(if rows.is_empty() {
+                    vec![Line::from(match wanted {
+                        MemoryStatus::Core => "No core memories reported.",
+                        MemoryStatus::Archived => "No archived memories reported.",
+                    })]
+                } else {
+                    rows
+                })
                 .collect()
         },
         |message| vec![Line::from(message)],
@@ -167,6 +171,9 @@ fn render_history(
                         ])
                     }),
             );
+            if view.history.is_empty() {
+                lines.push(Line::from("No memory changes reported."));
+            }
             lines
         },
         |message| vec![Line::from(message)],

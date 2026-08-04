@@ -45,7 +45,8 @@ fn render_limits(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.limits
+            let lines = view
+                .limits
                 .iter()
                 .skip(if focused {
                     limit_offset(view, state)
@@ -67,7 +68,12 @@ fn render_limits(
                         )),
                     ])
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No risk limits reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
@@ -90,7 +96,8 @@ fn render_approvals(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.approvals
+            let lines = view
+                .approvals
                 .iter()
                 .skip(if focused {
                     approval_offset(view, state)
@@ -120,7 +127,12 @@ fn render_approvals(
                         )),
                     ])
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No approvals reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
@@ -143,7 +155,8 @@ fn render_alerts(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.alerts
+            let lines = view
+                .alerts
                 .iter()
                 .skip(if focused {
                     alert_offset(view, state)
@@ -173,7 +186,12 @@ fn render_alerts(
                         )),
                     ])
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No risk alerts reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
@@ -209,6 +227,9 @@ fn render_metrics(
                     })
                     .map(|row| metric_line(row, state)),
             );
+            if view.metrics.is_empty() {
+                lines.push(Line::from("No risk metrics reported."));
+            }
             lines
         },
         |message| vec![Line::from(message)],

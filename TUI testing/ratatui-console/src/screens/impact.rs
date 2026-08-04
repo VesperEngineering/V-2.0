@@ -51,6 +51,15 @@ fn render_holdings(
         );
         return;
     }
+    if view.holdings.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No holdings reported.")
+                .style(base_style(palette))
+                .block(panel(title, palette)),
+            area,
+        );
+        return;
+    }
     let omit_header = area.height <= 3;
     let row_height = if omit_header {
         1
@@ -107,11 +116,17 @@ fn render_events(
     let palette = palette(state);
     let lines = unavailable_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.events
+            let lines = view
+                .events
                 .iter()
                 .skip(state.scroll_offset)
                 .map(|row| timeline_line(row, palette))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No impact events reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
@@ -135,6 +150,15 @@ fn render_agents(
     if let Some(message) = unavailable_message(view.freshness, view.error.as_deref()) {
         frame.render_widget(
             Paragraph::new(message)
+                .style(base_style(palette))
+                .block(panel(title, palette)),
+            area,
+        );
+        return;
+    }
+    if view.agents.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No agent work reported.")
                 .style(base_style(palette))
                 .block(panel(title, palette)),
             area,

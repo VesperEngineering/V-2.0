@@ -136,6 +136,15 @@ fn render_weights(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
         );
         return;
     }
+    if view.rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No holdings reported.")
+                .style(base_style(palette))
+                .block(panel(format!("PORTFOLIO WEIGHTS | {rank}"), palette)),
+            area,
+        );
+        return;
+    }
     let row_height = table_row_height(state);
     let height = usize::from(area.height.saturating_sub(3) / row_height);
     let rows = view
@@ -183,9 +192,7 @@ fn render_returns(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
     let lines = if let Some(message) = unavailable_message(view.freshness, view.error.as_deref()) {
         vec![Line::from(message)]
     } else if rows.is_empty() {
-        vec![Line::from(
-            "[?] UNAVAILABLE - Return components are unavailable.",
-        )]
+        vec![Line::from("No return components reported.")]
     } else {
         rows.iter().map(return_line).collect()
     };
@@ -213,9 +220,7 @@ fn render_metrics(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
     let lines = if let Some(message) = unavailable_message(view.freshness, view.error.as_deref()) {
         vec![Line::from(message)]
     } else if view.metrics.is_empty() {
-        vec![Line::from(
-            "[?] UNAVAILABLE - Portfolio metrics are unavailable.",
-        )]
+        vec![Line::from("No portfolio metrics reported.")]
     } else {
         view.metrics.iter().map(metric_line).collect()
     };

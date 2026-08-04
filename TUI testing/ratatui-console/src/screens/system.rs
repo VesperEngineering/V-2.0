@@ -61,7 +61,8 @@ fn render_services(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.services
+            let lines = view
+                .services
                 .iter()
                 .skip(if focused {
                     service_offset(view, state)
@@ -85,7 +86,12 @@ fn render_services(
                         )),
                     ])
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No services reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
@@ -102,7 +108,8 @@ fn render_metrics(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.metrics
+            let lines = view
+                .metrics
                 .iter()
                 .skip(if focused {
                     metric_offset(view, state)
@@ -110,7 +117,12 @@ fn render_metrics(
                     0
                 })
                 .map(|row| metric_line(row, state))
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No system metrics reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
@@ -127,7 +139,8 @@ fn render_repositories(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.repositories
+            let lines = view
+                .repositories
                 .iter()
                 .skip(if focused {
                     repository_offset(view, state)
@@ -135,7 +148,12 @@ fn render_repositories(
                     0
                 })
                 .map(|row| repository_line(row, state))
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No repositories reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );

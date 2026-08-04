@@ -34,7 +34,8 @@ fn render_sources(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.sources
+            let lines = view
+                .sources
                 .iter()
                 .skip(if focused {
                     source_offset(view, state)
@@ -42,7 +43,12 @@ fn render_sources(
                     0
                 })
                 .map(|row| source_line(row, state))
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No data sources reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
@@ -118,7 +124,8 @@ fn render_evidence(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.evidence
+            let lines = view
+                .evidence
                 .iter()
                 .skip(if focused {
                     evidence_offset(view, state)
@@ -136,7 +143,12 @@ fn render_evidence(
                         sha256_text(&row.sha256)
                     ))
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            if lines.is_empty() {
+                vec![Line::from("No evidence reported.")]
+            } else {
+                lines
+            }
         },
         |message| vec![Line::from(message)],
     );
