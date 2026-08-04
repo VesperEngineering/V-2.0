@@ -213,6 +213,12 @@ impl<'de> Deserialize<'de> for Sha256Hex {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecimalString(String);
 
+impl DecimalString {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Serialize for DecimalString {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -262,6 +268,12 @@ fn is_decimal_string(value: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Priority(u8);
+
+impl Priority {
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
 
 impl<'de> Deserialize<'de> for Priority {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

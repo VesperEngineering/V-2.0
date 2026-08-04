@@ -162,7 +162,7 @@ fn next_rebalance_uses_eastern_time_and_keeps_narrow_labels_visible() {
 }
 
 #[test]
-fn unlocked_shell_has_six_sections_in_exact_order_and_truthful_phase_one_content() {
+fn unlocked_shell_has_six_sections_and_truthful_snapshot_unavailable_content() {
     let state = AppState::controller();
     let text = normalized_render(120, 36, &state);
     let labels = [
@@ -182,6 +182,7 @@ fn unlocked_shell_has_six_sections_in_exact_order_and_truthful_phase_one_content
     assert!(text.contains("MODE UNKNOWN"));
     assert!(text.contains("UNAVAILABLE"));
     assert!(!text.contains("STOPPED"));
+    assert!(text.contains("UNAVAILABLE - Controller snapshot has not arrived."));
     assert!(text.contains("UNAVAILABLE - Phase 1 provides the secure console shell only."));
 }
 
@@ -272,7 +273,7 @@ fn oversized_header_text_is_bounded_so_later_labels_stay_visible() {
 }
 
 #[test]
-fn all_ten_screens_are_truthful_placeholders_in_wide_and_narrow_views() {
+fn all_ten_screens_show_their_current_truthful_availability() {
     let screens = [
         (Screen::Impact, "Impact"),
         (Screen::Portfolio, "Portfolio"),
@@ -292,10 +293,13 @@ fn all_ten_screens_are_truthful_placeholders_in_wide_and_narrow_views() {
             state.screen = screen;
             let text = normalized_render(width, if width == 120 { 36 } else { 24 }, &state);
             assert!(text.contains(&format!("SCREEN: {name}")), "{width} {name}");
-            assert!(
-                text.contains("UNAVAILABLE - Phase 1 provides the secure console shell only."),
-                "{width} {name}"
-            );
+            let expected = if matches!(screen, Screen::Impact | Screen::Portfolio | Screen::Orders)
+            {
+                "UNAVAILABLE - Controller snapshot has not arrived."
+            } else {
+                "UNAVAILABLE - Phase 1 provides the secure console shell only."
+            };
+            assert!(text.contains(expected), "{width} {name}\n{text}");
         }
     }
 }

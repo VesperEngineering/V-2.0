@@ -14,6 +14,9 @@ use windows_sys::Win32::System::Time::{
 
 use crate::contract::{AlertSeverity, Freshness, OperatingMode, UtcTimestamp};
 use crate::layout::{ViewportClass, shell_layout};
+use crate::screens::impact::render_impact;
+use crate::screens::orders::render_orders;
+use crate::screens::portfolio::render_portfolio;
 use crate::state::{AccessState, AppState, AuthFeedback, AuthStage, Screen};
 use crate::theme::Palette;
 
@@ -284,8 +287,41 @@ fn render_screen(
     state: &AppState,
     palette: Palette,
 ) {
+    if let Some(snapshot) = state.snapshot.as_ref() {
+        let screen_state = state.screen_state();
+        match state.screen {
+            Screen::Impact => {
+                render_impact(frame, area, &snapshot.impact, &screen_state);
+                return;
+            }
+            Screen::Portfolio => {
+                render_portfolio(frame, area, &snapshot.portfolio, &screen_state);
+                return;
+            }
+            Screen::Orders => {
+                render_orders(frame, area, &snapshot.orders, &screen_state);
+                return;
+            }
+            Screen::Agents
+            | Screen::ModelsRegime
+            | Screen::Timeline
+            | Screen::RiskApprovals
+            | Screen::DataEvidence
+            | Screen::Memory
+            | Screen::System => {}
+        }
+    }
+
     let title = format!("SCREEN: {}", screen_name(state.screen));
-    let content = Paragraph::new(PHASE_ONE_UNAVAILABLE)
+    let message = if matches!(
+        state.screen,
+        Screen::Impact | Screen::Portfolio | Screen::Orders
+    ) {
+        "UNAVAILABLE - Controller snapshot has not arrived."
+    } else {
+        PHASE_ONE_UNAVAILABLE
+    };
+    let content = Paragraph::new(message)
         .style(base_style(palette))
         .wrap(Wrap { trim: true });
     if viewport == ViewportClass::Narrow {
@@ -297,7 +333,7 @@ fn render_screen(
         Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).split(area);
     frame.render_widget(content.block(panel(title, palette)), columns[0]);
     frame.render_widget(
-        Paragraph::new(PHASE_ONE_UNAVAILABLE)
+        Paragraph::new(message)
             .style(base_style(palette))
             .wrap(Wrap { trim: true })
             .block(panel("PHASE 1 AVAILABILITY", palette)),
@@ -317,6 +353,16 @@ fn render_agent_input(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
     let text = if state.preferences_unavailable() {
         "1-9,0 Screens | q Close TUI only | PREFERENCES UNAVAILABLE"
+    } else if state.snapshot.is_some() {
+        match state.screen {
+            Screen::Impact if area.width < 120 => {
+                "Up/Down Holdings | Left/Right Panels | o Open | q Close TUI"
+            }
+            Screen::Impact => "Up/Down Holdings | o Open | q Close TUI",
+            Screen::Portfolio => "Up/Down Holdings | Left/Right Period | o Open | q Close TUI",
+            Screen::Orders => "Up/Down Scroll | q Close TUI",
+            _ => "1-9,0 Screens | q Close TUI only | Phase 1 secure shell",
+        }
     } else {
         "1-9,0 Screens | q Close TUI only | Phase 1 secure shell"
     };

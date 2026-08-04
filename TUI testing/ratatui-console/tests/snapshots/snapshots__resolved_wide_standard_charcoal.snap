@@ -1,6 +1,5 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 623
 expression: "normalized_render(120, 36, & state)"
 ---
 ┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────────────────────────────────────────────┐
@@ -18,18 +17,18 @@ expression: "normalized_render(120, 36, & state)"
 │[OK] RESOLVED - Issue repaired.                                                                                       │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌SCREEN: Impact──────────────────────────────────────────────────────────────┐┌PHASE 1 AVAILABILITY────────────────────┐
-│UNAVAILABLE - Phase 1 provides the secure console shell only.               ││UNAVAILABLE - Phase 1 provides the      │
-│                                                                            ││secure console shell only.              │
+┌HOLDINGS────────────────────────────────────────────────────────────────────┐┌IMPACT FEED─────────────────────────────┐
+│  Symbol             Current            Proposed          Approved          ││[>] ACTIVE 2026-08-02 20:00:00 EDT  AAPL│
+│  AAPL               10.00%             11.00%            -                 ││review started                          │
 │                                                                            ││                                        │
 │                                                                            ││                                        │
 │                                                                            ││                                        │
 │                                                                            ││                                        │
 │                                                                            ││                                        │
-│                                                                            ││                                        │
-│                                                                            ││                                        │
-│                                                                            ││                                        │
-│                                                                            ││                                        │
+│                                                                            │└────────────────────────────────────────┘
+│                                                                            │┌AGENT WORK──────────────────────────────┐
+│                                                                            ││Agent      Task            Stage    P   │
+│                                                                            ││[ ] portfo Review AAPL     RUNNING  10  │
 │                                                                            ││                                        │
 │                                                                            ││                                        │
 └────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────┘
@@ -37,5 +36,5 @@ expression: "normalized_render(120, 36, & state)"
 │UNAVAILABLE - Phase 1 provides the secure console shell only.                                                         │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│1-9,0 Screens | q Close TUI only | Phase 1 secure shell                                                               │
+│Up/Down Holdings | o Open | q Close TUI                                                                               │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

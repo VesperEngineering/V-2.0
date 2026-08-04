@@ -6,6 +6,7 @@ use crate::contract::{
 use crate::input::InputEvent;
 use crate::layout::DisplayMode;
 use crate::preferences::{LoadedPreferences, ScreenId, ScreenPreferences, UiPreferences};
+use crate::screens::{PerformancePeriod, ScreenState};
 use crate::theme::Theme;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -179,6 +180,7 @@ struct ViewKey {
     theme: Theme,
     display_mode: DisplayMode,
     preferences_unavailable: bool,
+    screen_state: ScreenState,
 }
 
 #[derive(Debug)]
@@ -202,6 +204,7 @@ pub struct AppState {
     preferences: UiPreferences,
     preferences_unavailable: bool,
     preferences_save_pending: bool,
+    screen_state: ScreenState,
 }
 
 impl AppState {
@@ -248,6 +251,7 @@ impl AppState {
             preferences: UiPreferences::default(),
             preferences_unavailable: false,
             preferences_save_pending: false,
+            screen_state: ScreenState::default(),
         }
     }
 
@@ -290,6 +294,26 @@ impl AppState {
         self.preferences.display_mode
     }
 
+    pub fn screen_state(&self) -> ScreenState {
+        let mut state = self.screen_state.clone();
+        state.theme = self.theme();
+        state.display_mode = self.display_mode();
+        state
+    }
+
+    pub fn set_performance_period(&mut self, period: PerformancePeriod) {
+        if self.screen_state.performance_period != period {
+            self.screen_state.performance_period = period;
+            self.preferences
+                .screens
+                .entry(ScreenId::Portfolio)
+                .or_default()
+                .performance_period = Some(period);
+            self.preferences_save_pending = true;
+            self.dirty = true;
+        }
+    }
+
     pub fn preferences(&self) -> &UiPreferences {
         &self.preferences
     }
@@ -300,6 +324,12 @@ impl AppState {
 
     pub fn apply_loaded_preferences(&mut self, loaded: LoadedPreferences) {
         self.preferences = loaded.preferences;
+        self.screen_state.performance_period = self
+            .preferences
+            .screens
+            .get(&ScreenId::Portfolio)
+            .and_then(|preferences| preferences.performance_period)
+            .unwrap_or_default();
         self.preferences_unavailable = loaded.unavailable_reason.is_some();
         self.preferences_save_pending = false;
         self.dirty = true;
@@ -321,7 +351,18 @@ impl AppState {
         }
     }
 
-    pub fn set_screen_preferences(&mut self, screen: ScreenId, preferences: ScreenPreferences) {
+    pub fn set_screen_preferences(&mut self, screen: ScreenId, mut preferences: ScreenPreferences) {
+        if screen == ScreenId::Portfolio {
+            if let Some(period) = preferences.performance_period {
+                self.screen_state.performance_period = period;
+            } else {
+                preferences.performance_period = self
+                    .preferences
+                    .screens
+                    .get(&screen)
+                    .and_then(|current| current.performance_period);
+            }
+        }
         if self.preferences.screens.get(&screen) != Some(&preferences) {
             self.preferences.screens.insert(screen, preferences);
             self.preferences_save_pending = true;
@@ -659,6 +700,7 @@ impl AppState {
             theme: self.theme(),
             display_mode: self.display_mode(),
             preferences_unavailable: self.preferences_unavailable,
+            screen_state: self.screen_state.clone(),
         }
     }
 
@@ -726,6 +768,7 @@ impl AppState {
         if event == InputEvent::Escape {
             self.mode = LocalMode::Browse;
             self.local_input.clear();
+            self.screen_state.detail_open = false;
             return Vec::new();
         }
 
@@ -751,21 +794,41 @@ impl AppState {
             };
         }
 
+        match event {
+            InputEvent::Up => {
+                self.move_vertical(false);
+                return Vec::new();
+            }
+            InputEvent::Down => {
+                self.move_vertical(true);
+                return Vec::new();
+            }
+            InputEvent::Left => {
+                self.move_horizontal(false);
+                return Vec::new();
+            }
+            InputEvent::Right => {
+                self.move_horizontal(true);
+                return Vec::new();
+            }
+            _ => {}
+        }
+
         let InputEvent::Char(key) = event else {
             return Vec::new();
         };
         match key {
-            '1' => self.screen = Screen::Impact,
-            '2' => self.screen = Screen::Portfolio,
-            '3' => self.screen = Screen::Orders,
-            '4' => self.screen = Screen::Agents,
-            '5' => self.screen = Screen::ModelsRegime,
-            '6' => self.screen = Screen::Timeline,
-            '7' => self.screen = Screen::RiskApprovals,
-            '8' => self.screen = Screen::DataEvidence,
-            '9' => self.screen = Screen::Memory,
-            '0' => self.screen = Screen::System,
-            'o' => self.mode = LocalMode::Open,
+            '1' => self.select_screen(Screen::Impact),
+            '2' => self.select_screen(Screen::Portfolio),
+            '3' => self.select_screen(Screen::Orders),
+            '4' => self.select_screen(Screen::Agents),
+            '5' => self.select_screen(Screen::ModelsRegime),
+            '6' => self.select_screen(Screen::Timeline),
+            '7' => self.select_screen(Screen::RiskApprovals),
+            '8' => self.select_screen(Screen::DataEvidence),
+            '9' => self.select_screen(Screen::Memory),
+            '0' => self.select_screen(Screen::System),
+            'o' => self.open_selected(),
             '/' => self.mode = LocalMode::Search,
             'f' => self.mode = LocalMode::Filter,
             ':' => self.mode = LocalMode::Menu,
@@ -775,6 +838,122 @@ impl AppState {
             _ => {}
         }
         Vec::new()
+    }
+
+    fn select_screen(&mut self, screen: Screen) {
+        if self.screen == screen {
+            return;
+        }
+        self.screen = screen;
+        self.mode = LocalMode::Browse;
+        self.screen_state.scroll_offset = 0;
+        self.screen_state.selected_id = None;
+        self.screen_state.detail_open = false;
+        self.screen_state.narrow_panel = 0;
+    }
+
+    fn move_vertical(&mut self, forward: bool) {
+        let ids = self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
+            let rows = match self.screen {
+                Screen::Impact => &snapshot.impact.holdings,
+                Screen::Portfolio => &snapshot.portfolio.rows,
+                _ => return Vec::new(),
+            };
+            rows.iter()
+                .map(|row| row.symbol.as_str().to_owned())
+                .collect()
+        });
+        if !ids.is_empty() {
+            let current = self
+                .screen_state
+                .selected_id
+                .as_deref()
+                .and_then(|selected| ids.iter().position(|id| id == selected))
+                .unwrap_or_else(|| self.screen_state.scroll_offset.min(ids.len() - 1));
+            let next = if forward {
+                current.saturating_add(1).min(ids.len() - 1)
+            } else {
+                current.saturating_sub(1)
+            };
+            self.screen_state.selected_id = Some(ids[next].clone());
+            self.screen_state.scroll_offset = next;
+            return;
+        }
+        if self.screen == Screen::Orders {
+            let maximum = self.snapshot.as_ref().map_or(0, |snapshot| {
+                snapshot
+                    .orders
+                    .rows
+                    .iter()
+                    .map(|order| 4 + order.fills.len().max(1))
+                    .sum::<usize>()
+                    .saturating_sub(1)
+            });
+            self.screen_state.scroll_offset = if forward {
+                self.screen_state
+                    .scroll_offset
+                    .saturating_add(1)
+                    .min(maximum)
+            } else {
+                self.screen_state.scroll_offset.saturating_sub(1)
+            };
+        }
+    }
+
+    fn move_horizontal(&mut self, forward: bool) {
+        match self.screen {
+            Screen::Impact => {
+                self.screen_state.narrow_panel = if forward {
+                    (self.screen_state.narrow_panel + 1) % 3
+                } else {
+                    (self.screen_state.narrow_panel + 2) % 3
+                };
+            }
+            Screen::Portfolio => {
+                let period = match (self.screen_state.performance_period, forward) {
+                    (PerformancePeriod::Today, true) | (PerformancePeriod::SinceStart, false) => {
+                        PerformancePeriod::SinceRebalance
+                    }
+                    (PerformancePeriod::SinceRebalance, true)
+                    | (PerformancePeriod::Today, false) => PerformancePeriod::SinceStart,
+                    (PerformancePeriod::SinceStart, true)
+                    | (PerformancePeriod::SinceRebalance, false) => PerformancePeriod::Today,
+                };
+                self.set_performance_period(period);
+            }
+            _ => {}
+        }
+    }
+
+    fn open_selected(&mut self) {
+        self.mode = LocalMode::Open;
+        if !matches!(self.screen, Screen::Impact | Screen::Portfolio) {
+            return;
+        }
+        let symbol = self.snapshot.as_ref().and_then(|snapshot| {
+            let rows = if self.screen == Screen::Impact {
+                &snapshot.impact.holdings
+            } else {
+                &snapshot.portfolio.rows
+            };
+            self.screen_state
+                .selected_id
+                .as_deref()
+                .and_then(|selected| {
+                    rows.iter()
+                        .find(|row| row.symbol.as_str() == selected)
+                        .map(|row| row.symbol.as_str().to_owned())
+                })
+                .or_else(|| {
+                    rows.get(self.screen_state.scroll_offset)
+                        .map(|row| row.symbol.as_str().to_owned())
+                })
+        });
+        if let Some(symbol) = symbol {
+            self.screen = Screen::Portfolio;
+            self.screen_state.selected_id = Some(symbol);
+            self.screen_state.detail_open = true;
+        }
     }
 
     fn clear_auth(&mut self) {

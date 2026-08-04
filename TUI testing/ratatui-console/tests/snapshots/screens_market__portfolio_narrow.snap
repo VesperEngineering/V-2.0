@@ -1,0 +1,32 @@
+---
+source: tests/screens_market.rs
+expression: narrow_portfolio
+---
+┌PORTFOLIO WEIGHTS | EXECUTED RANK: confirmed reconciliation───────────────┐
+│  Symbol            Current            Proposed          Approved         │
+│                                                                          │
+│  AAPL              10.00%             11.00%            -                │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+┌PERFORMANCE | TODAY───────────────────────────────────────────────────────┐
+│PRICE: 0.01                                                               │
+│DIVIDENDS: 0                                                              │
+│CASH INTEREST: 0                                                          │
+│FEES: 0                                                                   │
+│S&P 500 TOTAL RETURN: 0.005                                               │
+└──────────────────────────────────────────────────────────────────────────┘
+┌PORTFOLIO METRICS - EQUAL WEIGHT──────────────────────────────────────────┐
+│metric:cpu: 12.5000 percent [FRESH]                                       │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘

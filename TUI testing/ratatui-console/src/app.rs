@@ -79,6 +79,10 @@ pub fn key_to_input(key: KeyEvent) -> Option<InputEvent> {
         KeyCode::Enter => Some(InputEvent::Enter),
         KeyCode::Esc => Some(InputEvent::Escape),
         KeyCode::Backspace => Some(InputEvent::Backspace),
+        KeyCode::Up => Some(InputEvent::Up),
+        KeyCode::Down => Some(InputEvent::Down),
+        KeyCode::Left => Some(InputEvent::Left),
+        KeyCode::Right => Some(InputEvent::Right),
         _ => None,
     }
 }

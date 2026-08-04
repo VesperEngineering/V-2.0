@@ -1,6 +1,5 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 587
 expression: "normalized_render(120, 36, & state)"
 ---
 ┌RUNTIME & MARKET - READ ONLY──────────────────────────────────────────────────────────────────────────────────────────┐
@@ -18,8 +17,8 @@ expression: "normalized_render(120, 36, & state)"
 │[?] ALERTS UNAVAILABLE                                                                                                │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌SCREEN: Impact──────────────────────────────────────────────────────────────┐┌PHASE 1 AVAILABILITY────────────────────┐
-│UNAVAILABLE - Phase 1 provides the secure console shell only.               ││UNAVAILABLE - Phase 1 provides the      │
-│                                                                            ││secure console shell only.              │
+│UNAVAILABLE - Controller snapshot has not arrived.                          ││UNAVAILABLE - Controller snapshot has   │
+│                                                                            ││not arrived.                            │
 │                                                                            ││                                        │
 │                                                                            ││                                        │
 │                                                                            ││                                        │

@@ -7,6 +7,7 @@ use vesper_ratatui_console::preferences::{
     LoadedPreferences, PREFERENCES_VERSION, ScreenId, ScreenPreferences, UiPreferences,
     load_preferences_from, preferences_path_from, read_bounded_preferences, save_preferences_to,
 };
+use vesper_ratatui_console::screens::PerformancePeriod;
 use vesper_ratatui_console::state::{AccessState, AppState};
 use vesper_ratatui_console::theme::Theme;
 
@@ -63,6 +64,7 @@ fn valid_preferences_round_trip_and_atomically_replace_the_previous_file() {
         ScreenPreferences {
             visible_columns: vec!["symbol".to_owned(), "impact".to_owned()],
             panel_sizes: vec![60, 40],
+            performance_period: None,
         },
     );
 
@@ -168,7 +170,22 @@ fn changed_state_persists_through_the_production_helper_and_reloads() {
         ScreenPreferences {
             visible_columns: vec!["symbol".to_owned(), "weight".to_owned()],
             panel_sizes: vec![65, 35],
+            performance_period: None,
         },
+    );
+    state.set_performance_period(PerformancePeriod::SinceStart);
+    state.set_screen_preferences(
+        ScreenId::Portfolio,
+        ScreenPreferences {
+            visible_columns: vec!["symbol".to_owned(), "weight".to_owned()],
+            panel_sizes: vec![60, 40],
+            performance_period: None,
+        },
+    );
+    assert_eq!(
+        state.screen_state().performance_period,
+        PerformancePeriod::SinceStart,
+        "layout edits must not clear the saved performance period"
     );
 
     assert_eq!(
@@ -180,6 +197,12 @@ fn changed_state_persists_through_the_production_helper_and_reloads() {
     assert_eq!(reloaded.preferences, *state.preferences());
     assert_eq!(reloaded.unavailable_reason, None);
     assert!(!state.preferences_unavailable());
+    let mut restored = AppState::controller();
+    restored.apply_loaded_preferences(reloaded);
+    assert_eq!(
+        restored.screen_state().performance_period,
+        PerformancePeriod::SinceStart
+    );
 
     std::fs::remove_dir_all(directory).expect("remove owned test directory");
 }

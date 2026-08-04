@@ -12,6 +12,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::layout::DisplayMode;
+use crate::screens::PerformancePeriod;
 use crate::theme::Theme;
 
 pub const PREFERENCES_VERSION: u16 = 1;
@@ -42,6 +43,8 @@ pub enum ScreenId {
 pub struct ScreenPreferences {
     pub visible_columns: Vec<String>,
     pub panel_sizes: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_period: Option<PerformancePeriod>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

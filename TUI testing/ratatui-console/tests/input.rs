@@ -517,6 +517,21 @@ fn crossterm_conversion_accepts_press_only_and_blocks_modified_character_leakage
         )),
         None
     );
+    for (code, expected) in [
+        (KeyCode::Up, InputEvent::Up),
+        (KeyCode::Down, InputEvent::Down),
+        (KeyCode::Left, InputEvent::Left),
+        (KeyCode::Right, InputEvent::Right),
+    ] {
+        assert_eq!(
+            key_to_input(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            )),
+            Some(expected)
+        );
+    }
 }
 
 #[test]

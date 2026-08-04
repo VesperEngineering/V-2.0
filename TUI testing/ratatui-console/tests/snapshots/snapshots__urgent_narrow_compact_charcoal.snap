@@ -1,6 +1,5 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 614
 expression: "normalized_render(80, 24, & state)"
 ---
 ┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────┐
@@ -17,13 +16,13 @@ expression: "normalized_render(80, 24, & state)"
 ┌ALERTS────────────────────────────────────────────────────────────────────────┐
 │[!] URGENT - Immediate review required.                                       │
 └──────────────────────────────────────────────────────────────────────────────┘
-┌SCREEN: Impact────────────────────────────────────────────────────────────────┐
-│UNAVAILABLE - Phase 1 provides the secure console shell only.                 │
-│                                                                              │
+┌HOLDINGS - PANEL 1/3──────────────────────────────────────────────────────────┐
+│  Symbol             Current             Proposed           Approved          │
+│  AAPL               10.00%              11.00%             -                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────┐
 │UNAVAILABLE - Phase 1 provides the secure console shell only.                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────┐
-│1-9,0 Screens | q Close TUI only | Phase 1 secure shell                       │
+│Up/Down Holdings | Left/Right Panels | o Open | q Close TUI                   │
 └──────────────────────────────────────────────────────────────────────────────┘
