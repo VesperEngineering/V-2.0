@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from threading import Barrier, Thread
 
 import pytest
@@ -118,6 +119,49 @@ def test_concurrent_first_run_setup_allows_one_winner(tmp_path) -> None:
 def test_password_store_corrupt_record_fails_closed(tmp_path) -> None:
     path = tmp_path / "auth.json"
     path.write_text('{"version":1,"salt":"bad"}', encoding="utf-8")
+
+    assert PasswordStore(path).verify("anything") is False
+
+
+def test_password_store_bounds_verifier_file_read(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "auth.json"
+    path.write_bytes(b"x" * (8 * 1024 + 1))
+    real_open = Path.open
+    read_sizes: list[int] = []
+
+    class TrackingFile:
+        def __init__(self, handle) -> None:
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            self._handle.close()
+
+        def read(self, size: int = -1):
+            read_sizes.append(size)
+            return self._handle.read(size)
+
+    def tracking_open(file_path: Path, *args, **kwargs):
+        return TrackingFile(real_open(file_path, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    assert PasswordStore(path).verify("anything") is False
+    assert read_sizes == [8 * 1024 + 1]
+
+
+def test_password_store_corrupt_bytes_fail_closed(tmp_path) -> None:
+    path = tmp_path / "auth.json"
+    path.write_bytes(b"{\xff}")
+
+    assert PasswordStore(path).verify("anything") is False
+
+
+def test_password_store_deeply_nested_json_fails_closed(tmp_path) -> None:
+    path = tmp_path / "auth.json"
+    path.write_text("[" * 1100 + "]" * 1100, encoding="utf-8")
 
     assert PasswordStore(path).verify("anything") is False
 

@@ -137,10 +137,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: P
             )
         };
         let qwen = bounded_text(&qwen, 14);
-        let rebalance = header.next_rebalance_at_utc.as_ref().map_or_else(
-            || "UNAVAILABLE".to_owned(),
-            |value| value.as_str().to_owned(),
-        );
+        let rebalance = header
+            .next_rebalance_at_utc
+            .as_ref()
+            .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time);
         let blockers = header.rebalance_blockers.as_ref().map_or_else(
             || "UNAVAILABLE".to_owned(),
             |items| {

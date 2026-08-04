@@ -143,6 +143,25 @@ fn eastern_time_lookup_failure_keeps_canonical_utc_and_is_visible() {
 }
 
 #[test]
+fn next_rebalance_uses_eastern_time_and_keeps_narrow_labels_visible() {
+    for (utc, expected) in [
+        ("2026-01-16T12:34:56Z", "2026-01-16 07:34:56 EST"),
+        ("2026-07-15T12:34:56Z", "2026-07-15 08:34:56 EDT"),
+    ] {
+        let mut state = AppState::controller();
+        let mut snapshot = alert_snapshot("active", "Work remains active.");
+        snapshot.header.next_rebalance_at_utc = Some(timestamp(utc));
+        state.snapshot = Some(snapshot);
+        state.set_display_mode(DisplayMode::LargeText);
+
+        let text = normalized_render(80, 24, &state);
+
+        assert!(text.contains(&format!("REBALANCE {expected}")), "{text}");
+        assert!(text.contains("BLOCKERS UNAVAILABLE"), "{text}");
+    }
+}
+
+#[test]
 fn unlocked_shell_has_six_sections_in_exact_order_and_truthful_phase_one_content() {
     let state = AppState::controller();
     let text = normalized_render(120, 36, &state);

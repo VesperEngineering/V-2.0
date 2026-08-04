@@ -140,6 +140,9 @@ live data with fixtures, examples, or guesses.
 The Ratatui client and gateway communicate through a duplex Windows named pipe.
 The pipe is restricted to the signed-in Windows account and denies network
 access. No TCP port is opened.
+The signed-in Windows logon is the security boundary; defending against a
+hostile process under that same logon requires a separate OS identity or
+service and is out of scope.
 
 Opening the TUI may start a control-only gateway process, but it must not start
 agents, trading, research, or the V20 runtime. If the runtime is stopped, the

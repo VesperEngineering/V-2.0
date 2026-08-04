@@ -19,6 +19,7 @@ from .contracts import SafeId
 _SALT_BYTES = 16
 _DKLEN = 32
 _MAX_PASSWORD_BYTES = 1024
+_MAX_VERIFIER_RECORD_BYTES = 8 * 1024
 _RECORD_VERSION = 1
 _SCRYPT_N = 32768
 _SCRYPT_R = 8
@@ -109,9 +110,19 @@ class PasswordStore:
 
     def _read_record_fail_closed(self) -> _VerifierRecord:
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            with self._path.open("rb") as verifier_file:
+                raw_bytes = verifier_file.read(_MAX_VERIFIER_RECORD_BYTES + 1)
+            if len(raw_bytes) > _MAX_VERIFIER_RECORD_BYTES:
+                raise ValueError("invalid password verifier")
+            raw = raw_bytes.decode("utf-8")
             body = json.loads(raw, object_pairs_hook=_reject_duplicate_object_pairs)
-        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        except (
+            OSError,
+            RecursionError,
+            UnicodeDecodeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as error:
             raise ValueError("invalid password verifier") from error
         if not isinstance(body, dict) or set(body) != _RECORD_FIELDS:
             raise ValueError("invalid password verifier")
