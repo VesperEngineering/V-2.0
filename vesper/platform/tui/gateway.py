@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
 from collections.abc import Callable
@@ -33,6 +35,20 @@ from .contracts import (
     SnapshotPayload,
     WireEnvelope,
     decode_payload,
+)
+from .views import (
+    AgentsView,
+    ConsoleSnapshot,
+    DataView,
+    ImpactView,
+    MemoryView,
+    ModelsView,
+    OrdersView,
+    PortfolioView,
+    RiskView,
+    ScreenView,
+    SystemView,
+    TimelineView,
 )
 
 _SERVER_VERSION = "0.1.0"
@@ -227,10 +243,10 @@ class Gateway:
                 )
             return (self._error(session, "direction", "Message type is not accepted from clients."),)
 
-    def snapshot(self) -> ShellSnapshot:
+    def snapshot(self) -> ConsoleSnapshot:
         return self._snapshot
 
-    def _unavailable_snapshot(self) -> ShellSnapshot:
+    def _unavailable_snapshot(self) -> ConsoleSnapshot:
         now = self._clock().astimezone(timezone.utc)
         capabilities = tuple(
             CapabilityView(
@@ -240,7 +256,7 @@ class Gateway:
             )
             for capability_id in _ACTION_CAPABILITIES
         )
-        return ShellSnapshot(
+        shell = ShellSnapshot(
             state_version=0,
             generated_at_utc=now,
             header=HeaderView(
@@ -264,6 +280,104 @@ class Gateway:
             alerts=None,
             capabilities=capabilities,
         )
+        impact = ImpactView(
+            **self._unavailable_view("impact"),
+            holdings=(),
+            events=(),
+            agents=(),
+        )
+        portfolio = PortfolioView(
+            **self._unavailable_view("portfolio"),
+            rows=(),
+            returns_today=(),
+            returns_since_rebalance=(),
+            returns_since_start=(),
+            metrics=(),
+            history=(),
+            rank_source=None,
+        )
+        orders = OrdersView(
+            **self._unavailable_view("orders"),
+            rows=(),
+            reconciliation_agents=(),
+            history=(),
+        )
+        agents = AgentsView(**self._unavailable_view("agents"), rows=(), history=())
+        models = ModelsView(
+            **self._unavailable_view("models"),
+            opinions=(),
+            candidates=(),
+            metrics=(),
+            evidence=(),
+        )
+        timeline = TimelineView(
+            **self._unavailable_view("timeline"),
+            rows=(),
+            hidden_event_count=0,
+        )
+        risk = RiskView(
+            **self._unavailable_view("risk"),
+            limits=(),
+            approvals=(),
+            alerts=(),
+            metrics=(),
+        )
+        data = DataView(**self._unavailable_view("data"), sources=(), evidence=())
+        memory = MemoryView(**self._unavailable_view("memory"), rows=(), history=())
+        system = SystemView(
+            **self._unavailable_view("system"),
+            services=(),
+            metrics=(),
+            repositories=(),
+        )
+        command_views: dict[str, ScreenView] = {
+            "portfolio": portfolio,
+            "orders": orders,
+            "models": models,
+            "risk": risk,
+            "data": data,
+            "system": system,
+        }
+        control_facts = {
+            "capabilities": [item.model_dump(mode="json") for item in capabilities],
+            "command_prerequisites": {
+                name: {
+                    "freshness": view.freshness.value,
+                    "source": view.source,
+                    "error": view.error,
+                }
+                for name, view in command_views.items()
+            },
+        }
+        control_hash = hashlib.sha256(
+            json.dumps(control_facts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return ConsoleSnapshot(
+            shell=shell,
+            control_version=0,
+            control_hash=control_hash,
+            command_specs=(),
+            window_omissions=(),
+            impact=impact,
+            portfolio=portfolio,
+            orders=orders,
+            agents=agents,
+            models=models,
+            timeline=timeline,
+            risk=risk,
+            data=data,
+            memory=memory,
+            system=system,
+        )
+
+    @staticmethod
+    def _unavailable_view(name: str) -> dict[str, object]:
+        return {
+            "freshness": Freshness.UNAVAILABLE,
+            "as_of_utc": None,
+            "source": f"controller {name} projection",
+            "error": f"No controller-owned {name} projection is configured.",
+        }
 
     def _authenticate(self, session: GatewaySession, envelope: WireEnvelope) -> WireEnvelope:
         if not session._greeted:

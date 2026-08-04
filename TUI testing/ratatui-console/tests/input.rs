@@ -57,36 +57,11 @@ fn inbound_envelope(sequence: u64, message_type: &str, payload: serde_json::Valu
 }
 
 fn snapshot_envelope(sequence: u64) -> Envelope {
-    inbound_envelope(
-        sequence,
-        "snapshot",
-        json!({
-            "snapshot": {
-                "state_version": 0,
-                "generated_at_utc": "2026-08-03T00:00:00Z",
-                "header": {
-                    "operating_mode": "unknown",
-                    "operating_mode_freshness": "unavailable",
-                    "operating_mode_reason": "No reviewed runtime-status adapter is configured.",
-                    "data_freshness": "unavailable",
-                    "data_age_seconds": null,
-                    "regime_label": "Unavailable",
-                    "regime_confidence": null,
-                    "portfolio_value": null,
-                    "next_rebalance_at_utc": null,
-                    "rebalance_blockers": null,
-                    "active_agent": null,
-                    "agent_queue_length": null,
-                    "qwen_state": "Unavailable",
-                    "qwen_context_percent": null,
-                    "current_time_utc": "2026-08-03T00:00:00Z",
-                    "market_session": "Unavailable"
-                },
-                "alerts": null,
-                "capabilities": []
-            }
-        }),
-    )
+    let snapshot: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../contracts/v1/console_snapshot_empty_command_specs.json"
+    ))
+    .expect("valid shared console snapshot");
+    inbound_envelope(sequence, "snapshot", json!({"snapshot": snapshot}))
 }
 
 #[derive(Default)]
@@ -752,7 +727,17 @@ async fn foundation_session_runs_typed_hello_auth_snapshot_lease_and_lock_flow()
     assert_eq!(session.sent[0].message_id.as_str(), "client:1");
     assert_eq!(session.sent[0].sequence, 1);
     assert_eq!(session.sent[0].state_version, 0);
-    assert!(session.sent[0].timestamp_utc.as_str().ends_with('Z'));
+    let outbound_timestamp = session.sent[0].timestamp_utc.as_str();
+    assert!(outbound_timestamp.ends_with('Z'));
+    assert!(matches!(outbound_timestamp.len(), 20 | 27));
+    if outbound_timestamp.len() == 27 {
+        assert_eq!(outbound_timestamp.as_bytes()[19], b'.');
+        assert!(
+            outbound_timestamp.as_bytes()[20..26]
+                .iter()
+                .all(u8::is_ascii_digit)
+        );
+    }
     assert!(
         serde_json::from_value::<UtcTimestamp>(json!(session.sent[0].timestamp_utc.as_str()))
             .is_ok()

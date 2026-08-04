@@ -7,6 +7,7 @@ import json
 import math
 import pickle
 import sys
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -31,6 +32,7 @@ from vesper.platform.tui.contracts import (
     decode_envelope_json,
     decode_payload,
 )
+from vesper.platform.tui.protocol import MAX_FRAME_BYTES, encode_frame
 
 
 def _envelope(**changes: object) -> WireEnvelope:
@@ -281,9 +283,10 @@ def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> No
             "message_type": "snapshot",
             "payload": {
                 "snapshot": {
-                    "state_version": 0,
-                    "generated_at_utc": "2026-08-03T00:00:00Z",
-                    "header": {
+                    "shell": {
+                        "state_version": 0,
+                        "generated_at_utc": "2026-08-03T00:00:00Z",
+                        "header": {
                         "operating_mode": "unknown",
                         "operating_mode_freshness": "loading",
                         "operating_mode_reason": None,
@@ -300,10 +303,14 @@ def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> No
                         "qwen_context_percent": None,
                         "current_time_utc": "2026-08-03T00:00:00Z",
                         "market_session": "closed",
-                        "secret": "x",
+                            "secret": "x",
+                        },
+                        "alerts": [],
+                        "capabilities": [],
                     },
-                    "alerts": [],
-                    "capabilities": [],
+                    "control_version": 0,
+                    "control_hash": "a" * 64,
+                    "command_specs": [],
                 }
             },
         },
@@ -313,7 +320,7 @@ def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> No
 
     def receive(diagnostic: UntrustedProtocolDiagnostic) -> None:
         seen_during_callback.append(
-            diagnostic.unknown_fields["snapshot"]["header"]["secret"] == "x"
+            diagnostic.unknown_fields["snapshot"]["shell"]["header"]["secret"] == "x"
         )
 
     with pytest.raises(ValidationError):
@@ -351,13 +358,13 @@ def test_canonical_fixture_and_schema_receipt_have_exact_bytes_and_hashes() -> N
     ).encode("utf-8")
     assert (
         WIRE_SCHEMA_RECEIPT_SHA256
-        == "73a8e7dec7a9c823cedcac57af94086d4fd8bcb4ad9f2f4ab8b296aff8a93829"
+        == "0ab696e243fd0da2bf13fe8115c390c3560dca18c93850eb9fa3665f8b37efe3"
     )
     assert hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest() == WIRE_SCHEMA_RECEIPT_SHA256
 
 
 def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() -> None:
-    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 14
+    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 15
     assert {decode_envelope_json(frame).message_type for frame in CANONICAL_WIRE_FIXTURES} == set(
         MessageType
     )
@@ -368,7 +375,7 @@ def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() ->
     descriptor = json.loads(WIRE_CONTRACT_DESCRIPTOR)
     assert descriptor["schema_version"] == 1
     assert set(descriptor["messages"]) == {message.value for message in MessageType}
-    assert "header.agent_queue_length" in descriptor["nullable_required"]
+    assert "snapshot.shell.header.agent_queue_length" in descriptor["nullable_required"]
     assert descriptor["optional_default"] == ["capability.reason"]
 
 
@@ -380,8 +387,12 @@ def test_wire_unsigned_integers_reject_out_of_range(value: int) -> None:
         _envelope(state_version=value)
     with pytest.raises(ValidationError):
         _header(agent_queue_length=value)
-    snapshot_wire = json.loads(CANONICAL_WIRE_FIXTURES[10])
-    snapshot_wire["payload"]["snapshot"]["state_version"] = value
+    snapshot_wire = next(
+        json.loads(frame)
+        for frame in CANONICAL_WIRE_FIXTURES
+        if json.loads(frame)["message_type"] == "snapshot"
+    )
+    snapshot_wire["payload"]["snapshot"]["shell"]["state_version"] = value
     envelope = WireEnvelope.model_validate_json(json.dumps(snapshot_wire))
     with pytest.raises(ValidationError):
         decode_payload(envelope)
@@ -391,11 +402,95 @@ def test_wire_unsigned_integers_accept_u64_max() -> None:
     maximum = 2**64 - 1
     assert _envelope(sequence=maximum, state_version=maximum).sequence == maximum
     assert _header(agent_queue_length=maximum).agent_queue_length == maximum
-    snapshot_wire = json.loads(CANONICAL_WIRE_FIXTURES[10])
-    snapshot_wire["payload"]["snapshot"]["state_version"] = maximum
+    snapshot_wire = next(
+        json.loads(frame)
+        for frame in CANONICAL_WIRE_FIXTURES
+        if json.loads(frame)["message_type"] == "snapshot"
+    )
+    snapshot_wire["payload"]["snapshot"]["shell"]["state_version"] = maximum
     assert (
         decode_payload(
             WireEnvelope.model_validate_json(json.dumps(snapshot_wire))
-        ).snapshot.state_version
+        ).snapshot.shell.state_version
         == maximum
     )
+
+
+def test_bounded_snapshot_envelope_stays_below_the_existing_frame_limit() -> None:
+    frame = next(
+        frame
+        for frame in CANONICAL_WIRE_FIXTURES
+        if json.loads(frame)["message_type"] == "snapshot"
+    )
+    envelope = WireEnvelope.model_validate_json(frame)
+
+    assert len(encode_frame(envelope)) - 4 == len(frame)
+    assert len(frame) <= MAX_FRAME_BYTES
+
+
+def test_event_nested_unknown_field_is_reported_and_rejected() -> None:
+    value = next(
+        json.loads(frame)
+        for frame in CANONICAL_WIRE_FIXTURES
+        if json.loads(frame)["message_type"] == "event"
+    )
+    value["payload"]["entity"]["secret"] = "x"
+    wire = json.dumps(value, separators=(",", ":")).encode()
+    seen: list[bool] = []
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(
+            wire,
+            lambda diagnostic: seen.append(diagnostic.unknown_fields["entity"]["secret"] == "x"),
+        )
+
+    assert seen == [True]
+
+
+def test_event_presentation_unknown_field_is_reported_and_rejected() -> None:
+    value = next(
+        json.loads(frame)
+        for frame in CANONICAL_WIRE_FIXTURES
+        if json.loads(frame)["message_type"] == "event"
+    )
+    value["payload"]["presentation"]["secret"] = "x"
+    wire = json.dumps(value, separators=(",", ":")).encode()
+    seen: list[bool] = []
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(
+            wire,
+            lambda diagnostic: seen.append(
+                diagnostic.unknown_fields["presentation"]["secret"] == "x"
+            ),
+        )
+
+    assert seen == [True]
+
+
+def test_event_untrusted_diagnostic_has_one_shared_unknown_leaf_budget() -> None:
+    value = next(
+        json.loads(frame)
+        for frame in CANONICAL_WIRE_FIXTURES
+        if json.loads(frame)["message_type"] == "event"
+    )
+    for index in range(16):
+        value["payload"][f"top_extra_{index}"] = index
+        value["payload"]["entity"][f"entity_extra_{index}"] = index
+    wire = json.dumps(value, separators=(",", ":")).encode()
+    leaf_counts: list[int] = []
+
+    def count_leaves(item: object) -> int:
+        if isinstance(item, Mapping):
+            return sum(count_leaves(child) for child in item.values()) or 1
+        if isinstance(item, Sequence) and not isinstance(item, str):
+            return sum(count_leaves(child) for child in item) or 1
+        return 1
+
+    with pytest.raises(ValidationError):
+        decode_envelope_json(
+            wire,
+            lambda diagnostic: leaf_counts.append(count_leaves(diagnostic.unknown_fields)),
+        )
+
+    assert leaf_counts == [16]

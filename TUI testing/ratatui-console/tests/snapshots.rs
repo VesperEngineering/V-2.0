@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use serde_json::json;
-use vesper_ratatui_console::contract::{Envelope, ShellSnapshot, UtcTimestamp};
+use vesper_ratatui_console::contract::{ConsoleSnapshot, Envelope, ShellSnapshot, UtcTimestamp};
 use vesper_ratatui_console::input::InputEvent;
 use vesper_ratatui_console::layout::{DisplayMode, ViewportClass, shell_layout};
 use vesper_ratatui_console::preferences::{LoadedPreferences, UiPreferences};
@@ -107,7 +107,7 @@ fn themes_use_warm_white_charcoal_and_labeled_status_colors_without_blink() {
 #[test]
 fn locked_render_hides_a_poisoned_dashboard_snapshot() {
     let mut state = AppState::locked();
-    state.snapshot = Some(poisoned_snapshot());
+    state.snapshot = Some(console_snapshot(poisoned_snapshot()));
 
     let text = render_text(80, 24, &state);
 
@@ -151,7 +151,7 @@ fn next_rebalance_uses_eastern_time_and_keeps_narrow_labels_visible() {
         let mut state = AppState::controller();
         let mut snapshot = alert_snapshot("active", "Work remains active.");
         snapshot.header.next_rebalance_at_utc = Some(timestamp(utc));
-        state.snapshot = Some(snapshot);
+        state.snapshot = Some(console_snapshot(snapshot));
         state.set_display_mode(DisplayMode::LargeText);
 
         let text = normalized_render(80, 24, &state);
@@ -192,7 +192,10 @@ fn every_header_field_remains_visible_in_wide_compact_and_narrow_large_text() {
         (80, 24, DisplayMode::LargeText),
     ] {
         let mut state = AppState::controller();
-        state.snapshot = Some(alert_snapshot("active", "Work remains active."));
+        state.snapshot = Some(console_snapshot(alert_snapshot(
+            "active",
+            "Work remains active.",
+        )));
         state.set_display_mode(mode);
         let text = normalized_render(width, height, &state);
 
@@ -244,7 +247,7 @@ fn every_header_field_remains_visible_in_wide_compact_and_narrow_large_text() {
 #[test]
 fn oversized_header_text_is_bounded_so_later_labels_stay_visible() {
     let mut state = AppState::controller();
-    state.snapshot = Some(long_header_snapshot());
+    state.snapshot = Some(console_snapshot(long_header_snapshot()));
     state.set_display_mode(DisplayMode::LargeText);
 
     let text = normalized_render(80, 24, &state);
@@ -393,7 +396,7 @@ fn narrow_compact_navigation_keeps_all_ten_numbered_entries_visible() {
 #[test]
 fn server_text_control_characters_are_sanitized_before_rendering() {
     let mut state = AppState::controller();
-    state.snapshot = Some(control_character_snapshot());
+    state.snapshot = Some(console_snapshot(control_character_snapshot()));
 
     let text = normalized_render(160, 48, &state);
 
@@ -408,7 +411,7 @@ fn server_text_control_characters_are_sanitized_before_rendering() {
 #[test]
 fn narrow_alerts_prioritize_urgent_and_header_summarizes_open_alerts() {
     let mut state = AppState::controller();
-    state.snapshot = Some(resolved_then_urgent_snapshot());
+    state.snapshot = Some(console_snapshot(resolved_then_urgent_snapshot()));
     state.set_display_mode(DisplayMode::LargeText);
 
     let text = normalized_render(80, 24, &state);
@@ -427,7 +430,7 @@ fn narrow_alerts_prioritize_urgent_and_header_summarizes_open_alerts() {
 #[test]
 fn cjk_and_bidi_server_text_is_cell_bounded_and_cannot_hide_later_labels() {
     let mut state = AppState::controller();
-    state.snapshot = Some(wide_and_bidi_snapshot());
+    state.snapshot = Some(console_snapshot(wide_and_bidi_snapshot()));
     state.set_display_mode(DisplayMode::LargeText);
 
     let text = normalized_render(80, 24, &state);
@@ -531,7 +534,10 @@ fn status_labels_keep_their_required_palette_colors() {
     ];
     for (theme, severity, label, foreground, background) in cases {
         let mut state = AppState::controller();
-        state.snapshot = Some(alert_snapshot(severity, "Status remains visible."));
+        state.snapshot = Some(console_snapshot(alert_snapshot(
+            severity,
+            "Status remains visible.",
+        )));
         state.set_theme(theme);
         let buffer = render_buffer(120, 36, &state);
         assert_eq!(label_style(&buffer, label), (foreground, background));
@@ -694,6 +700,15 @@ fn normalized_buffer(buffer: &Buffer) -> String {
         lines.pop();
     }
     lines.join("\n")
+}
+
+fn console_snapshot(shell: ShellSnapshot) -> ConsoleSnapshot {
+    let mut snapshot: ConsoleSnapshot = serde_json::from_slice(include_bytes!(
+        "../../contracts/v1/console_snapshot_empty_command_specs.json"
+    ))
+    .expect("valid shared console snapshot");
+    snapshot.shell = shell;
+    snapshot
 }
 
 fn poisoned_snapshot() -> ShellSnapshot {
@@ -919,12 +934,18 @@ impl Scenario {
             Self::Viewer => AppState::viewer(),
             Self::Urgent => {
                 let mut state = AppState::controller();
-                state.snapshot = Some(alert_snapshot("urgent", "Immediate review required."));
+                state.snapshot = Some(console_snapshot(alert_snapshot(
+                    "urgent",
+                    "Immediate review required.",
+                )));
                 state
             }
             Self::Resolved => {
                 let mut state = AppState::controller();
-                state.snapshot = Some(alert_snapshot("resolved", "Issue repaired."));
+                state.snapshot = Some(console_snapshot(alert_snapshot(
+                    "resolved",
+                    "Issue repaired.",
+                )));
                 state
             }
         }

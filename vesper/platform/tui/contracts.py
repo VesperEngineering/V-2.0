@@ -4,23 +4,36 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Literal, TypeAlias, cast
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
     StringConstraints,
     ValidationError,
-    AfterValidator,
-    field_serializer,
     field_validator,
 )
 from typing_extensions import TypeAliasType
+
+from .views import (
+    AlertView,
+    CapabilityState,
+    CapabilityView,
+    ConsoleSnapshot,
+    EventPayload,
+    FiniteFloat,
+    Freshness,
+    HeaderView,
+    NonEmptyStr,
+    OperatingMode,
+    SafeId,
+    Sha256Hex,
+    ShellSnapshot,
+    StrictModel,
+    WireUInt,
+    UtcDateTime,
+    event_model,
+)
 
 MAX_UNTRUSTED_UNKNOWN_FIELDS = 16
 MAX_UNTRUSTED_JSON_DEPTH = 8
@@ -29,40 +42,11 @@ MAX_UNTRUSTED_STRING_LENGTH = 4096
 _MISSING = object()
 
 
-def _require_finite_float(value: float) -> float:
-    if not math.isfinite(value):
-        raise ValueError("floating-point values must be finite")
-    return value
-
-
-FiniteFloat = Annotated[float, AfterValidator(_require_finite_float)]
 JsonScalar: TypeAlias = None | bool | int | FiniteFloat | str
 JsonValue = TypeAliasType(
     "JsonValue",
     JsonScalar | list["JsonValue"] | dict[str, "JsonValue"],
 )
-NonEmptyStr = Annotated[
-    str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=512),
-]
-SafeId = Annotated[
-    str,
-    StringConstraints(
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-    ),
-]
-Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-WireUInt = Annotated[int, Field(ge=0, le=2**64 - 1)]
-
-
-class StrictModel(BaseModel):
-    """Reject coercion and undeclared input at every wire boundary."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-
 class MessageType(StrEnum):
     CLIENT_HELLO = "client-hello"
     SERVER_HELLO = "server-hello"
@@ -75,122 +59,13 @@ class MessageType(StrEnum):
     LOCK_RESULT = "lock-result"
     SNAPSHOT_REQUEST = "snapshot-request"
     SNAPSHOT = "snapshot"
+    EVENT = "event"
     PROTOCOL_ERROR = "protocol-error"
     PING = "ping"
     PONG = "pong"
 
-
-class Freshness(StrEnum):
-    LOADING = "loading"
-    FRESH = "fresh"
-    STALE = "stale"
-    UNAVAILABLE = "unavailable"
-
-
-class OperatingMode(StrEnum):
-    UNKNOWN = "unknown"
-    STOPPED = "stopped"
-    SHADOW = "shadow"
-    PAPER = "paper"
-    LIVE = "live"
-
-
-class CapabilityState(StrEnum):
-    ENABLED = "enabled"
-    READ_ONLY = "read-only"
-    DISABLED = "disabled"
-
-
-def _require_utc(value: datetime) -> datetime:
-    if value.utcoffset() != timedelta(0):
-        raise ValueError("timestamps must be timezone-aware UTC")
-    return value
-
-
-def _serialize_utc(value: datetime) -> str:
-    return value.isoformat().replace("+00:00", "Z")
-
-
 def _canonical_json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-class CapabilityView(StrictModel):
-    capability_id: NonEmptyStr
-    state: CapabilityState
-    reason: NonEmptyStr | None = None
-
-
-class AlertView(StrictModel):
-    alert_id: NonEmptyStr
-    severity: Literal["info", "active", "waiting", "urgent", "resolved"]
-    summary: NonEmptyStr
-    created_at_utc: datetime
-    resolved_at_utc: datetime | None
-
-    @field_validator("created_at_utc", "resolved_at_utc")
-    @classmethod
-    def require_utc(cls, value: datetime | None) -> datetime | None:
-        return None if value is None else _require_utc(value)
-
-    @field_serializer("created_at_utc", "resolved_at_utc", when_used="unless-none")
-    def serialize_utc(self, value: datetime) -> str:
-        return _serialize_utc(value)
-
-
-class HeaderView(StrictModel):
-    operating_mode: OperatingMode
-    operating_mode_freshness: Freshness
-    operating_mode_reason: NonEmptyStr | None
-    data_freshness: Freshness
-    data_age_seconds: float | None
-    regime_label: str
-    regime_confidence: float | None
-    portfolio_value: float | None
-    next_rebalance_at_utc: datetime | None
-    rebalance_blockers: tuple[str, ...] | None
-    active_agent: str | None
-    agent_queue_length: WireUInt | None
-    qwen_state: str
-    qwen_context_percent: float | None
-    current_time_utc: datetime
-    market_session: str
-
-    @field_validator(
-        "data_age_seconds",
-        "regime_confidence",
-        "portfolio_value",
-        "qwen_context_percent",
-    )
-    @classmethod
-    def require_finite_float(cls, value: float | None) -> float | None:
-        return None if value is None else _require_finite_float(value)
-
-    @field_validator("next_rebalance_at_utc", "current_time_utc")
-    @classmethod
-    def require_utc(cls, value: datetime | None) -> datetime | None:
-        return None if value is None else _require_utc(value)
-
-    @field_serializer("next_rebalance_at_utc", "current_time_utc", when_used="unless-none")
-    def serialize_utc(self, value: datetime) -> str:
-        return _serialize_utc(value)
-
-
-class ShellSnapshot(StrictModel):
-    state_version: WireUInt
-    generated_at_utc: datetime
-    header: HeaderView
-    alerts: tuple[AlertView, ...] | None
-    capabilities: tuple[CapabilityView, ...]
-
-    @field_validator("generated_at_utc")
-    @classmethod
-    def require_utc(cls, value: datetime) -> datetime:
-        return _require_utc(value)
-
-    @field_serializer("generated_at_utc")
-    def serialize_utc(self, value: datetime) -> str:
-        return _serialize_utc(value)
 
 
 class WireEnvelope(StrictModel):
@@ -198,7 +73,7 @@ class WireEnvelope(StrictModel):
     message_id: SafeId
     sequence: WireUInt
     state_version: WireUInt
-    timestamp_utc: datetime
+    timestamp_utc: UtcDateTime
     message_type: MessageType
     payload: dict[str, JsonValue]
 
@@ -208,16 +83,6 @@ class WireEnvelope(StrictModel):
         if value in {".", ".."}:
             raise ValueError("wire IDs cannot be dot paths")
         return value
-
-    @field_validator("timestamp_utc")
-    @classmethod
-    def require_utc(cls, value: datetime) -> datetime:
-        return _require_utc(value)
-
-    @field_serializer("timestamp_utc")
-    def serialize_utc(self, value: datetime) -> str:
-        return _serialize_utc(value)
-
 
 CANONICAL_WIRE_FIXTURE = (
     b'{"schema_version":1,"message_id":"server:1","sequence":1,'
@@ -277,7 +142,7 @@ class SnapshotRequestPayload(StrictModel):
 
 
 class SnapshotPayload(StrictModel):
-    snapshot: ShellSnapshot
+    snapshot: ConsoleSnapshot
 
 
 class ProtocolErrorPayload(StrictModel):
@@ -319,6 +184,7 @@ StrictPayload: TypeAlias = (
     | LockResultPayload
     | SnapshotRequestPayload
     | SnapshotPayload
+    | EventPayload
     | ProtocolErrorPayload
     | PingPayload
     | PongPayload
@@ -337,6 +203,7 @@ PAYLOAD_MODELS: dict[MessageType, PayloadModel] = {
     MessageType.LOCK_RESULT: LockResultPayload,
     MessageType.SNAPSHOT_REQUEST: SnapshotRequestPayload,
     MessageType.SNAPSHOT: SnapshotPayload,
+    MessageType.EVENT: EventPayload,
     MessageType.PROTOCOL_ERROR: ProtocolErrorPayload,
     MessageType.PING: PingPayload,
     MessageType.PONG: PongPayload,
@@ -351,13 +218,13 @@ def decode_payload(envelope: WireEnvelope) -> StrictPayload:
     )
 
 
-_FIXTURE_SNAPSHOT = {
+_FIXTURE_SHELL = {
     "state_version": 0,
     "generated_at_utc": "2026-08-03T00:00:00Z",
     "header": {
         "operating_mode": "unknown",
         "operating_mode_freshness": "unavailable",
-        "operating_mode_reason": None,
+        "operating_mode_reason": "No reviewed runtime-status adapter is configured.",
         "data_freshness": "unavailable",
         "data_age_seconds": None,
         "regime_label": "Unavailable",
@@ -372,22 +239,225 @@ _FIXTURE_SNAPSHOT = {
         "current_time_utc": "2026-08-03T00:00:00Z",
         "market_session": "Unavailable",
     },
-    "alerts": [
-        {
-            "alert_id": "alert:1",
-            "severity": "info",
-            "summary": "Ready",
-            "created_at_utc": "2026-08-03T00:00:00Z",
-            "resolved_at_utc": None,
-        }
-    ],
+    "alerts": [],
     "capabilities": [
-        {
-            "capability_id": "snapshot.read",
-            "state": "read-only",
-            "reason": None,
-        }
+        {"capability_id": "snapshot.read", "state": "read-only", "reason": None}
     ],
+}
+_FIXTURE_VIEW = {
+    "freshness": "fresh",
+    "as_of_utc": "2026-08-03T00:00:00Z",
+    "source": "fixture",
+    "error": None,
+}
+_FIXTURE_PORTFOLIO_ROW = {
+    "symbol": "AAPL",
+    "description": "Apple",
+    "asset_type": "stock",
+    "quantity": "10",
+    "price": "100.25",
+    "market_value": "1002.50",
+    "current_weight": 0.1,
+    "proposed_weight": 0.11,
+    "approved_weight": None,
+    "change_state": "proposed",
+    "confirmed_rank": 1,
+    "reconciliation": "pending",
+}
+_FIXTURE_AGENT_ROW = {
+    "work_id": "work:1",
+    "agent": "portfolio-research",
+    "title": "Review AAPL",
+    "stage": "running",
+    "priority": 10,
+    "urgent": False,
+    "elapsed_seconds": 3.0,
+    "model": "qwen:64k",
+    "affected_areas": ["portfolio"],
+}
+_FIXTURE_TIMELINE_ROW = {
+    "event_id": "event:1",
+    "occurred_at_utc": "2026-08-03T00:00:00Z",
+    "impact": True,
+    "severity": "active",
+    "summary": "AAPL review started",
+    "agent_id": "portfolio-research",
+    "symbol": "AAPL",
+    "model_id": None,
+    "approval_id": None,
+    "order_id": "order:1",
+    "evidence_ids": ["evidence:1"],
+}
+_FIXTURE_FILL_ROW = {
+    "fill_id": "fill:1",
+    "quantity": "10",
+    "price": "100.25",
+    "fee": "0",
+    "filled_at_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_ORDER_ROW = {
+    "order_id": "order:1",
+    "symbol": "AAPL",
+    "side": "buy",
+    "quantity": "10",
+    "status": "filled",
+    "submitted_at_utc": "2026-08-03T00:00:00Z",
+    "broker_order_id": "paper-order-1",
+    "fills": [_FIXTURE_FILL_ROW],
+    "expected_price": "100.00",
+    "actual_price": "100.25",
+    "reconciliation": "matched",
+}
+_FIXTURE_MODEL_OPINION_ROW = {
+    "model_id": "model:active",
+    "regime": "risk-on",
+    "confidence": 0.8,
+    "as_of_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_CANDIDATE_ROW = {
+    "candidate_id": "candidate:1",
+    "family": "approved-family",
+    "strategy": "ml_model",
+    "status": "evaluating",
+    "evidence_ids": ["evidence:1"],
+    "created_at_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_RISK_LIMIT_ROW = {
+    "limit_id": "limit:concentration",
+    "current_value": "0.10",
+    "proposed_value": None,
+    "status": "within",
+}
+_FIXTURE_APPROVAL_ROW = {
+    "approval_id": "approval:1",
+    "state": "pending",
+    "reason": "Review required",
+    "evidence_ids": ["evidence:1"],
+    "requested_at_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_SOURCE_ROW = {
+    "source_id": "source:massive",
+    "freshness": "fresh",
+    "as_of_utc": "2026-08-03T00:00:00Z",
+    "age_seconds": 1.0,
+    "coverage": "S&P 500",
+    "error": None,
+    "consumers": ["ml_model"],
+}
+_FIXTURE_EVIDENCE_ROW = {
+    "evidence_id": "evidence:1",
+    "evidence_type": "receipt",
+    "source": "fixture",
+    "created_at_utc": "2026-08-03T00:00:00Z",
+    "sha256": "a" * 64,
+}
+_FIXTURE_MEMORY_ROW = {
+    "memory_id": "memory:1",
+    "status": "core",
+    "summary": "Use controller truth.",
+    "evidence_ids": ["evidence:1"],
+    "updated_at_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_SERVICE_ROW = {
+    "service_id": "service:qwen",
+    "state": "running",
+    "health_reason": None,
+    "observed_at_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_REPOSITORY_ROW = {
+    "repository_id": "repository:v20",
+    "freshness": "fresh",
+    "as_of_utc": "2026-08-03T00:00:00Z",
+    "source": "git",
+    "error": None,
+    "branch": "codex/vesper/ratatui-console",
+    "revision": "0123456789abcdef",
+    "clean": True,
+    "worktrees": ["C:/Users/bgonn/Desktop/v20"],
+    "unpushed_commit_count": 0,
+}
+_FIXTURE_METRIC_ROW = {
+    "metric_id": "metric:cpu",
+    "value": 12.5,
+    "unit": "percent",
+    "freshness": "fresh",
+    "observed_at_utc": "2026-08-03T00:00:00Z",
+    "error": None,
+}
+_FIXTURE_RETURN_ROWS = [
+    {"component": "price", "value": "0.01"},
+    {"component": "dividends", "value": "0"},
+    {"component": "cash-interest", "value": "0"},
+    {"component": "fees", "value": "0"},
+    {"component": "sp500-total-return", "value": "0.005"},
+]
+_FIXTURE_ALERT_ROW = {
+    "alert_id": "alert:1",
+    "severity": "waiting",
+    "summary": "Approval waiting",
+    "created_at_utc": "2026-08-03T00:00:00Z",
+    "resolved_at_utc": None,
+}
+_FIXTURE_SNAPSHOT = {
+    "shell": _FIXTURE_SHELL,
+    "control_version": 0,
+    "control_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "command_specs": [],
+    "window_omissions": [],
+    "impact": {
+        **_FIXTURE_VIEW,
+        "holdings": [_FIXTURE_PORTFOLIO_ROW],
+        "events": [_FIXTURE_TIMELINE_ROW],
+        "agents": [_FIXTURE_AGENT_ROW],
+    },
+    "portfolio": {
+        **_FIXTURE_VIEW,
+        "rows": [_FIXTURE_PORTFOLIO_ROW],
+        "returns_today": _FIXTURE_RETURN_ROWS,
+        "returns_since_rebalance": _FIXTURE_RETURN_ROWS,
+        "returns_since_start": _FIXTURE_RETURN_ROWS,
+        "metrics": [_FIXTURE_METRIC_ROW],
+        "history": [_FIXTURE_TIMELINE_ROW],
+        "rank_source": "confirmed reconciliation",
+    },
+    "orders": {
+        **_FIXTURE_VIEW,
+        "rows": [_FIXTURE_ORDER_ROW],
+        "reconciliation_agents": [_FIXTURE_AGENT_ROW],
+        "history": [_FIXTURE_TIMELINE_ROW],
+    },
+    "agents": {**_FIXTURE_VIEW, "rows": [_FIXTURE_AGENT_ROW], "history": [_FIXTURE_TIMELINE_ROW]},
+    "models": {
+        **_FIXTURE_VIEW,
+        "opinions": [_FIXTURE_MODEL_OPINION_ROW],
+        "candidates": [_FIXTURE_CANDIDATE_ROW],
+        "metrics": [_FIXTURE_METRIC_ROW],
+        "evidence": [_FIXTURE_EVIDENCE_ROW],
+    },
+    "timeline": {**_FIXTURE_VIEW, "rows": [_FIXTURE_TIMELINE_ROW], "hidden_event_count": 0},
+    "risk": {
+        **_FIXTURE_VIEW,
+        "limits": [_FIXTURE_RISK_LIMIT_ROW],
+        "approvals": [_FIXTURE_APPROVAL_ROW],
+        "alerts": [_FIXTURE_ALERT_ROW],
+        "metrics": [_FIXTURE_METRIC_ROW],
+    },
+    "data": {
+        **_FIXTURE_VIEW,
+        "sources": [_FIXTURE_SOURCE_ROW],
+        "evidence": [_FIXTURE_EVIDENCE_ROW],
+    },
+    "memory": {
+        **_FIXTURE_VIEW,
+        "rows": [_FIXTURE_MEMORY_ROW],
+        "history": [_FIXTURE_TIMELINE_ROW],
+    },
+    "system": {
+        **_FIXTURE_VIEW,
+        "services": [_FIXTURE_SERVICE_ROW],
+        "metrics": [_FIXTURE_METRIC_ROW],
+        "repositories": [_FIXTURE_REPOSITORY_ROW],
+    },
 }
 
 _FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
@@ -402,6 +472,43 @@ _FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
     (MessageType.LOCK_RESULT, {"locked": True}),
     (MessageType.SNAPSHOT_REQUEST, {}),
     (MessageType.SNAPSHOT, {"snapshot": _FIXTURE_SNAPSHOT}),
+    (
+        MessageType.EVENT,
+        {
+            "entity_type": "alert-row",
+            "entity_id": "alert:1",
+            "operation": "upsert",
+            "entity": {
+                "alert_id": "alert:1",
+                "severity": "info",
+                "summary": "Ready",
+                "created_at_utc": "2026-08-03T00:00:00Z",
+                "resolved_at_utc": None,
+            },
+            "targets": ["shell.alerts"],
+            "presentation": {
+                "generated_at_utc": _FIXTURE_SHELL["generated_at_utc"],
+                "header": _FIXTURE_SHELL["header"],
+                "control_version": _FIXTURE_SNAPSHOT["control_version"],
+                "control_hash": _FIXTURE_SNAPSHOT["control_hash"],
+                "window_omissions": _FIXTURE_SNAPSHOT["window_omissions"],
+                "impact": _FIXTURE_VIEW,
+                "portfolio": _FIXTURE_VIEW,
+                "orders": _FIXTURE_VIEW,
+                "agents": _FIXTURE_VIEW,
+                "models": _FIXTURE_VIEW,
+                "timeline": _FIXTURE_VIEW,
+                "risk": _FIXTURE_VIEW,
+                "data": _FIXTURE_VIEW,
+                "memory": _FIXTURE_VIEW,
+                "system": _FIXTURE_VIEW,
+                "portfolio_rank_source": _FIXTURE_SNAPSHOT["portfolio"]["rank_source"],
+                "timeline_hidden_event_count": _FIXTURE_SNAPSHOT["timeline"][
+                    "hidden_event_count"
+                ],
+            },
+        },
+    ),
     (MessageType.PROTOCOL_ERROR, {"code": "locked", "safe_message": "Locked."}),
     (MessageType.PING, {"nonce": "nonce:1"}),
     (MessageType.PONG, {"nonce": "nonce:1"}),
@@ -462,27 +569,97 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
                 name for name, field in CapabilityView.model_fields.items() if field.is_required()
             ],
         },
+        "field_catalog_scope": [
+            "envelope",
+            "payloads",
+            "shell",
+            "snapshot-observability-metadata",
+            "event-presentation-metadata",
+            "repository-status",
+        ],
         "optional_default": ["capability.reason"],
         "nullable_required": [
             "auth-result.reason",
             "lease-result.reason",
-            "snapshot.alerts",
+            "event.entity",
+            "snapshot.shell.alerts",
             "alert.resolved_at_utc",
-            "header.operating_mode_reason",
-            "header.data_age_seconds",
-            "header.regime_confidence",
-            "header.portfolio_value",
-            "header.next_rebalance_at_utc",
-            "header.rebalance_blockers",
-            "header.active_agent",
-            "header.agent_queue_length",
-            "header.qwen_context_percent",
+            "snapshot.shell.header.operating_mode_reason",
+            "snapshot.shell.header.data_age_seconds",
+            "snapshot.shell.header.regime_confidence",
+            "snapshot.shell.header.portfolio_value",
+            "snapshot.shell.header.next_rebalance_at_utc",
+            "snapshot.shell.header.rebalance_blockers",
+            "snapshot.shell.header.active_agent",
+            "snapshot.shell.header.agent_queue_length",
+            "snapshot.shell.header.qwen_context_percent",
+            "snapshot.window_omissions[].omitted_count",
+            "snapshot.impact.as_of_utc",
+            "snapshot.impact.error",
+            "snapshot.portfolio.as_of_utc",
+            "snapshot.portfolio.error",
+            "snapshot.portfolio.rank_source",
+            "snapshot.orders.as_of_utc",
+            "snapshot.orders.error",
+            "snapshot.agents.as_of_utc",
+            "snapshot.agents.error",
+            "snapshot.models.as_of_utc",
+            "snapshot.models.error",
+            "snapshot.timeline.as_of_utc",
+            "snapshot.timeline.error",
+            "snapshot.risk.as_of_utc",
+            "snapshot.risk.error",
+            "snapshot.data.as_of_utc",
+            "snapshot.data.error",
+            "snapshot.memory.as_of_utc",
+            "snapshot.memory.error",
+            "snapshot.system.as_of_utc",
+            "snapshot.system.error",
+            "event.presentation.header.operating_mode_reason",
+            "event.presentation.header.data_age_seconds",
+            "event.presentation.header.regime_confidence",
+            "event.presentation.header.portfolio_value",
+            "event.presentation.header.next_rebalance_at_utc",
+            "event.presentation.header.rebalance_blockers",
+            "event.presentation.header.active_agent",
+            "event.presentation.header.agent_queue_length",
+            "event.presentation.header.qwen_context_percent",
+            "event.presentation.window_omissions[].omitted_count",
+            "event.presentation.impact.as_of_utc",
+            "event.presentation.impact.error",
+            "event.presentation.portfolio.as_of_utc",
+            "event.presentation.portfolio.error",
+            "event.presentation.orders.as_of_utc",
+            "event.presentation.orders.error",
+            "event.presentation.agents.as_of_utc",
+            "event.presentation.agents.error",
+            "event.presentation.models.as_of_utc",
+            "event.presentation.models.error",
+            "event.presentation.timeline.as_of_utc",
+            "event.presentation.timeline.error",
+            "event.presentation.risk.as_of_utc",
+            "event.presentation.risk.error",
+            "event.presentation.data.as_of_utc",
+            "event.presentation.data.error",
+            "event.presentation.memory.as_of_utc",
+            "event.presentation.memory.error",
+            "event.presentation.system.as_of_utc",
+            "event.presentation.system.error",
+            "event.presentation.portfolio_rank_source",
         ],
         "integer_fields": [
             "envelope.sequence",
             "envelope.state_version",
-            "snapshot.state_version",
-            "header.agent_queue_length",
+            "snapshot.shell.state_version",
+            "snapshot.control_version",
+            "snapshot.shell.header.agent_queue_length",
+            "snapshot.timeline.hidden_event_count",
+            "snapshot.window_omissions[].omitted_count",
+            "event.presentation.control_version",
+            "event.presentation.header.agent_queue_length",
+            "event.presentation.timeline_hidden_event_count",
+            "event.presentation.window_omissions[].omitted_count",
+            "repository.unpushed_commit_count",
         ],
     }
 )
@@ -749,11 +926,74 @@ def _unknown_fields_from_validation(
     return unknown
 
 
+def _event_unknown_fields(
+    payload: dict[str, JsonValue],
+    error: ValidationError,
+) -> dict[str, JsonValue]:
+    unknown = _unknown_fields(payload, EventPayload)
+    validation_unknown = _unknown_fields_from_validation(payload, error)
+    validation_unknown.pop("entity", None)
+    unknown.update(validation_unknown)
+    entity_type = payload.get("entity_type")
+    entity = payload.get("entity")
+    model = event_model(entity_type) if isinstance(entity_type, str) else None
+    if model is None or not isinstance(entity, dict):
+        return unknown
+    try:
+        model.model_validate_json(json.dumps(entity, separators=(",", ":")))
+    except ValidationError as error:
+        nested = _unknown_fields_from_validation(entity, error)
+        if nested:
+            unknown["entity"] = nested
+    return unknown
+
+
+def _limit_unknown_json_leaves(
+    value: JsonValue,
+    budget: int,
+) -> tuple[JsonValue | object, int]:
+    if budget == 0:
+        return _MISSING, 0
+    if isinstance(value, dict):
+        if not value:
+            return {}, 1
+        limited: dict[str, JsonValue] = {}
+        used = 0
+        for key, item in value.items():
+            child, child_used = _limit_unknown_json_leaves(item, budget - used)
+            if child is not _MISSING:
+                limited[key] = cast(JsonValue, child)
+                used += child_used
+            if used == budget:
+                break
+        return (limited, used) if limited else (_MISSING, 0)
+    if isinstance(value, list):
+        if not value:
+            return [], 1
+        limited_items: list[JsonValue] = []
+        used = 0
+        for item in value:
+            child, child_used = _limit_unknown_json_leaves(item, budget - used)
+            if child is not _MISSING:
+                limited_items.append(cast(JsonValue, child))
+                used += child_used
+            if used == budget:
+                break
+        return (limited_items, used) if limited_items else (_MISSING, 0)
+    return value, 1
+
+
+def _limit_unknown_fields(values: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    limited, _ = _limit_unknown_json_leaves(values, MAX_UNTRUSTED_UNKNOWN_FIELDS)
+    return limited if isinstance(limited, dict) else {}
+
+
 def _report_untrusted(
     raw_bytes: bytes,
     unknown_fields: dict[str, JsonValue],
     on_untrusted: DiagnosticCallback | None,
 ) -> None:
+    unknown_fields = _limit_unknown_fields(unknown_fields)
     if not unknown_fields or on_untrusted is None:
         return
     diagnostic = UntrustedProtocolDiagnostic(hashlib.sha256(raw_bytes).hexdigest(), unknown_fields)
@@ -795,7 +1035,11 @@ def decode_envelope_json(
         payload_error = error
         payload = raw_value.get("payload")
         if isinstance(payload, dict):
-            payload_unknown = _unknown_fields_from_validation(envelope.payload, error)
+            payload_unknown = (
+                _event_unknown_fields(envelope.payload, error)
+                if envelope.message_type is MessageType.EVENT
+                else _unknown_fields_from_validation(envelope.payload, error)
+            )
         else:
             payload_unknown = {}
     else:

@@ -1,5 +1,6 @@
 use std::fmt;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetSystemTime;
@@ -60,16 +61,20 @@ impl UtcTimestamp {
         let mut current = SYSTEMTIME::default();
         // SAFETY: current is a valid writable SYSTEMTIME for this synchronous call.
         unsafe { GetSystemTime(&raw mut current) };
-        Self(format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        let seconds = format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
             current.wYear,
             current.wMonth,
             current.wDay,
             current.wHour,
             current.wMinute,
             current.wSecond,
-            current.wMilliseconds,
-        ))
+        );
+        if current.wMilliseconds == 0 {
+            Self(format!("{seconds}Z"))
+        } else {
+            Self(format!("{seconds}.{:03}000Z", current.wMilliseconds))
+        }
     }
 }
 
@@ -89,11 +94,20 @@ impl<'de> Deserialize<'de> for UtcTimestamp {
     {
         let value = String::deserialize(deserializer)?;
         if is_utc_timestamp(&value) {
-            Ok(Self(
-                value
-                    .strip_suffix("+00:00")
-                    .map_or(value.clone(), |body| format!("{body}Z")),
-            ))
+            let body = value
+                .strip_suffix('Z')
+                .or_else(|| value.strip_suffix("+00:00"))
+                .expect("validated UTC suffix");
+            let normalized = if let Some((seconds, fraction)) = body.split_once('.') {
+                if fraction.bytes().all(|digit| digit == b'0') {
+                    format!("{seconds}Z")
+                } else {
+                    format!("{seconds}.{fraction:0<6}Z")
+                }
+            } else {
+                format!("{body}Z")
+            };
+            Ok(Self(normalized))
         } else {
             Err(serde::de::Error::custom(
                 "timestamp must be zero-offset UTC",
@@ -110,7 +124,8 @@ fn is_utc_timestamp(value: &str) -> bool {
         return false;
     };
     let bytes = body.as_bytes();
-    let shape_is_valid = bytes.len() >= 19
+    let fractional_length_is_valid = bytes.len() == 19 || (21..=26).contains(&bytes.len());
+    let shape_is_valid = fractional_length_is_valid
         && bytes.get(4) == Some(&b'-')
         && bytes.get(7) == Some(&b'-')
         && bytes.get(10) == Some(&b'T')
@@ -159,6 +174,108 @@ impl NonEmptyString {
 
     pub(crate) fn literal(value: &'static str) -> Self {
         Self(value.to_owned())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sha256Hex(String);
+
+impl Serialize for Sha256Hex {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Sha256Hex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.len() == 64
+            && value
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "SHA-256 must be 64 lowercase hexadecimal characters",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecimalString(String);
+
+impl Serialize for DecimalString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DecimalString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if is_decimal_string(&value) {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "decimal must be bounded canonical base-10 without exponent",
+            ))
+        }
+    }
+}
+
+fn is_decimal_string(value: &str) -> bool {
+    if !(1..=128).contains(&value.len()) {
+        return false;
+    }
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    if unsigned.is_empty() {
+        return false;
+    }
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some()
+        || whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || (whole.len() > 1 && whole.starts_with('0'))
+    {
+        return false;
+    }
+    fraction
+        .is_none_or(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Priority(u8);
+
+impl<'de> Deserialize<'de> for Priority {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u8::deserialize(deserializer)?;
+        if value <= 100 {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "priority must be between 0 and 100",
+            ))
+        }
     }
 }
 
@@ -280,6 +397,62 @@ where
     }
 }
 
+fn deserialize_finite<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "floating-point value must be finite",
+        ))
+    }
+}
+
+fn deserialize_optional_nonnegative_finite<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = deserialize_optional_finite(deserializer)?;
+    if value.is_none_or(|item| item >= 0.0) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "floating-point value must be nonnegative",
+        ))
+    }
+}
+
+fn deserialize_confidence<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = deserialize_finite(deserializer)?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "confidence must be between zero and one",
+        ))
+    }
+}
+
+fn deserialize_optional_confidence<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = deserialize_optional_finite(deserializer)?;
+    if value.is_none_or(|item| (0.0..=1.0).contains(&item)) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "confidence must be between zero and one",
+        ))
+    }
+}
+
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -302,6 +475,7 @@ pub enum MessageType {
     LockResult,
     SnapshotRequest,
     Snapshot,
+    Event,
     ProtocolError,
     Ping,
     Pong,
@@ -340,6 +514,7 @@ pub enum Message {
     LockResult(LockResultPayload),
     SnapshotRequest(SnapshotRequestPayload),
     Snapshot(Box<SnapshotPayload>),
+    Event(Box<EventPayload>),
     ProtocolError(ProtocolErrorPayload),
     Ping(PingPayload),
     Pong(PongPayload),
@@ -359,6 +534,7 @@ impl Message {
             Self::LockResult(_) => MessageType::LockResult,
             Self::SnapshotRequest(_) => MessageType::SnapshotRequest,
             Self::Snapshot(_) => MessageType::Snapshot,
+            Self::Event(_) => MessageType::Event,
             Self::ProtocolError(_) => MessageType::ProtocolError,
             Self::Ping(_) => MessageType::Ping,
             Self::Pong(_) => MessageType::Pong,
@@ -449,7 +625,7 @@ pub struct LockResultPayload {
 }
 strict_struct!(SnapshotRequestPayload {});
 strict_struct!(SnapshotPayload {
-    snapshot: ShellSnapshot
+    snapshot: ConsoleSnapshot
 });
 strict_struct!(ProtocolErrorPayload {
     code: SafeId,
@@ -506,7 +682,7 @@ pub enum AlertSeverity {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlertView {
-    pub alert_id: NonEmptyString,
+    pub alert_id: SafeId,
     pub severity: AlertSeverity,
     pub summary: NonEmptyString,
     pub created_at_utc: UtcTimestamp,
@@ -520,12 +696,12 @@ pub struct HeaderView {
     pub operating_mode: OperatingMode,
     pub operating_mode_freshness: Freshness,
     #[serde(deserialize_with = "deserialize_required_option")]
-    pub operating_mode_reason: Option<String>,
+    pub operating_mode_reason: Option<NonEmptyString>,
     pub data_freshness: Freshness,
-    #[serde(deserialize_with = "deserialize_optional_finite")]
+    #[serde(deserialize_with = "deserialize_optional_nonnegative_finite")]
     pub data_age_seconds: Option<f64>,
     pub regime_label: String,
-    #[serde(deserialize_with = "deserialize_optional_finite")]
+    #[serde(deserialize_with = "deserialize_optional_confidence")]
     pub regime_confidence: Option<f64>,
     #[serde(deserialize_with = "deserialize_optional_finite")]
     pub portfolio_value: Option<f64>,
@@ -553,6 +729,1124 @@ pub struct ShellSnapshot {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub alerts: Option<Vec<AlertView>>,
     pub capabilities: Vec<CapabilityView>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AssetType {
+    Stock,
+    Etf,
+    Cash,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortfolioChangeState {
+    Unchanged,
+    Proposed,
+    Approved,
+    Executing,
+    Reconciling,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortfolioReconciliation {
+    NotRequired,
+    Pending,
+    Matched,
+    Mismatch,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioRow {
+    pub symbol: SafeId,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub description: Option<String>,
+    pub asset_type: AssetType,
+    pub quantity: DecimalString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub price: Option<DecimalString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub market_value: Option<DecimalString>,
+    #[serde(deserialize_with = "deserialize_finite")]
+    pub current_weight: f64,
+    #[serde(deserialize_with = "deserialize_optional_finite")]
+    pub proposed_weight: Option<f64>,
+    #[serde(deserialize_with = "deserialize_optional_finite")]
+    pub approved_weight: Option<f64>,
+    pub change_state: PortfolioChangeState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub confirmed_rank: Option<u64>,
+    pub reconciliation: PortfolioReconciliation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentStage {
+    Backlog,
+    Queued,
+    Running,
+    Waiting,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCard {
+    pub work_id: SafeId,
+    pub agent: NonEmptyString,
+    pub title: NonEmptyString,
+    pub stage: AgentStage,
+    pub priority: Priority,
+    pub urgent: bool,
+    #[serde(deserialize_with = "deserialize_optional_nonnegative_finite")]
+    pub elapsed_seconds: Option<f64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub model: Option<String>,
+    pub affected_areas: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineRow {
+    pub event_id: SafeId,
+    pub occurred_at_utc: UtcTimestamp,
+    pub impact: bool,
+    pub severity: AlertSeverity,
+    pub summary: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub agent_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub symbol: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub model_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub approval_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub order_id: Option<SafeId>,
+    pub evidence_ids: Vec<SafeId>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FillRow {
+    pub fill_id: SafeId,
+    pub quantity: DecimalString,
+    pub price: DecimalString,
+    pub fee: DecimalString,
+    pub filled_at_utc: UtcTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OrderStatus {
+    Proposed,
+    Approved,
+    Submitted,
+    Partial,
+    Filled,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OrderReconciliation {
+    Pending,
+    Matched,
+    Mismatch,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderRow {
+    pub order_id: SafeId,
+    pub symbol: SafeId,
+    pub side: OrderSide,
+    pub quantity: DecimalString,
+    pub status: OrderStatus,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub submitted_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub broker_order_id: Option<String>,
+    pub fills: Vec<FillRow>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub expected_price: Option<DecimalString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub actual_price: Option<DecimalString>,
+    pub reconciliation: OrderReconciliation,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelOpinionRow {
+    pub model_id: SafeId,
+    pub regime: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_confidence")]
+    pub confidence: f64,
+    pub as_of_utc: UtcTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub enum StrategyName {
+    #[serde(rename = "ml_model")]
+    MlModel,
+    #[serde(rename = "momentum")]
+    Momentum,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CandidateStatus {
+    Training,
+    Evaluating,
+    Passed,
+    Failed,
+    Rejected,
+    Active,
+    Rollback,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateRow {
+    pub candidate_id: SafeId,
+    pub family: NonEmptyString,
+    pub strategy: StrategyName,
+    pub status: CandidateStatus,
+    pub evidence_ids: Vec<SafeId>,
+    pub created_at_utc: UtcTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RiskLimitStatus {
+    Within,
+    Violated,
+    Pending,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiskLimitRow {
+    pub limit_id: SafeId,
+    pub current_value: DecimalString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub proposed_value: Option<DecimalString>,
+    pub status: RiskLimitStatus,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalState {
+    Pending,
+    Approved,
+    Held,
+    Rejected,
+    Rework,
+    Stale,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalRow {
+    pub approval_id: SafeId,
+    pub state: ApprovalState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub reason: Option<String>,
+    pub evidence_ids: Vec<SafeId>,
+    pub requested_at_utc: UtcTimestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRow {
+    pub source_id: SafeId,
+    pub freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub as_of_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_optional_nonnegative_finite")]
+    pub age_seconds: Option<f64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub coverage: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub error: Option<String>,
+    pub consumers: Vec<NonEmptyString>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceRow {
+    pub evidence_id: SafeId,
+    pub evidence_type: NonEmptyString,
+    pub source: NonEmptyString,
+    pub created_at_utc: UtcTimestamp,
+    pub sha256: Sha256Hex,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryStatus {
+    Core,
+    Archived,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRow {
+    pub memory_id: SafeId,
+    pub status: MemoryStatus,
+    pub summary: NonEmptyString,
+    pub evidence_ids: Vec<SafeId>,
+    pub updated_at_utc: UtcTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceState {
+    Running,
+    Paused,
+    Stopped,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceRow {
+    pub service_id: SafeId,
+    pub state: ServiceState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub health_reason: Option<String>,
+    pub observed_at_utc: UtcTimestamp,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryRow {
+    pub repository_id: SafeId,
+    pub freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub as_of_utc: Option<UtcTimestamp>,
+    pub source: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub error: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub branch: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub revision: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub clean: Option<bool>,
+    pub worktrees: Vec<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub unpushed_commit_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MetricRow {
+    pub metric_id: SafeId,
+    #[serde(deserialize_with = "deserialize_optional_finite")]
+    pub value: Option<f64>,
+    pub unit: NonEmptyString,
+    pub freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub observed_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMetricRow {
+    metric_id: SafeId,
+    #[serde(deserialize_with = "deserialize_optional_finite")]
+    value: Option<f64>,
+    unit: NonEmptyString,
+    freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    observed_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    error: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for MetricRow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawMetricRow::deserialize(deserializer)?;
+        let has_reason = raw
+            .error
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let valid = match raw.freshness {
+            Freshness::Fresh => {
+                raw.value.is_some() && raw.observed_at_utc.is_some() && raw.error.is_none()
+            }
+            Freshness::Stale => raw.value.is_some() && raw.observed_at_utc.is_some() && has_reason,
+            Freshness::Unavailable => raw.value.is_none() && has_reason,
+            Freshness::Loading => {
+                raw.value.is_none() && raw.observed_at_utc.is_none() && raw.error.is_none()
+            }
+        };
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "metric freshness does not match value, time, and error",
+            ));
+        }
+        Ok(Self {
+            metric_id: raw.metric_id,
+            value: raw.value,
+            unit: raw.unit,
+            freshness: raw.freshness,
+            observed_at_utc: raw.observed_at_utc,
+            error: raw.error,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReturnComponent {
+    Price,
+    Dividends,
+    CashInterest,
+    Fees,
+    Sp500TotalReturn,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReturnComponentRow {
+    pub component: ReturnComponent,
+    pub value: DecimalString,
+}
+
+pub type AlertRow = AlertView;
+
+#[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum EventTarget {
+    #[serde(rename = "shell.alerts")]
+    ShellAlerts,
+    #[serde(rename = "impact.holdings")]
+    ImpactHoldings,
+    #[serde(rename = "impact.events")]
+    ImpactEvents,
+    #[serde(rename = "impact.agents")]
+    ImpactAgents,
+    #[serde(rename = "portfolio.rows")]
+    PortfolioRows,
+    #[serde(rename = "portfolio.returns-today")]
+    PortfolioReturnsToday,
+    #[serde(rename = "portfolio.returns-since-rebalance")]
+    PortfolioReturnsSinceRebalance,
+    #[serde(rename = "portfolio.returns-since-start")]
+    PortfolioReturnsSinceStart,
+    #[serde(rename = "portfolio.metrics")]
+    PortfolioMetrics,
+    #[serde(rename = "portfolio.history")]
+    PortfolioHistory,
+    #[serde(rename = "orders.rows")]
+    OrdersRows,
+    #[serde(rename = "orders.reconciliation-agents")]
+    OrdersReconciliationAgents,
+    #[serde(rename = "orders.history")]
+    OrdersHistory,
+    #[serde(rename = "agents.rows")]
+    AgentsRows,
+    #[serde(rename = "agents.history")]
+    AgentsHistory,
+    #[serde(rename = "models.opinions")]
+    ModelsOpinions,
+    #[serde(rename = "models.candidates")]
+    ModelsCandidates,
+    #[serde(rename = "models.metrics")]
+    ModelsMetrics,
+    #[serde(rename = "models.evidence")]
+    ModelsEvidence,
+    #[serde(rename = "timeline.rows")]
+    TimelineRows,
+    #[serde(rename = "risk.limits")]
+    RiskLimits,
+    #[serde(rename = "risk.approvals")]
+    RiskApprovals,
+    #[serde(rename = "risk.alerts")]
+    RiskAlerts,
+    #[serde(rename = "risk.metrics")]
+    RiskMetrics,
+    #[serde(rename = "data.sources")]
+    DataSources,
+    #[serde(rename = "data.evidence")]
+    DataEvidence,
+    #[serde(rename = "memory.rows")]
+    MemoryRows,
+    #[serde(rename = "memory.history")]
+    MemoryHistory,
+    #[serde(rename = "system.services")]
+    SystemServices,
+    #[serde(rename = "system.metrics")]
+    SystemMetrics,
+    #[serde(rename = "system.repositories")]
+    SystemRepositories,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowOmission {
+    pub target: EventTarget,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub omitted_count: Option<u64>,
+}
+
+fn validate_window_omissions(omissions: &[WindowOmission]) -> Result<(), &'static str> {
+    if omissions
+        .iter()
+        .any(|omission| omission.omitted_count == Some(0))
+    {
+        return Err("window omission counts must be positive or null");
+    }
+    if omissions
+        .windows(2)
+        .any(|items| items[0].target >= items[1].target)
+    {
+        return Err("window omission targets must be unique and canonical");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScreenMeta {
+    pub freshness: Freshness,
+    pub as_of_utc: Option<UtcTimestamp>,
+    pub source: NonEmptyString,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScreenMeta {
+    freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    as_of_utc: Option<UtcTimestamp>,
+    source: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    error: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ScreenMeta {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawScreenMeta::deserialize(deserializer)?;
+        validate_freshness(raw.freshness, raw.as_of_utc.as_ref(), raw.error.as_deref())
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            freshness: raw.freshness,
+            as_of_utc: raw.as_of_utc,
+            source: raw.source,
+            error: raw.error,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EventPresentation {
+    pub generated_at_utc: UtcTimestamp,
+    pub header: HeaderView,
+    pub control_version: u64,
+    pub control_hash: Sha256Hex,
+    pub window_omissions: Vec<WindowOmission>,
+    pub impact: ScreenMeta,
+    pub portfolio: ScreenMeta,
+    pub orders: ScreenMeta,
+    pub agents: ScreenMeta,
+    pub models: ScreenMeta,
+    pub timeline: ScreenMeta,
+    pub risk: ScreenMeta,
+    pub data: ScreenMeta,
+    pub memory: ScreenMeta,
+    pub system: ScreenMeta,
+    pub portfolio_rank_source: Option<NonEmptyString>,
+    pub timeline_hidden_event_count: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEventPresentation {
+    generated_at_utc: UtcTimestamp,
+    header: HeaderView,
+    control_version: u64,
+    control_hash: Sha256Hex,
+    window_omissions: Vec<WindowOmission>,
+    impact: ScreenMeta,
+    portfolio: ScreenMeta,
+    orders: ScreenMeta,
+    agents: ScreenMeta,
+    models: ScreenMeta,
+    timeline: ScreenMeta,
+    risk: ScreenMeta,
+    data: ScreenMeta,
+    memory: ScreenMeta,
+    system: ScreenMeta,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    portfolio_rank_source: Option<NonEmptyString>,
+    timeline_hidden_event_count: u64,
+}
+
+impl<'de> Deserialize<'de> for EventPresentation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawEventPresentation::deserialize(deserializer)?;
+        validate_window_omissions(&raw.window_omissions).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            generated_at_utc: raw.generated_at_utc,
+            header: raw.header,
+            control_version: raw.control_version,
+            control_hash: raw.control_hash,
+            window_omissions: raw.window_omissions,
+            impact: raw.impact,
+            portfolio: raw.portfolio,
+            orders: raw.orders,
+            agents: raw.agents,
+            models: raw.models,
+            timeline: raw.timeline,
+            risk: raw.risk,
+            data: raw.data,
+            memory: raw.memory,
+            system: raw.system,
+            portfolio_rank_source: raw.portfolio_rank_source,
+            timeline_hidden_event_count: raw.timeline_hidden_event_count,
+        })
+    }
+}
+
+macro_rules! screen_view {
+    ($name:ident { $($field:ident : $kind:ty),* $(,)? }) => {
+        #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct $name {
+            pub freshness: Freshness,
+            #[serde(deserialize_with = "deserialize_required_option")]
+            pub as_of_utc: Option<UtcTimestamp>,
+            pub source: NonEmptyString,
+            #[serde(deserialize_with = "deserialize_required_option")]
+            pub error: Option<String>,
+            $(pub $field: $kind),*
+        }
+    };
+}
+
+screen_view!(ImpactView {
+    holdings: Vec<PortfolioRow>,
+    events: Vec<TimelineRow>,
+    agents: Vec<AgentCard>,
+});
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioView {
+    pub freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub as_of_utc: Option<UtcTimestamp>,
+    pub source: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub error: Option<String>,
+    pub rows: Vec<PortfolioRow>,
+    pub returns_today: Vec<ReturnComponentRow>,
+    pub returns_since_rebalance: Vec<ReturnComponentRow>,
+    pub returns_since_start: Vec<ReturnComponentRow>,
+    pub metrics: Vec<MetricRow>,
+    pub history: Vec<TimelineRow>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub rank_source: Option<NonEmptyString>,
+}
+screen_view!(OrdersView {
+    rows: Vec<OrderRow>,
+    reconciliation_agents: Vec<AgentCard>,
+    history: Vec<TimelineRow>,
+});
+screen_view!(AgentsView {
+    rows: Vec<AgentCard>,
+    history: Vec<TimelineRow>,
+});
+screen_view!(ModelsView {
+    opinions: Vec<ModelOpinionRow>,
+    candidates: Vec<CandidateRow>,
+    metrics: Vec<MetricRow>,
+    evidence: Vec<EvidenceRow>,
+});
+screen_view!(TimelineView {
+    rows: Vec<TimelineRow>,
+    hidden_event_count: u64,
+});
+screen_view!(RiskView {
+    limits: Vec<RiskLimitRow>,
+    approvals: Vec<ApprovalRow>,
+    alerts: Vec<AlertRow>,
+    metrics: Vec<MetricRow>,
+});
+screen_view!(DataView {
+    sources: Vec<SourceRow>,
+    evidence: Vec<EvidenceRow>,
+});
+screen_view!(MemoryView {
+    rows: Vec<MemoryRow>,
+    history: Vec<TimelineRow>,
+});
+screen_view!(SystemView {
+    services: Vec<ServiceRow>,
+    metrics: Vec<MetricRow>,
+    repositories: Vec<RepositoryRow>,
+});
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReasonRule {
+    Forbidden,
+    Optional,
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfirmationLevel {
+    None,
+    Confirm,
+    DoubleConfirm,
+    TypedLive,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandSpecView {
+    pub command_type: NonEmptyString,
+    pub payload_model: NonEmptyString,
+    pub capability_id: SafeId,
+    pub reason_rule: ReasonRule,
+    pub confirmation_level: ConfirmationLevel,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ConsoleSnapshot {
+    pub shell: ShellSnapshot,
+    pub control_version: u64,
+    pub control_hash: Sha256Hex,
+    pub command_specs: Vec<CommandSpecView>,
+    pub window_omissions: Vec<WindowOmission>,
+    pub impact: ImpactView,
+    pub portfolio: PortfolioView,
+    pub orders: OrdersView,
+    pub agents: AgentsView,
+    pub models: ModelsView,
+    pub timeline: TimelineView,
+    pub risk: RiskView,
+    pub data: DataView,
+    pub memory: MemoryView,
+    pub system: SystemView,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConsoleSnapshot {
+    shell: ShellSnapshot,
+    control_version: u64,
+    control_hash: Sha256Hex,
+    command_specs: Vec<CommandSpecView>,
+    window_omissions: Vec<WindowOmission>,
+    impact: ImpactView,
+    portfolio: PortfolioView,
+    orders: OrdersView,
+    agents: AgentsView,
+    models: ModelsView,
+    timeline: TimelineView,
+    risk: RiskView,
+    data: DataView,
+    memory: MemoryView,
+    system: SystemView,
+}
+
+impl<'de> Deserialize<'de> for ConsoleSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawConsoleSnapshot::deserialize(deserializer)?;
+        validate_window_omissions(&raw.window_omissions).map_err(serde::de::Error::custom)?;
+        for (freshness, as_of_utc, error) in [
+            (
+                raw.impact.freshness,
+                raw.impact.as_of_utc.as_ref(),
+                raw.impact.error.as_deref(),
+            ),
+            (
+                raw.portfolio.freshness,
+                raw.portfolio.as_of_utc.as_ref(),
+                raw.portfolio.error.as_deref(),
+            ),
+            (
+                raw.orders.freshness,
+                raw.orders.as_of_utc.as_ref(),
+                raw.orders.error.as_deref(),
+            ),
+            (
+                raw.agents.freshness,
+                raw.agents.as_of_utc.as_ref(),
+                raw.agents.error.as_deref(),
+            ),
+            (
+                raw.models.freshness,
+                raw.models.as_of_utc.as_ref(),
+                raw.models.error.as_deref(),
+            ),
+            (
+                raw.timeline.freshness,
+                raw.timeline.as_of_utc.as_ref(),
+                raw.timeline.error.as_deref(),
+            ),
+            (
+                raw.risk.freshness,
+                raw.risk.as_of_utc.as_ref(),
+                raw.risk.error.as_deref(),
+            ),
+            (
+                raw.data.freshness,
+                raw.data.as_of_utc.as_ref(),
+                raw.data.error.as_deref(),
+            ),
+            (
+                raw.memory.freshness,
+                raw.memory.as_of_utc.as_ref(),
+                raw.memory.error.as_deref(),
+            ),
+            (
+                raw.system.freshness,
+                raw.system.as_of_utc.as_ref(),
+                raw.system.error.as_deref(),
+            ),
+        ] {
+            validate_freshness(freshness, as_of_utc, error).map_err(serde::de::Error::custom)?;
+        }
+        for source in &raw.data.sources {
+            validate_freshness(
+                source.freshness,
+                source.as_of_utc.as_ref(),
+                source.error.as_deref(),
+            )
+            .map_err(serde::de::Error::custom)?;
+        }
+        for repository in &raw.system.repositories {
+            validate_freshness(
+                repository.freshness,
+                repository.as_of_utc.as_ref(),
+                repository.error.as_deref(),
+            )
+            .map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self {
+            shell: raw.shell,
+            control_version: raw.control_version,
+            control_hash: raw.control_hash,
+            command_specs: raw.command_specs,
+            window_omissions: raw.window_omissions,
+            impact: raw.impact,
+            portfolio: raw.portfolio,
+            orders: raw.orders,
+            agents: raw.agents,
+            models: raw.models,
+            timeline: raw.timeline,
+            risk: raw.risk,
+            data: raw.data,
+            memory: raw.memory,
+            system: raw.system,
+        })
+    }
+}
+
+fn validate_freshness(
+    freshness: Freshness,
+    as_of_utc: Option<&UtcTimestamp>,
+    error: Option<&str>,
+) -> Result<(), &'static str> {
+    if matches!(freshness, Freshness::Fresh | Freshness::Stale) && as_of_utc.is_none() {
+        return Err("fresh and stale values require as_of_utc");
+    }
+    if matches!(freshness, Freshness::Stale | Freshness::Unavailable)
+        && error.is_none_or(|value| value.trim().is_empty())
+    {
+        return Err("stale and unavailable values require an error reason");
+    }
+    if freshness == Freshness::Fresh && error.is_some() {
+        return Err("fresh values cannot report an error");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EntityType {
+    PortfolioRow,
+    AgentCard,
+    TimelineRow,
+    OrderRow,
+    ModelOpinionRow,
+    CandidateRow,
+    RiskLimitRow,
+    ApprovalRow,
+    SourceRow,
+    EvidenceRow,
+    MemoryRow,
+    ServiceRow,
+    RepositoryRow,
+    MetricRow,
+    ReturnComponentRow,
+    AlertRow,
+}
+
+impl EventTarget {
+    fn is_compatible(self, entity_type: EntityType) -> bool {
+        matches!(
+            (entity_type, self),
+            (
+                EntityType::PortfolioRow,
+                Self::ImpactHoldings | Self::PortfolioRows
+            ) | (
+                EntityType::AgentCard,
+                Self::ImpactAgents | Self::OrdersReconciliationAgents | Self::AgentsRows
+            ) | (
+                EntityType::TimelineRow,
+                Self::ImpactEvents
+                    | Self::PortfolioHistory
+                    | Self::OrdersHistory
+                    | Self::AgentsHistory
+                    | Self::TimelineRows
+                    | Self::MemoryHistory
+            ) | (EntityType::OrderRow, Self::OrdersRows)
+                | (EntityType::ModelOpinionRow, Self::ModelsOpinions)
+                | (EntityType::CandidateRow, Self::ModelsCandidates)
+                | (EntityType::RiskLimitRow, Self::RiskLimits)
+                | (EntityType::ApprovalRow, Self::RiskApprovals)
+                | (EntityType::SourceRow, Self::DataSources)
+                | (
+                    EntityType::EvidenceRow,
+                    Self::ModelsEvidence | Self::DataEvidence
+                )
+                | (EntityType::MemoryRow, Self::MemoryRows)
+                | (EntityType::ServiceRow, Self::SystemServices)
+                | (EntityType::RepositoryRow, Self::SystemRepositories)
+                | (
+                    EntityType::MetricRow,
+                    Self::PortfolioMetrics
+                        | Self::ModelsMetrics
+                        | Self::RiskMetrics
+                        | Self::SystemMetrics
+                )
+                | (
+                    EntityType::ReturnComponentRow,
+                    Self::PortfolioReturnsToday
+                        | Self::PortfolioReturnsSinceRebalance
+                        | Self::PortfolioReturnsSinceStart
+                )
+                | (EntityType::AlertRow, Self::ShellAlerts | Self::RiskAlerts)
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EventOperation {
+    Upsert,
+    Remove,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum EventEntity {
+    PortfolioRow(PortfolioRow),
+    AgentCard(AgentCard),
+    TimelineRow(TimelineRow),
+    OrderRow(OrderRow),
+    ModelOpinionRow(ModelOpinionRow),
+    CandidateRow(CandidateRow),
+    RiskLimitRow(RiskLimitRow),
+    ApprovalRow(ApprovalRow),
+    SourceRow(SourceRow),
+    EvidenceRow(EvidenceRow),
+    MemoryRow(MemoryRow),
+    ServiceRow(ServiceRow),
+    RepositoryRow(RepositoryRow),
+    MetricRow(MetricRow),
+    ReturnComponentRow(ReturnComponentRow),
+    AlertRow(AlertRow),
+}
+
+impl EventEntity {
+    fn primary_id(&self) -> &str {
+        match self {
+            Self::PortfolioRow(row) => row.symbol.as_str(),
+            Self::AgentCard(row) => row.work_id.as_str(),
+            Self::TimelineRow(row) => row.event_id.as_str(),
+            Self::OrderRow(row) => row.order_id.as_str(),
+            Self::ModelOpinionRow(row) => row.model_id.as_str(),
+            Self::CandidateRow(row) => row.candidate_id.as_str(),
+            Self::RiskLimitRow(row) => row.limit_id.as_str(),
+            Self::ApprovalRow(row) => row.approval_id.as_str(),
+            Self::SourceRow(row) => row.source_id.as_str(),
+            Self::EvidenceRow(row) => row.evidence_id.as_str(),
+            Self::MemoryRow(row) => row.memory_id.as_str(),
+            Self::ServiceRow(row) => row.service_id.as_str(),
+            Self::RepositoryRow(row) => row.repository_id.as_str(),
+            Self::MetricRow(row) => row.metric_id.as_str(),
+            Self::ReturnComponentRow(row) => match row.component {
+                ReturnComponent::Price => "price",
+                ReturnComponent::Dividends => "dividends",
+                ReturnComponent::CashInterest => "cash-interest",
+                ReturnComponent::Fees => "fees",
+                ReturnComponent::Sp500TotalReturn => "sp500-total-return",
+            },
+            Self::AlertRow(row) => row.alert_id.as_str(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EventPayload {
+    pub entity_type: EntityType,
+    pub entity_id: SafeId,
+    pub operation: EventOperation,
+    pub entity: Option<EventEntity>,
+    pub targets: Vec<EventTarget>,
+    pub presentation: EventPresentation,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEventPayload {
+    entity_type: EntityType,
+    entity_id: SafeId,
+    operation: EventOperation,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    entity: Option<serde_json::Value>,
+    targets: Vec<EventTarget>,
+    presentation: EventPresentation,
+}
+
+impl<'de> Deserialize<'de> for EventPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let RawEventPayload {
+            entity_type,
+            entity_id,
+            operation,
+            entity,
+            targets,
+            presentation,
+        } = RawEventPayload::deserialize(deserializer)?;
+        if !(1..=8).contains(&targets.len()) {
+            return Err(serde::de::Error::custom(
+                "event targets must contain one to eight entries",
+            ));
+        }
+        if targets.windows(2).any(|items| items[0] >= items[1]) {
+            return Err(serde::de::Error::custom(
+                "event targets must be unique and canonical",
+            ));
+        }
+        if targets
+            .iter()
+            .any(|target| !target.is_compatible(entity_type))
+        {
+            return Err(serde::de::Error::custom(
+                "event target is incompatible with entity_type",
+            ));
+        }
+        let entity = match (operation, entity) {
+            (EventOperation::Remove, None) => None,
+            (EventOperation::Remove, Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "remove events require a null entity",
+                ));
+            }
+            (EventOperation::Upsert, None) => {
+                return Err(serde::de::Error::custom(
+                    "upsert events require a complete entity",
+                ));
+            }
+            (EventOperation::Upsert, Some(value)) => {
+                Some(parse_event_entity(entity_type, value).map_err(serde::de::Error::custom)?)
+            }
+        };
+        if entity
+            .as_ref()
+            .is_some_and(|value| value.primary_id() != entity_id.as_str())
+        {
+            return Err(serde::de::Error::custom(
+                "event entity_id does not match entity",
+            ));
+        }
+        Ok(Self {
+            entity_type,
+            entity_id,
+            operation,
+            entity,
+            targets,
+            presentation,
+        })
+    }
+}
+
+fn parse_event_entity(
+    entity_type: EntityType,
+    value: serde_json::Value,
+) -> Result<EventEntity, String> {
+    fn parse<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, String> {
+        serde_json::from_value(value).map_err(|error| error.to_string())
+    }
+    let entity = match entity_type {
+        EntityType::PortfolioRow => EventEntity::PortfolioRow(parse(value)?),
+        EntityType::AgentCard => EventEntity::AgentCard(parse(value)?),
+        EntityType::TimelineRow => EventEntity::TimelineRow(parse(value)?),
+        EntityType::OrderRow => EventEntity::OrderRow(parse(value)?),
+        EntityType::ModelOpinionRow => EventEntity::ModelOpinionRow(parse(value)?),
+        EntityType::CandidateRow => EventEntity::CandidateRow(parse(value)?),
+        EntityType::RiskLimitRow => EventEntity::RiskLimitRow(parse(value)?),
+        EntityType::ApprovalRow => EventEntity::ApprovalRow(parse(value)?),
+        EntityType::SourceRow => {
+            let row: SourceRow = parse(value)?;
+            validate_freshness(row.freshness, row.as_of_utc.as_ref(), row.error.as_deref())
+                .map_err(|error| error.to_owned())?;
+            EventEntity::SourceRow(row)
+        }
+        EntityType::EvidenceRow => EventEntity::EvidenceRow(parse(value)?),
+        EntityType::MemoryRow => EventEntity::MemoryRow(parse(value)?),
+        EntityType::ServiceRow => EventEntity::ServiceRow(parse(value)?),
+        EntityType::RepositoryRow => {
+            let row: RepositoryRow = parse(value)?;
+            validate_freshness(row.freshness, row.as_of_utc.as_ref(), row.error.as_deref())
+                .map_err(|error| error.to_owned())?;
+            EventEntity::RepositoryRow(row)
+        }
+        EntityType::MetricRow => EventEntity::MetricRow(parse(value)?),
+        EntityType::ReturnComponentRow => EventEntity::ReturnComponentRow(parse(value)?),
+        EntityType::AlertRow => EventEntity::AlertRow(parse(value)?),
+    };
+    Ok(entity)
 }
 
 impl fmt::Display for MessageType {

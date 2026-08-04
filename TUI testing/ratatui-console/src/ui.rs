@@ -99,7 +99,8 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: P
         _ => unreachable!("authentication rendered separately"),
     };
     let lines = if let Some(snapshot) = &state.snapshot {
-        let header = &snapshot.header;
+        let shell = &snapshot.shell;
+        let header = &shell.header;
         let mode = operating_mode(header.operating_mode);
         let mode_freshness = freshness(header.operating_mode_freshness);
         let data_freshness = freshness(header.data_freshness);
@@ -157,7 +158,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: P
         );
         let blockers = bounded_text(&blockers, 28);
         let market_session = bounded_text(&available_text(&header.market_session), 18);
-        let alerts = alert_header_status(snapshot.alerts.as_deref());
+        let alerts = alert_header_status(shell.alerts.as_deref());
         let primary = Line::from(format!(
             "MODE {mode} / {mode_freshness} | DATA {data_freshness} | AGE {age}"
         ));
@@ -236,7 +237,7 @@ fn render_alerts(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: P
     let lines = match state
         .snapshot
         .as_ref()
-        .and_then(|snapshot| snapshot.alerts.as_ref())
+        .and_then(|snapshot| snapshot.shell.alerts.as_ref())
     {
         None => vec![Line::from("[?] ALERTS UNAVAILABLE")],
         Some(alerts) if alerts.is_empty() => vec![Line::from(Span::styled(

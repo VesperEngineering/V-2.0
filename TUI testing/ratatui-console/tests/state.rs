@@ -20,36 +20,17 @@ fn envelope(sequence: u64, state_version: u64, message_type: &str, payload: Valu
 }
 
 fn snapshot(sequence: u64, state_version: u64, regime: &str) -> Envelope {
+    let mut snapshot: Value = serde_json::from_slice(include_bytes!(
+        "../../contracts/v1/console_snapshot_empty_command_specs.json"
+    ))
+    .expect("valid shared console snapshot");
+    snapshot["shell"]["state_version"] = json!(state_version);
+    snapshot["shell"]["header"]["regime_label"] = json!(regime);
     envelope(
         sequence,
         state_version,
         "snapshot",
-        json!({
-            "snapshot": {
-                "state_version": state_version,
-                "generated_at_utc": "2026-08-03T00:00:00Z",
-                "header": {
-                    "operating_mode": "unknown",
-                    "operating_mode_freshness": "unavailable",
-                    "operating_mode_reason": "No reviewed runtime-status adapter is configured.",
-                    "data_freshness": "unavailable",
-                    "data_age_seconds": null,
-                    "regime_label": regime,
-                    "regime_confidence": null,
-                    "portfolio_value": null,
-                    "next_rebalance_at_utc": null,
-                    "rebalance_blockers": null,
-                    "active_agent": null,
-                    "agent_queue_length": null,
-                    "qwen_state": "Unavailable",
-                    "qwen_context_percent": null,
-                    "current_time_utc": "2026-08-03T00:00:00Z",
-                    "market_session": "Unavailable"
-                },
-                "alerts": null,
-                "capabilities": []
-            }
-        }),
+        json!({"snapshot": snapshot}),
     )
 }
 
@@ -105,6 +86,109 @@ fn lock_result(sequence: u64, state_version: u64) -> Envelope {
 
 fn pong(sequence: u64, state_version: u64, nonce: &str) -> Envelope {
     envelope(sequence, state_version, "pong", json!({ "nonce": nonce }))
+}
+
+fn event(sequence: u64, state_version: u64) -> Envelope {
+    let snapshot: Value = serde_json::from_slice(include_bytes!(
+        "../../contracts/v1/console_snapshot_empty_command_specs.json"
+    ))
+    .expect("valid shared console snapshot");
+    let screen_meta = |name: &str| {
+        json!({
+            "freshness": snapshot[name]["freshness"].clone(),
+            "as_of_utc": snapshot[name]["as_of_utc"].clone(),
+            "source": snapshot[name]["source"].clone(),
+            "error": snapshot[name]["error"].clone(),
+        })
+    };
+    envelope(
+        sequence,
+        state_version,
+        "event",
+        json!({
+            "entity_type": "alert-row",
+            "entity_id": "alert:1",
+            "operation": "remove",
+            "entity": null,
+            "targets": ["shell.alerts"],
+            "presentation": {
+                "generated_at_utc": snapshot["shell"]["generated_at_utc"].clone(),
+                "header": snapshot["shell"]["header"].clone(),
+                "control_version": snapshot["control_version"].clone(),
+                "control_hash": snapshot["control_hash"].clone(),
+                "window_omissions": snapshot["window_omissions"].clone(),
+                "impact": screen_meta("impact"),
+                "portfolio": screen_meta("portfolio"),
+                "orders": screen_meta("orders"),
+                "agents": screen_meta("agents"),
+                "models": screen_meta("models"),
+                "timeline": screen_meta("timeline"),
+                "risk": screen_meta("risk"),
+                "data": screen_meta("data"),
+                "memory": screen_meta("memory"),
+                "system": screen_meta("system"),
+                "portfolio_rank_source": snapshot["portfolio"]["rank_source"].clone(),
+                "timeline_hidden_event_count": snapshot["timeline"]["hidden_event_count"].clone(),
+            }
+        }),
+    )
+}
+
+#[test]
+fn events_request_a_full_snapshot_without_applying_partial_state() {
+    let mut state = AppState::controller();
+    assert_eq!(
+        state.reduce(snapshot(1, 1, "Before")),
+        Ok(ReduceOutcome::Changed)
+    );
+
+    assert_eq!(
+        state.reduce(event(2, 2)),
+        Ok(ReduceOutcome::RequestSnapshot)
+    );
+    assert!(state.snapshot.is_none());
+    assert_eq!(
+        state.reduce(snapshot(3, 2, "After")),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert!(state.snapshot.is_some());
+}
+
+#[test]
+fn gapped_and_stale_events_both_request_a_full_snapshot() {
+    let mut state = AppState::controller();
+    assert_eq!(
+        state.reduce(snapshot(1, 2, "Current")),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(
+        state.reduce(event(2, 1)),
+        Ok(ReduceOutcome::RequestSnapshot)
+    );
+    assert!(state.snapshot.is_none());
+
+    let mut state = AppState::controller();
+    assert_eq!(
+        state.reduce(snapshot(1, 2, "Current")),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(
+        state.reduce(event(3, 3)),
+        Ok(ReduceOutcome::RequestSnapshot)
+    );
+    assert!(state.snapshot.is_none());
+}
+
+#[test]
+fn events_before_authentication_fail_closed() {
+    let mut state = AppState::locked();
+    let error = state
+        .reduce(event(1, 1))
+        .expect_err("event must fail closed");
+
+    assert_eq!(error.code, "state");
+    assert_eq!(state.access, AccessState::ProtocolLockout);
+    assert!(state.snapshot.is_none());
 }
 
 #[test]

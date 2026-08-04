@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from datetime import datetime, timezone
@@ -177,18 +179,54 @@ def test_lock_releases_lease_and_requires_fresh_unlock(gateway: Gateway) -> None
 
 def test_initial_snapshot_is_unknown_unavailable(gateway: Gateway) -> None:
     snapshot = gateway.snapshot()
-    assert snapshot.state_version == 0
-    assert snapshot.header.operating_mode is OperatingMode.UNKNOWN
-    assert snapshot.header.operating_mode_freshness is Freshness.UNAVAILABLE
-    assert snapshot.header.operating_mode_reason == "No reviewed runtime-status adapter is configured."
-    assert snapshot.header.data_freshness is Freshness.UNAVAILABLE
-    assert snapshot.header.portfolio_value is None
-    assert snapshot.header.regime_label == "Unavailable"
-    assert snapshot.header.agent_queue_length is None
-    assert snapshot.header.rebalance_blockers is None
-    assert snapshot.alerts is None
-    assert len(snapshot.capabilities) == 31
-    assert all(item.state.value == "disabled" and item.reason == PHASE_ONE_REASON for item in snapshot.capabilities)
+    shell = snapshot.shell
+    assert shell.state_version == 0
+    assert shell.header.operating_mode is OperatingMode.UNKNOWN
+    assert shell.header.operating_mode_freshness is Freshness.UNAVAILABLE
+    assert shell.header.operating_mode_reason == "No reviewed runtime-status adapter is configured."
+    assert shell.header.data_freshness is Freshness.UNAVAILABLE
+    assert shell.header.portfolio_value is None
+    assert shell.header.regime_label == "Unavailable"
+    assert shell.header.agent_queue_length is None
+    assert shell.header.rebalance_blockers is None
+    assert shell.alerts is None
+    assert len(shell.capabilities) == 31
+    assert all(item.state.value == "disabled" and item.reason == PHASE_ONE_REASON for item in shell.capabilities)
+    assert snapshot.command_specs == ()
+    views = {
+        name: getattr(snapshot, name)
+        for name in (
+            "impact",
+            "portfolio",
+            "orders",
+            "agents",
+            "models",
+            "timeline",
+            "risk",
+            "data",
+            "memory",
+            "system",
+        )
+    }
+    assert all(view.freshness is Freshness.UNAVAILABLE for view in views.values())
+    assert all(view.as_of_utc is None and view.error for view in views.values())
+    facts = {
+        "capabilities": [item.model_dump(mode="json") for item in shell.capabilities],
+        "command_prerequisites": {
+            name: {
+                "freshness": views[name].freshness.value,
+                "source": views[name].source,
+                "error": views[name].error,
+            }
+            for name in ("portfolio", "orders", "models", "risk", "data", "system")
+        },
+    }
+    expected_hash = hashlib.sha256(
+        json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert snapshot.control_version == 0
+    assert snapshot.control_hash == expected_hash
+    assert snapshot.control_hash != "0" * 64
 
 
 def test_state_version_zero_snapshot_is_one_cached_immutable_value(gateway: Gateway) -> None:

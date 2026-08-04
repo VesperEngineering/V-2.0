@@ -9,6 +9,6 @@ pub mod theme;
 pub mod transport;
 pub mod ui;
 
-pub use contract::{Envelope, MessageType, ShellSnapshot};
+pub use contract::{ConsoleSnapshot, Envelope, MessageType, ShellSnapshot};
 pub use launcher::GatewayLauncher;
 pub use transport::PipeTransport;

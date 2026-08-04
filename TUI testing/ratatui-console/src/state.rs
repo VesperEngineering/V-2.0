@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::contract::{
-    AccessState as WireAccessState, Envelope, LeaseStatus, Message, PasswordString, ShellSnapshot,
+    AccessState as WireAccessState, ConsoleSnapshot, Envelope, LeaseStatus, Message, PasswordString,
 };
 use crate::input::InputEvent;
 use crate::layout::DisplayMode;
@@ -186,7 +186,7 @@ pub struct AppState {
     pub access: AccessState,
     pub screen: Screen,
     pub mode: LocalMode,
-    pub snapshot: Option<ShellSnapshot>,
+    pub snapshot: Option<ConsoleSnapshot>,
     auth_stage: AuthStage,
     password: SecretBuffer,
     confirmation: SecretBuffer,
@@ -377,7 +377,7 @@ impl AppState {
                 ));
             }
             return match &envelope.message {
-                Message::Snapshot(_) | Message::Pong(_) => {
+                Message::Snapshot(_) | Message::Event(_) | Message::Pong(_) => {
                     self.awaiting_snapshot = true;
                     self.snapshot = None;
                     Ok(ReduceOutcome::RequestSnapshot)
@@ -393,7 +393,7 @@ impl AppState {
         if self.lock_pending {
             return match envelope.message {
                 Message::Snapshot(payload) if self.awaiting_snapshot => {
-                    if payload.snapshot.state_version != envelope.state_version {
+                    if payload.snapshot.shell.state_version != envelope.state_version {
                         return Err(
                             self.fail_closed("state-version", "Snapshot version is invalid.")
                         );
@@ -506,7 +506,7 @@ impl AppState {
                         self.fail_closed("state", "Snapshot arrived before authentication.")
                     );
                 }
-                if payload.snapshot.state_version != envelope.state_version {
+                if payload.snapshot.shell.state_version != envelope.state_version {
                     return Err(self.fail_closed("state-version", "Snapshot version is invalid."));
                 }
                 if envelope.state_version < self.state_version {
@@ -532,6 +532,15 @@ impl AppState {
                 self.snapshot = Some(payload.snapshot);
                 self.awaiting_snapshot = false;
                 Ok(ReduceOutcome::Changed)
+            }
+            Message::Event(_) => {
+                if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
+                    return Err(self.fail_closed("state", "Event arrived before authentication."));
+                }
+                self.state_version = self.state_version.max(envelope.state_version);
+                self.snapshot = None;
+                self.awaiting_snapshot = true;
+                Ok(ReduceOutcome::RequestSnapshot)
             }
             Message::LockResult(_) => {
                 if self.phase != SessionPhase::Authenticated || !self.lock_pending {
@@ -636,7 +645,7 @@ impl AppState {
             snapshot_version: self
                 .snapshot
                 .as_ref()
-                .map(|snapshot| snapshot.state_version),
+                .map(|snapshot| snapshot.shell.state_version),
             auth_stage: self.auth_stage,
             password_characters: self.password.0.chars().count(),
             confirmation_characters: self.confirmation.0.chars().count(),
