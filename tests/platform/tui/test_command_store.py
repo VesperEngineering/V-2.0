@@ -446,6 +446,124 @@ def test_expired_claim_cannot_finish_before_or_after_reclaim(tmp_path) -> None:
     store.close()
 
 
+def test_finish_can_store_exact_safe_terminal_override_and_replay(tmp_path) -> None:
+    request = _request()
+    database = tmp_path / "commands.db"
+    store = CommandStore(database)
+    store.accept(request, _context(), "note.add", NOW)
+    claim = store.claim(
+        request.command_id,
+        "worker:recovery",
+        NOW,
+        NOW + timedelta(minutes=1),
+    )
+    assert claim is not None
+
+    receipt = store.finish(
+        request.command_id,
+        claim.claim_token,
+        ReceiptStatus.FAILED,
+        None,
+        NOW + timedelta(seconds=1),
+        code="manual-intervention-required",
+        safe_message="Recovery state is unknown; inspect before retrying.",
+    )
+    assert receipt.code == "manual-intervention-required"
+    assert receipt.safe_message == "Recovery state is unknown; inspect before retrying."
+    assert (
+        store.finish(
+            request.command_id,
+            claim.claim_token,
+            ReceiptStatus.FAILED,
+            None,
+            NOW + timedelta(seconds=1),
+            code="manual-intervention-required",
+            safe_message="Recovery state is unknown; inspect before retrying.",
+        )
+        == receipt
+    )
+    with store.ledger.read() as connection:
+        command = connection.execute(
+            "SELECT code, safe_message FROM commands WHERE command_id = ?",
+            (request.command_id,),
+        ).fetchone()
+        event = connection.execute(
+            "SELECT code, safe_message FROM command_receipt_events "
+            "WHERE command_id = ? ORDER BY event_sequence DESC LIMIT 1",
+            (request.command_id,),
+        ).fetchone()
+    assert tuple(command) == tuple(event) == (
+        "manual-intervention-required",
+        "Recovery state is unknown; inspect before retrying.",
+    )
+
+    with pytest.raises(CommandStateError, match="terminal"):
+        store.finish(
+            request.command_id,
+            claim.claim_token,
+            ReceiptStatus.FAILED,
+            None,
+            NOW + timedelta(seconds=1),
+            code="different-code",
+            safe_message="Recovery state is unknown; inspect before retrying.",
+        )
+    with pytest.raises(CommandStateError, match="terminal"):
+        store.finish(
+            request.command_id,
+            claim.claim_token,
+            ReceiptStatus.FAILED,
+            None,
+            NOW + timedelta(seconds=1),
+            code="manual-intervention-required",
+            safe_message="A different recovery message.",
+        )
+    store.close()
+
+    reopened = CommandStore(database)
+    assert reopened.get(request.command_id) == receipt
+    reopened.close()
+
+
+@pytest.mark.parametrize(
+    ("code", "safe_message"),
+    (
+        ("bad code", "Safe."),
+        ("manual-intervention-required", ""),
+        ("manual-intervention-required", "x" * 513),
+        (1, "Safe."),
+        ("manual-intervention-required", 1),
+    ),
+)
+def test_finish_rejects_invalid_terminal_overrides(
+    tmp_path,
+    code: object,
+    safe_message: object,
+) -> None:
+    request = _request()
+    store = CommandStore(tmp_path / "commands.db")
+    store.accept(request, _context(), "note.add", NOW)
+    claim = store.claim(
+        request.command_id,
+        "worker:recovery",
+        NOW,
+        NOW + timedelta(minutes=1),
+    )
+    assert claim is not None
+
+    with pytest.raises((TypeError, ValueError)):
+        store.finish(
+            request.command_id,
+            claim.claim_token,
+            ReceiptStatus.FAILED,
+            None,
+            NOW + timedelta(seconds=1),
+            code=code,  # type: ignore[arg-type]
+            safe_message=safe_message,  # type: ignore[arg-type]
+        )
+    assert store.get(request.command_id).status is ReceiptStatus.RUNNING
+    store.close()
+
+
 def test_terminal_result_is_recursively_redacted_before_storage(tmp_path) -> None:
     request = _request()
     store = CommandStore(tmp_path / "commands.db")

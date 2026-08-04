@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -21,6 +22,7 @@ from vesper.platform.tui.sqlite_ledger import (
     LedgerSchemaError,
     LedgerTransactionError,
     TuiLedger,
+    _COMMAND_SCHEMA_STATEMENTS,
 )
 
 
@@ -196,6 +198,69 @@ def _create_v2_database(path, *, with_note: bool = False) -> None:
         connection.execute("PRAGMA user_version = 2")
 
 
+def _create_v3_database(
+    path,
+    *,
+    with_note: bool = False,
+    with_command: bool = False,
+) -> None:
+    _create_v2_database(path, with_note=with_note)
+    with sqlite3.connect(path) as connection:
+        for statement in _COMMAND_SCHEMA_STATEMENTS:
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version = 3")
+        if with_command:
+            accepted_request = json.dumps(
+                {
+                    "command_id": "client:legacy",
+                    "command_type": "note.add",
+                    "confirmation": None,
+                    "payload": {
+                        "body": "legacy context",
+                        "target_id": "AAPL",
+                        "target_type": "stock",
+                        "visibility": "private",
+                    },
+                    "reason": None,
+                    "reviewed_control_hash": "0" * 64,
+                    "reviewed_control_version": 1,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            request_sha256 = hashlib.sha256(
+                accepted_request.encode("utf-8")
+            ).hexdigest()
+            connection.execute(
+                """
+                INSERT INTO commands (
+                    command_id, command_type, request_sha256, operator_id, client_id,
+                    reviewed_control_version, reviewed_control_hash, handler_key,
+                    accepted_request_json, status, code, safe_message, admitted_at_utc,
+                    accepted_at_utc, finished_at_utc, result_json, claim_worker_id,
+                    claim_token_sha256, claimed_at_utc, claim_expires_at_utc
+                ) VALUES (
+                    'client:legacy', 'note.add', ?, 'operator:legacy', 'client:legacy',
+                    '1', ?, 'note.add', ?, 'accepted', 'accepted',
+                    'Command accepted.', '2026-08-03T16:00:00Z',
+                    '2026-08-03T16:00:00Z', NULL, NULL, NULL, NULL, NULL, NULL
+                )
+                """,
+                (request_sha256, "0" * 64, accepted_request),
+            )
+            connection.execute(
+                """
+                INSERT INTO command_receipt_events (
+                    command_id, status, code, safe_message, occurred_at_utc,
+                    worker_id, result_json
+                ) VALUES (
+                    'client:legacy', 'accepted', 'accepted', 'Command accepted.',
+                    '2026-08-03T16:00:00Z', NULL, NULL
+                )
+                """
+            )
+
+
 def _event(index: int, **changes: object) -> EventInput:
     values: dict[str, object] = {
         "event_id": f"event:{index}",
@@ -223,7 +288,7 @@ def test_ledger_migrates_reopens_and_configures_required_pragmas(tmp_path) -> No
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
         assert connection.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         tables = {
             row[0]
             for row in connection.execute(
@@ -240,6 +305,7 @@ def test_ledger_migrates_reopens_and_configures_required_pragmas(tmp_path) -> No
         "note_search",
         "commands",
         "command_receipt_events",
+        "operator_decisions",
     } <= tables
     reopened = TuiLedger(database)
     reopened.close()
@@ -249,13 +315,13 @@ def test_ledger_rejects_future_wrong_and_corrupt_databases(tmp_path) -> None:
     future = tmp_path / "future.db"
     TuiLedger(future).close()
     with sqlite3.connect(future) as connection:
-        connection.execute("PRAGMA user_version = 4")
+        connection.execute("PRAGMA user_version = 5")
     future_before = future.read_bytes()
     with pytest.raises(LedgerSchemaError, match="newer"):
         TuiLedger(future)
     assert future.read_bytes() == future_before
     with sqlite3.connect(future) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
 
     wrong = tmp_path / "wrong.db"
     with sqlite3.connect(wrong) as connection:
@@ -301,7 +367,7 @@ def test_ledger_migrates_exact_v1_data_and_backfills_note_search(tmp_path) -> No
 
     ledger = TuiLedger(database)
     with ledger.read() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         row = connection.execute(
             "SELECT note_id, body FROM note_search WHERE note_search MATCH ?",
             ('"legacy"*',),
@@ -332,7 +398,7 @@ def test_ledger_migrates_exact_v2_data_and_adds_empty_command_ledger(tmp_path) -
 
     ledger = TuiLedger(database)
     with ledger.read() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert connection.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM note_search").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM commands").fetchone()[0] == 0
@@ -340,6 +406,105 @@ def test_ledger_migrates_exact_v2_data_and_adds_empty_command_ledger(tmp_path) -
             "SELECT COUNT(*) FROM command_receipt_events"
         ).fetchone()[0] == 0
     ledger.close()
+
+
+def test_ledger_migrates_exact_v3_data_and_adds_empty_operator_decisions(tmp_path) -> None:
+    database = tmp_path / "legacy-v3.db"
+    _create_v3_database(database, with_note=True, with_command=True)
+
+    ledger = TuiLedger(database)
+    with ledger.read() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 1
+        command = connection.execute(
+            "SELECT command_id, status FROM commands"
+        ).fetchone()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM operator_decisions"
+        ).fetchone()[0] == 0
+    ledger.close()
+
+    assert tuple(command) == ("client:legacy", "accepted")
+
+
+def test_ledger_rejects_damaged_v3_before_v4_migration_without_partial_schema(
+    tmp_path,
+) -> None:
+    database = tmp_path / "damaged-v3.db"
+    _create_v3_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER commands_no_delete")
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerSchemaError, match="schema"):
+        TuiLedger(database)
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'operator_decisions'"
+        ).fetchone()[0] == 0
+
+
+def test_ledger_rejects_forged_v3_terminal_override_before_v4_migration(
+    tmp_path,
+) -> None:
+    database = tmp_path / "forged-v3.db"
+    _create_v3_database(database, with_command=True)
+    with sqlite3.connect(database) as connection:
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE name = 'commands_status_transition'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER commands_status_transition")
+        connection.execute(
+            """
+            UPDATE commands
+            SET status = 'failed', code = 'manual-intervention-required',
+                safe_message = 'Legacy forged override.',
+                finished_at_utc = '2026-08-03T16:00:02Z',
+                claim_worker_id = 'worker:legacy', claim_token_sha256 = ?,
+                claimed_at_utc = '2026-08-03T16:00:01Z',
+                claim_expires_at_utc = '2026-08-03T16:01:00Z'
+            WHERE command_id = 'client:legacy'
+            """,
+            ("a" * 64,),
+        )
+        connection.execute(trigger_sql)
+        connection.execute(
+            """
+            INSERT INTO command_receipt_events (
+                command_id, status, code, safe_message, occurred_at_utc,
+                worker_id, result_json
+            ) VALUES (
+                'client:legacy', 'running', 'running', 'Command is running.',
+                '2026-08-03T16:00:01Z', 'worker:legacy', NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO command_receipt_events (
+                command_id, status, code, safe_message, occurred_at_utc,
+                worker_id, result_json
+            ) VALUES (
+                'client:legacy', 'failed', 'manual-intervention-required',
+                'Legacy forged override.', '2026-08-03T16:00:02Z',
+                'worker:legacy', NULL
+            )
+            """
+        )
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerCorruptionError, match="command content"):
+        TuiLedger(database)
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'operator_decisions'"
+        ).fetchone()[0] == 0
 
 
 def test_ledger_rejects_corrupt_v2_before_v3_migration_without_partial_schema(

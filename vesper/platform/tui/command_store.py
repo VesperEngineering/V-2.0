@@ -24,7 +24,7 @@ from .command_contracts import (
 )
 from .command_policy import AuthorizationDecision, CommandContext
 from .sqlite_ledger import LedgerClosedError, LedgerCorruptionError, TuiLedger
-from .views import SafeId, Sha256Hex, StrictModel, UtcDateTime, WireUInt
+from .views import NonEmptyStr, SafeId, Sha256Hex, StrictModel, UtcDateTime, WireUInt
 
 
 _TERMINAL_STATUSES = {
@@ -43,6 +43,7 @@ _CLAIM_TOKEN = TypeAdapter(
     Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 )
 _SAFE_ID = TypeAdapter(SafeId)
+_SAFE_MESSAGE = TypeAdapter(NonEmptyStr)
 _SHA256 = TypeAdapter(Sha256Hex)
 _UTC = TypeAdapter(UtcDateTime)
 
@@ -489,6 +490,9 @@ class CommandStore:
         status: ReceiptStatus,
         result: dict[str, CommandJsonValue] | None,
         finished_at_utc: datetime,
+        *,
+        code: str | None = None,
+        safe_message: str | None = None,
     ) -> CommandReceipt:
         self._require_open()
         with self._ledger.transaction() as connection:
@@ -499,6 +503,8 @@ class CommandStore:
                 status,
                 result,
                 finished_at_utc,
+                code=code,
+                safe_message=safe_message,
             )
 
     def finish_in_transaction(
@@ -509,6 +515,9 @@ class CommandStore:
         status: ReceiptStatus,
         result: dict[str, CommandJsonValue] | None,
         finished_at_utc: datetime,
+        *,
+        code: str | None = None,
+        safe_message: str | None = None,
     ) -> CommandReceipt:
         self._require_open()
         self._ledger.require_transaction(connection)
@@ -516,6 +525,15 @@ class CommandStore:
         checked_token = _CLAIM_TOKEN.validate_python(claim_token, strict=True)
         if type(status) is not ReceiptStatus or status not in _TERMINAL_STATUSES:
             raise CommandStateError("finish requires a terminal receipt status")
+        default_code, default_message = _STATUS_MESSAGES[status]
+        checked_code = (
+            default_code if code is None else _SAFE_ID.validate_python(code, strict=True)
+        )
+        checked_message = (
+            default_message
+            if safe_message is None
+            else _SAFE_MESSAGE.validate_python(safe_message, strict=True)
+        )
         finished_at = _utc_text(finished_at_utc)
         row = connection.execute(
             "SELECT * FROM commands WHERE command_id = ?",
@@ -534,8 +552,8 @@ class CommandStore:
         proposed = CommandReceipt(
             command_id=checked_command_id,
             status=status,
-            code=_STATUS_MESSAGES[status][0],
-            safe_message=_STATUS_MESSAGES[status][1],
+            code=checked_code,
+            safe_message=checked_message,
             accepted_at_utc=row["accepted_at_utc"],
             finished_at_utc=finished_at,
             result=redacted_result,
@@ -545,6 +563,8 @@ class CommandStore:
             current = self._receipt_from_row(row)
             if (
                 current.status is status
+                and current.code == proposed.code
+                and current.safe_message == proposed.safe_message
                 and current.result == proposed.result
                 and current.finished_at_utc == finished_at_utc
             ):
@@ -556,7 +576,6 @@ class CommandStore:
             raise CommandClaimError("command claim has expired")
         if finished_at_utc < _parse_utc(row["claimed_at_utc"]):
             raise ValueError("finish cannot predate the worker claim")
-        code, safe_message = _STATUS_MESSAGES[status]
         connection.execute(
             """
             UPDATE commands
@@ -565,8 +584,8 @@ class CommandStore:
             """,
             (
                 status.value,
-                code,
-                safe_message,
+                checked_code,
+                checked_message,
                 finished_at,
                 result_json,
                 checked_command_id,
@@ -576,8 +595,8 @@ class CommandStore:
             connection,
             checked_command_id,
             status,
-            code,
-            safe_message,
+            checked_code,
+            checked_message,
             finished_at,
             row["claim_worker_id"],
             result_json,
@@ -592,6 +611,20 @@ class CommandStore:
                 "SELECT * FROM commands WHERE command_id = ?",
                 (checked_command_id,),
             ).fetchone()
+        return None if row is None else self._receipt_from_row(row)
+
+    def get_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        command_id: str,
+    ) -> CommandReceipt | None:
+        self._require_open()
+        self._ledger.require_transaction(connection)
+        checked_command_id = _SAFE_ID.validate_python(command_id, strict=True)
+        row = connection.execute(
+            "SELECT * FROM commands WHERE command_id = ?",
+            (checked_command_id,),
+        ).fetchone()
         return None if row is None else self._receipt_from_row(row)
 
     def get_accepted(self, command_id: str) -> StoredAcceptedCommand | None:

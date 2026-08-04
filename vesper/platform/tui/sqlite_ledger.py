@@ -16,7 +16,7 @@ from typing import Iterator
 
 
 APPLICATION_ID = 0x56323054
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _COMMAND_STATUS_MESSAGES = {
     "accepted": ("accepted", "Command accepted."),
@@ -456,10 +456,47 @@ _COMMAND_SCHEMA_STATEMENTS = (
 
 _COMMAND_SCHEMA = ";\n".join(statement.strip() for statement in _COMMAND_SCHEMA_STATEMENTS) + ";\n"
 
+_OPERATOR_DECISION_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE operator_decisions (
+        decision_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id TEXT NOT NULL UNIQUE,
+        command_id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL,
+        checkpoint_id TEXT NOT NULL,
+        operator_id TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) BETWEEN 1 AND 2000),
+        decision TEXT NOT NULL CHECK (decision = 'hold'),
+        decided_at_utc TEXT NOT NULL,
+        content_json TEXT NOT NULL CHECK (json_valid(content_json)),
+        FOREIGN KEY(command_id) REFERENCES commands(command_id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TRIGGER operator_decisions_no_update
+    BEFORE UPDATE ON operator_decisions
+    BEGIN
+        SELECT RAISE(ABORT, 'operator decisions are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER operator_decisions_no_delete
+    BEFORE DELETE ON operator_decisions
+    BEGIN
+        SELECT RAISE(ABORT, 'operator decisions are immutable');
+    END
+    """,
+)
+
+_OPERATOR_DECISION_SCHEMA = ";\n".join(
+    statement.strip() for statement in _OPERATOR_DECISION_SCHEMA_STATEMENTS
+) + ";\n"
+
 _SCHEMAS = {
     1: _SCHEMA_V1,
     2: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA,
     3: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA + _COMMAND_SCHEMA,
+    4: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA + _COMMAND_SCHEMA + _OPERATOR_DECISION_SCHEMA,
 }
 _REQUIRED_COLUMNS = {
     1: _REQUIRED_COLUMNS_V1,
@@ -518,6 +555,62 @@ _REQUIRED_COLUMNS = {
             "result_json",
         ),
     },
+    4: {
+        **_REQUIRED_COLUMNS_V1,
+        "note_search": (
+            "note_id",
+            "target_type",
+            "target_id",
+            "body",
+            "visibility",
+            "author",
+        ),
+        "commands": (
+            "command_sequence",
+            "command_id",
+            "command_type",
+            "request_sha256",
+            "operator_id",
+            "client_id",
+            "reviewed_control_version",
+            "reviewed_control_hash",
+            "handler_key",
+            "accepted_request_json",
+            "status",
+            "code",
+            "safe_message",
+            "admitted_at_utc",
+            "accepted_at_utc",
+            "finished_at_utc",
+            "result_json",
+            "claim_worker_id",
+            "claim_token_sha256",
+            "claimed_at_utc",
+            "claim_expires_at_utc",
+        ),
+        "command_receipt_events": (
+            "event_sequence",
+            "command_id",
+            "status",
+            "code",
+            "safe_message",
+            "occurred_at_utc",
+            "worker_id",
+            "result_json",
+        ),
+        "operator_decisions": (
+            "decision_sequence",
+            "decision_id",
+            "command_id",
+            "run_id",
+            "checkpoint_id",
+            "operator_id",
+            "reason",
+            "decision",
+            "decided_at_utc",
+            "content_json",
+        ),
+    },
 }
 
 
@@ -552,6 +645,10 @@ def _invalid_note_content() -> LedgerCorruptionError:
 
 def _invalid_command_content() -> LedgerCorruptionError:
     return LedgerCorruptionError("TUI ledger command content is invalid")
+
+
+def _invalid_operator_decision_content() -> LedgerCorruptionError:
+    return LedgerCorruptionError("TUI ledger operator decision content is invalid")
 
 
 def _is_safe_id(value: object) -> bool:
@@ -859,7 +956,7 @@ class TuiLedger:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection, version: int) -> None:
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise LedgerSchemaError("unsupported TUI ledger schema version")
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -878,10 +975,15 @@ class TuiLedger:
                     """
                 )
             TuiLedger._validate_note_search_parity(connection, check_index=True)
-            for statement in _COMMAND_SCHEMA_STATEMENTS:
+            if version in (1, 2):
+                for statement in _COMMAND_SCHEMA_STATEMENTS:
+                    connection.execute(statement)
+            TuiLedger._validate_command_content(connection)
+            TuiLedger._validate_legacy_command_terminal_messages(connection)
+            for statement in _OPERATOR_DECISION_SCHEMA_STATEMENTS:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            TuiLedger._validate_command_content(connection)
+            TuiLedger._validate_operator_decision_content(connection)
             TuiLedger._validate_owned_schema(
                 connection,
                 expected_version=SCHEMA_VERSION,
@@ -1052,7 +1154,7 @@ class TuiLedger:
             status = row["status"]
             request_json = row["accepted_request_json"]
             result_json = row["result_json"]
-            if status in _COMMAND_STATUS_MESSAGES and (
+            if status in {"accepted", "running"} and (
                 row["code"],
                 row["safe_message"],
             ) != _COMMAND_STATUS_MESSAGES[status]:
@@ -1183,11 +1285,12 @@ class TuiLedger:
                 and row["worker_id"] is None
             ):
                 raise _invalid_command_content()
-            if row["status"] in _COMMAND_STATUS_MESSAGES and (
+            if row["status"] in {"accepted", "running"} and (
                 row["code"],
                 row["safe_message"],
             ) != _COMMAND_STATUS_MESSAGES[row["status"]]:
                 raise _invalid_command_content()
+
             if row["result_json"] is not None:
                 result = _decode_canonical_object(row["result_json"])
                 if _contains_sensitive_key(result):
@@ -1288,6 +1391,104 @@ class TuiLedger:
                 raise _invalid_command_content()
 
     @staticmethod
+    def _validate_legacy_command_terminal_messages(
+        connection: sqlite3.Connection,
+    ) -> None:
+        terminal = {"completed", "failed", "cancelled"}
+        for table in ("commands", "command_receipt_events"):
+            for row in connection.execute(
+                f"SELECT status, code, safe_message FROM {table}"
+            ):
+                if row["status"] in terminal and (
+                    row["code"],
+                    row["safe_message"],
+                ) != _COMMAND_STATUS_MESSAGES[row["status"]]:
+                    raise _invalid_command_content()
+
+    @staticmethod
+    def _validate_operator_decision_content(connection: sqlite3.Connection) -> None:
+        from .command_contracts import ApprovalPayload, CommandRequest
+        from .operator_decisions import OperatorDecision, canonical_decision_json
+
+        for row in connection.execute(
+            "SELECT * FROM operator_decisions ORDER BY decision_sequence"
+        ):
+            try:
+                decision = OperatorDecision.model_validate_json(
+                    row["content_json"],
+                    strict=True,
+                )
+            except (TypeError, ValueError) as exc:
+                raise _invalid_operator_decision_content() from exc
+            expected_id = "tui-decision:" + hashlib.sha256(
+                decision.command_id.encode("utf-8")
+            ).hexdigest()
+            if (
+                decision.decision_id != expected_id
+                or canonical_decision_json(decision) != row["content_json"]
+                or row["decision_id"] != decision.decision_id
+                or row["command_id"] != decision.command_id
+                or row["run_id"] != decision.run_id
+                or row["checkpoint_id"] != decision.checkpoint_id
+                or row["operator_id"] != decision.operator_id
+                or row["reason"] != decision.reason
+                or row["decision"] != "hold"
+                or row["decided_at_utc"]
+                != decision.model_dump(mode="json")["decided_at_utc"]
+            ):
+                raise _invalid_operator_decision_content()
+            command = connection.execute(
+                "SELECT * FROM commands WHERE command_id = ?",
+                (decision.command_id,),
+            ).fetchone()
+            if command is None or command["accepted_request_json"] is None:
+                raise _invalid_operator_decision_content()
+            try:
+                request = CommandRequest.model_validate_json(
+                    command["accepted_request_json"],
+                    strict=True,
+                )
+            except (TypeError, ValueError) as exc:
+                raise _invalid_operator_decision_content() from exc
+            if (
+                request.command_type != "approval.hold"
+                or type(request.payload) is not ApprovalPayload
+                or request.payload.run_id != decision.run_id
+                or request.payload.checkpoint_id != decision.checkpoint_id
+                or request.reason != decision.reason
+                or command["operator_id"] != decision.operator_id
+                or command["handler_key"] != "approval.hold"
+                or command["status"] != "completed"
+                or command["code"] != "completed"
+                or command["safe_message"] != "Command completed."
+                or command["finished_at_utc"] != row["decided_at_utc"]
+                or command["result_json"]
+                != json.dumps(
+                    {"decision_id": decision.decision_id},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            ):
+                raise _invalid_operator_decision_content()
+
+        missing = connection.execute(
+            """
+            SELECT command_id
+            FROM commands AS command
+            WHERE command.command_type = 'approval.hold'
+              AND command.status = 'completed'
+              AND (
+                  SELECT COUNT(*)
+                  FROM operator_decisions AS decision
+                  WHERE decision.command_id = command.command_id
+              ) != 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if missing is not None:
+            raise _invalid_operator_decision_content()
+
+    @staticmethod
     def _is_unclaimed_empty(connection: sqlite3.Connection) -> bool:
         application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
@@ -1342,6 +1543,10 @@ class TuiLedger:
             TuiLedger._validate_note_search_parity(connection, check_index=False)
         if version >= 3:
             TuiLedger._validate_command_content(connection)
+        if version == 3:
+            TuiLedger._validate_legacy_command_terminal_messages(connection)
+        if version >= 4:
+            TuiLedger._validate_operator_decision_content(connection)
         quick_check = tuple(
             str(row[0]) for row in connection.execute("PRAGMA quick_check")
         )
