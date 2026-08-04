@@ -14,14 +14,24 @@ use windows_sys::Win32::System::Time::{
 
 use crate::contract::{AlertSeverity, Freshness, OperatingMode, UtcTimestamp};
 use crate::layout::{ViewportClass, shell_layout};
+use crate::screens::agents::render_agents;
+use crate::screens::data::render_data;
+use crate::screens::detail::render_direct_detail;
 use crate::screens::impact::render_impact;
+use crate::screens::memory::render_memory;
+use crate::screens::models::render_models;
 use crate::screens::orders::render_orders;
 use crate::screens::portfolio::render_portfolio;
-use crate::state::{AccessState, AppState, AuthFeedback, AuthStage, Screen};
+use crate::screens::risk::render_risk;
+use crate::screens::system::render_system;
+use crate::screens::timeline::render_timeline;
+use crate::search::{SearchKind, SearchStatus, format_filter_expression};
+use crate::state::{AccessState, AppState, AuthFeedback, AuthStage, LocalMode, Screen};
 use crate::theme::Palette;
 
 const EASTERN_TIME_ZONE: &str = "Eastern Standard Time";
-const PHASE_ONE_UNAVAILABLE: &str = "UNAVAILABLE - Phase 1 provides the secure console shell only.";
+const AGENT_INPUT_UNAVAILABLE: &str =
+    "UNAVAILABLE - Agent input is not connected to the controller yet.";
 static EASTERN_ZONE: OnceLock<Option<DYNAMIC_TIME_ZONE_INFORMATION>> = OnceLock::new();
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
@@ -38,7 +48,40 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     render_header(frame, layout.header, state, palette);
     render_navigation(frame, layout.navigation, state, palette);
     render_alerts(frame, layout.alerts, state, palette);
-    render_screen(frame, layout.body, layout.viewport, state, palette);
+    if state.mode == LocalMode::Search {
+        render_search(frame, layout.body, state, palette);
+    } else if state.mode == LocalMode::Filter {
+        render_filter(frame, layout.body, state, palette);
+    } else if state.mode == LocalMode::NoteEditor {
+        render_note_editor(frame, layout.body, state, palette);
+    } else if let Some(result) = state.search_detail() {
+        render_search_detail(frame, layout.body, state, result, palette);
+    } else if state.mode == LocalMode::Open
+        && state.screen_state().detail_open
+        && matches!(
+            state.screen,
+            Screen::Orders
+                | Screen::ModelsRegime
+                | Screen::RiskApprovals
+                | Screen::DataEvidence
+                | Screen::Memory
+                | Screen::System
+        )
+    {
+        if let Some(snapshot) = state.snapshot.as_ref() {
+            render_direct_detail(
+                frame,
+                layout.body,
+                snapshot,
+                state.screen,
+                &state.screen_state(),
+            );
+        } else {
+            render_screen(frame, layout.body, layout.viewport, state, palette);
+        }
+    } else {
+        render_screen(frame, layout.body, layout.viewport, state, palette);
+    }
     render_agent_input(frame, layout.input, palette);
     render_footer(frame, layout.footer, state, palette);
 }
@@ -302,25 +345,39 @@ fn render_screen(
                 render_orders(frame, area, &snapshot.orders, &screen_state);
                 return;
             }
-            Screen::Agents
-            | Screen::ModelsRegime
-            | Screen::Timeline
-            | Screen::RiskApprovals
-            | Screen::DataEvidence
-            | Screen::Memory
-            | Screen::System => {}
+            Screen::Agents => {
+                render_agents(frame, area, &snapshot.agents, &screen_state);
+                return;
+            }
+            Screen::ModelsRegime => {
+                render_models(frame, area, &snapshot.models, &screen_state);
+                return;
+            }
+            Screen::Timeline => {
+                render_timeline(frame, area, &snapshot.timeline, &screen_state);
+                return;
+            }
+            Screen::RiskApprovals => {
+                render_risk(frame, area, &snapshot.risk, &screen_state);
+                return;
+            }
+            Screen::DataEvidence => {
+                render_data(frame, area, &snapshot.data, &screen_state);
+                return;
+            }
+            Screen::Memory => {
+                render_memory(frame, area, &snapshot.memory, &screen_state);
+                return;
+            }
+            Screen::System => {
+                render_system(frame, area, &snapshot.system, &screen_state);
+                return;
+            }
         }
     }
 
     let title = format!("SCREEN: {}", screen_name(state.screen));
-    let message = if matches!(
-        state.screen,
-        Screen::Impact | Screen::Portfolio | Screen::Orders
-    ) {
-        "UNAVAILABLE - Controller snapshot has not arrived."
-    } else {
-        PHASE_ONE_UNAVAILABLE
-    };
+    let message = "UNAVAILABLE - Controller snapshot has not arrived.";
     let content = Paragraph::new(message)
         .style(base_style(palette))
         .wrap(Wrap { trim: true });
@@ -336,14 +393,248 @@ fn render_screen(
         Paragraph::new(message)
             .style(base_style(palette))
             .wrap(Wrap { trim: true })
-            .block(panel("PHASE 1 AVAILABILITY", palette)),
+            .block(panel("SOURCE AVAILABILITY", palette)),
         columns[1],
     );
 }
 
+fn render_search(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+    let search = state.search_state();
+    let mut lines = vec![
+        Line::from(format!("Query: {}", sanitize_text(search.query()))),
+        Line::from(format!(
+            "Filters: {}",
+            sanitize_text(&format_filter_expression(search.filters(state.screen)))
+        )),
+    ];
+    let show_rows = match search.status() {
+        SearchStatus::Idle => {
+            lines.push(Line::from("Type to search all supported V20 records."));
+            false
+        }
+        SearchStatus::Debouncing | SearchStatus::Loading => {
+            lines.push(Line::from("LOADING - Searching controller history."));
+            false
+        }
+        SearchStatus::StaleRefreshing => {
+            lines.push(Line::from(
+                "STALE / REFRESHING - State changed; searching again.",
+            ));
+            false
+        }
+        SearchStatus::Unavailable => {
+            let error = search.server_error().map_or_else(
+                || {
+                    search.query_error().map_or_else(
+                        || "Search is unavailable.".to_owned(),
+                        |error| error.to_string(),
+                    )
+                },
+                str::to_owned,
+            );
+            lines.push(Line::from(format!(
+                "[!] UNAVAILABLE - {}",
+                sanitize_text(&error)
+            )));
+            false
+        }
+        SearchStatus::Incomplete => {
+            let error = search
+                .server_error()
+                .unwrap_or("Some search sources failed.");
+            lines.push(Line::from(format!(
+                "[!] INCOMPLETE - {}",
+                sanitize_text(error)
+            )));
+            true
+        }
+        SearchStatus::Fresh => true,
+    };
+    if show_rows {
+        if search.results().is_empty() {
+            lines.push(Line::from("No matching records."));
+        } else {
+            let available_rows = usize::from(area.height.saturating_sub(6)).max(1);
+            let start = search
+                .selected_index()
+                .saturating_sub(available_rows.saturating_sub(1))
+                .min(search.results().len().saturating_sub(available_rows));
+            for (index, row) in search
+                .results()
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(available_rows)
+            {
+                let marker = if index == search.selected_index() {
+                    ">"
+                } else {
+                    " "
+                };
+                let timestamp = format_search_time(row.timestamp_utc.as_deref());
+                let context = if row.context_only {
+                    " | CONTEXT ONLY"
+                } else {
+                    ""
+                };
+                lines.push(Line::from(format!(
+                    "{marker} [{}] {} | {} | {} | source {}{context}",
+                    search_kind(row.kind),
+                    sanitize_text(&row.title),
+                    sanitize_text(&row.text),
+                    sanitize_text(&timestamp),
+                    sanitize_text(&row.source),
+                )));
+            }
+        }
+    }
+    lines.push(Line::from("Enter Open | Up/Down Select | Esc Close"));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(palette))
+            .block(panel("SEARCH ALL V20", palette)),
+        area,
+    );
+}
+
+fn render_filter(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+    let mut lines = vec![
+        Line::from(format!("Filter: {}", sanitize_text(state.filter_input()))),
+        Line::from("scope:screen|all"),
+        Line::from("kind:stock,agent,model,order,approval,event,evidence,memory,source,note"),
+        Line::from("source:<exact-source-id>"),
+        Line::from("Enter Apply | Esc Cancel"),
+    ];
+    if let Some(error) = state.filter_error() {
+        lines.insert(1, Line::from(format!("[!] {}", sanitize_text(error))));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(palette))
+            .wrap(Wrap { trim: true })
+            .block(panel("FILTER CURRENT SCREEN SEARCH", palette)),
+        area,
+    );
+}
+
+fn render_note_editor(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+    let (target_type, target_id) = state
+        .note_editor_target()
+        .unwrap_or(("unsupported", "UNAVAILABLE"));
+    let lines = vec![
+        Line::from(format!(
+            "Target: {} {}",
+            sanitize_text(target_type),
+            sanitize_text(target_id)
+        )),
+        Line::from(format!("Visibility: {}", state.note_visibility().as_str())),
+        Line::from("Shared means agents may read it as context only."),
+        Line::from("This note never becomes an agent command."),
+        Line::default(),
+        Line::from(format!("Note: {}", sanitize_text(state.note_input()))),
+        Line::default(),
+        Line::from("Left/Right Private/Shared | Enter Keep Draft | Esc Cancel"),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(palette))
+            .wrap(Wrap { trim: true })
+            .block(panel("CONTEXT NOTE", palette)),
+        area,
+    );
+}
+
+fn search_kind(kind: SearchKind) -> &'static str {
+    match kind {
+        SearchKind::Stock => "STOCK",
+        SearchKind::Agent => "AGENT",
+        SearchKind::Model => "MODEL",
+        SearchKind::Order => "ORDER",
+        SearchKind::Approval => "APPROVAL",
+        SearchKind::Event => "EVENT",
+        SearchKind::Evidence => "EVIDENCE",
+        SearchKind::Memory => "MEMORY",
+        SearchKind::Source => "SOURCE",
+        SearchKind::Note => "NOTE",
+    }
+}
+
+fn render_search_detail(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    result: &crate::search::SearchResult,
+    palette: Palette,
+) {
+    let lines = search_detail_lines(state, result);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(palette))
+            .wrap(Wrap { trim: true })
+            .scroll((
+                u16::try_from(state.screen_state().scroll_offset).unwrap_or(u16::MAX),
+                0,
+            ))
+            .block(panel("SEARCH RESULT DETAIL", palette)),
+        area,
+    );
+}
+
+pub(crate) fn search_detail_line_count(
+    state: &AppState,
+    result: &crate::search::SearchResult,
+    width: u16,
+) -> usize {
+    Paragraph::new(search_detail_lines(state, result))
+        .wrap(Wrap { trim: true })
+        .line_count(width)
+}
+
+fn search_detail_lines(
+    state: &AppState,
+    result: &crate::search::SearchResult,
+) -> Vec<Line<'static>> {
+    let timestamp = format_search_time(result.timestamp_utc.as_deref());
+    let mut lines = vec![
+        Line::from(format!(
+            "[{}] ENTITY {}",
+            search_kind(result.kind),
+            sanitize_text(&result.entity_id)
+        )),
+        Line::from(format!("TITLE {}", sanitize_text(&result.title))),
+        Line::from(format!("DETAIL {}", sanitize_text(&result.text))),
+        Line::from(format!("TIME {}", sanitize_text(&timestamp))),
+        Line::from(format!("SOURCE {}", sanitize_text(&result.source))),
+        Line::default(),
+    ];
+    if state.note_editor_target().is_some() {
+        lines.push(Line::from(
+            "n Add Private/Shared note - context only; never an agent command.",
+        ));
+    }
+    if result.context_only {
+        lines.push(Line::from(
+            "CONTEXT ONLY - This note is not an agent command.",
+        ));
+    }
+    lines.push(Line::from("Esc Back"));
+    lines
+}
+
+fn format_search_time(value: Option<&str>) -> String {
+    value
+        .and_then(|value| {
+            serde_json::from_value::<UtcTimestamp>(serde_json::Value::String(value.to_owned())).ok()
+        })
+        .map_or_else(
+            || "TIME UNAVAILABLE".to_owned(),
+            |value| format_eastern_time(&value),
+        )
+}
+
 fn render_agent_input(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
     frame.render_widget(
-        Paragraph::new(PHASE_ONE_UNAVAILABLE)
+        Paragraph::new(AGENT_INPUT_UNAVAILABLE)
             .style(base_style(palette))
             .block(panel("AGENT INPUT - DISABLED", palette)),
         area,
@@ -351,20 +642,40 @@ fn render_agent_input(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
-    let text = if state.preferences_unavailable() {
+    let text = if state.mode == LocalMode::Search {
+        "Search | Type Query | Up/Down Select | Enter Open | Esc Close"
+    } else if state.mode == LocalMode::Filter {
+        "Filter Search on Current Screen | Enter Apply | Esc Cancel"
+    } else if state.mode == LocalMode::NoteEditor {
+        "Context Note | Left/Right Visibility | Enter Keep Draft | Esc Cancel"
+    } else if state.mode == LocalMode::Open {
+        "Detail | Up/Down Scroll | Esc Back"
+    } else if state.preferences_unavailable() {
         "1-9,0 Screens | q Close TUI only | PREFERENCES UNAVAILABLE"
     } else if state.snapshot.is_some() {
         match state.screen {
-            Screen::Impact if area.width < 120 => {
-                "Up/Down Holdings | Left/Right Panels | o Open | q Close TUI"
+            Screen::Impact if area.width < 120 => "Up/Down Holdings | o Open | q Close | f Filter",
+            Screen::Impact => "Up/Down Holdings | o Open | q Close | f Filter",
+            Screen::Portfolio => {
+                "Up/Down Holdings | Left/Right Period | o Open | q Close | f Filter"
             }
-            Screen::Impact => "Up/Down Holdings | o Open | q Close TUI",
-            Screen::Portfolio => "Up/Down Holdings | Left/Right Period | o Open | q Close TUI",
-            Screen::Orders => "Up/Down Scroll | q Close TUI",
-            _ => "1-9,0 Screens | q Close TUI only | Phase 1 secure shell",
+            Screen::Orders => "Up/Down Rows | o Open | q Close | f Filter",
+            Screen::Agents => "Up/Down Tasks | Left/Right Stages | o Open | q Close | f Filter",
+            Screen::ModelsRegime => {
+                "Left/Right Panels | Up/Down Rows | o Open | q Close | f Filter"
+            }
+            Screen::Timeline => "Up/Down Events | e Impact/All | o Open | q Close | f Filter",
+            Screen::RiskApprovals => {
+                "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter"
+            }
+            Screen::DataEvidence => {
+                "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter"
+            }
+            Screen::Memory => "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter",
+            Screen::System => "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter",
         }
     } else {
-        "1-9,0 Screens | q Close TUI only | Phase 1 secure shell"
+        "1-9,0 Screens | / Search | q Close TUI only"
     };
     frame.render_widget(
         Paragraph::new(text)

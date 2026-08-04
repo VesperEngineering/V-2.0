@@ -1,9 +1,15 @@
 use serde_json::{Value, json};
+use std::time::Duration;
 
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 use vesper_ratatui_console::contract::Envelope;
 use vesper_ratatui_console::input::InputEvent;
+use vesper_ratatui_console::screens::DetailKind;
+use vesper_ratatui_console::search::SearchStatus;
 use vesper_ratatui_console::state::{
-    AccessState, AppState, AuthFeedback, ClientAction, ReduceOutcome, Screen,
+    AccessState, AppState, AuthFeedback, ClientAction, LocalMode, ReduceOutcome, Screen,
 };
 
 fn envelope(sequence: u64, state_version: u64, message_type: &str, payload: Value) -> Envelope {
@@ -32,6 +38,21 @@ fn snapshot(sequence: u64, state_version: u64, regime: &str) -> Envelope {
         "snapshot",
         json!({"snapshot": snapshot}),
     )
+}
+
+fn rendered_text(state: &AppState, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| vesper_ratatui_console::ui::render(frame, state))
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
 }
 
 fn server_hello(sequence: u64, requires_setup: bool) -> Envelope {
@@ -134,24 +155,73 @@ fn event(sequence: u64, state_version: u64) -> Envelope {
     )
 }
 
+fn search_results(
+    sequence: u64,
+    envelope_state_version: u64,
+    request_id: u64,
+    indexed_state_version: u64,
+    results: Vec<Value>,
+    error: Option<&str>,
+) -> Envelope {
+    envelope(
+        sequence,
+        envelope_state_version,
+        "search-results",
+        json!({
+            "request_id": request_id,
+            "indexed_state_version": indexed_state_version,
+            "results": results,
+            "error": error,
+        }),
+    )
+}
+
+fn stock_search_result() -> Value {
+    json!({
+        "kind": "stock",
+        "record_type": "portfolio-row",
+        "record_id": "AAPL",
+        "label": "AAPL",
+        "summary": "Current holding",
+        "occurred_at_utc": null,
+        "source": "fixture",
+        "screen": "portfolio",
+        "context_only": null,
+    })
+}
+
+fn issue_search(state: &mut AppState, query: &str) -> u64 {
+    state.handle(InputEvent::Char('/'));
+    for character in query.chars() {
+        state.handle(InputEvent::Char(character));
+    }
+    let actions = state.handle(InputEvent::Tick(Duration::from_millis(100)));
+    let [ClientAction::Search(payload)] = actions.as_slice() else {
+        panic!("expected one search action, got {actions:?}");
+    };
+    payload.request_id.get()
+}
+
 #[test]
-fn events_request_a_full_snapshot_without_applying_partial_state() {
+fn ordered_events_reduce_into_the_current_snapshot_after_non_event_messages() {
     let mut state = AppState::controller();
     assert_eq!(
         state.reduce(snapshot(1, 1, "Before")),
         Ok(ReduceOutcome::Changed)
     );
+    assert_eq!(
+        state.reduce(pong(2, 1, "keepalive")),
+        Ok(ReduceOutcome::Ignored)
+    );
 
-    assert_eq!(
-        state.reduce(event(2, 2)),
-        Ok(ReduceOutcome::RequestSnapshot)
-    );
-    assert!(state.snapshot.is_none());
-    assert_eq!(
-        state.reduce(snapshot(3, 2, "After")),
-        Ok(ReduceOutcome::Changed)
-    );
-    assert!(state.snapshot.is_some());
+    assert_eq!(state.reduce(event(3, 2)), Ok(ReduceOutcome::Changed));
+    let current = state
+        .snapshot
+        .as_ref()
+        .expect("event keeps a live snapshot");
+    assert_eq!(current.shell.state_version, 2);
+    assert_eq!(current.shell.header.regime_label.as_str(), "Unavailable");
+    assert!(!state.awaiting_snapshot());
 }
 
 #[test]
@@ -177,6 +247,507 @@ fn gapped_and_stale_events_both_request_a_full_snapshot() {
         Ok(ReduceOutcome::RequestSnapshot)
     );
     assert!(state.snapshot.is_none());
+}
+
+#[test]
+fn global_search_debounces_for_100ms_and_emits_exactly_one_action() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+
+    state.handle(InputEvent::Char('/'));
+    assert_eq!(state.mode, LocalMode::Search);
+    for character in "AAPL".chars() {
+        state.handle(InputEvent::Char(character));
+    }
+    assert!(
+        state
+            .handle(InputEvent::Tick(Duration::from_millis(99)))
+            .is_empty()
+    );
+    let actions = state.handle(InputEvent::Tick(Duration::from_millis(1)));
+    assert!(matches!(actions.as_slice(), [ClientAction::Search(_)]));
+    assert!(
+        state
+            .handle(InputEvent::Tick(Duration::from_millis(100)))
+            .is_empty()
+    );
+}
+
+#[test]
+fn current_search_result_applies_and_opens_the_selected_owning_entity() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+
+    assert_eq!(
+        state.reduce(search_results(
+            2,
+            1,
+            request_id,
+            1,
+            vec![stock_search_result()],
+            None,
+        )),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(state.search_state().status(), SearchStatus::Fresh);
+    assert_eq!(state.search_state().results()[0].entity_id, "AAPL");
+
+    assert!(state.handle(InputEvent::Enter).is_empty());
+    assert_eq!(state.mode, LocalMode::Open);
+    assert_eq!(state.screen, Screen::Portfolio);
+    assert_eq!(state.screen_state().selected_id.as_deref(), Some("AAPL"));
+    assert!(state.screen_state().detail_open);
+}
+
+#[test]
+fn partial_search_result_reports_incomplete() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+
+    assert_eq!(
+        state.reduce(search_results(
+            2,
+            1,
+            request_id,
+            1,
+            vec![stock_search_result()],
+            Some("Notes unavailable."),
+        )),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(state.search_state().status(), SearchStatus::Incomplete);
+    assert_eq!(state.search_state().results().len(), 1);
+    assert_eq!(
+        state.search_state().server_error(),
+        Some("Notes unavailable.")
+    );
+}
+
+#[test]
+fn failed_search_without_rows_reports_unavailable() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+
+    assert_eq!(
+        state.reduce(search_results(
+            2,
+            1,
+            request_id,
+            1,
+            vec![],
+            Some("Search unavailable."),
+        )),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(state.search_state().status(), SearchStatus::Unavailable);
+    assert!(state.search_state().results().is_empty());
+    assert_eq!(
+        state.search_state().server_error(),
+        Some("Search unavailable.")
+    );
+}
+
+#[test]
+fn unknown_search_request_id_fails_closed() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+
+    let error = state
+        .reduce(search_results(2, 1, 99, 1, vec![], None))
+        .expect_err("unknown request ID must fail closed");
+
+    assert_eq!(error.code, "search-request");
+    assert_eq!(state.access, AccessState::ProtocolLockout);
+}
+
+#[test]
+fn superseded_search_response_is_ignored() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let first_request_id = issue_search(&mut state, "AAP");
+    state.handle(InputEvent::Char('L'));
+    let actions = state.handle(InputEvent::Tick(Duration::from_millis(100)));
+    let [ClientAction::Search(second)] = actions.as_slice() else {
+        panic!("expected replacement search action, got {actions:?}");
+    };
+    assert!(second.request_id.get() > first_request_id);
+
+    assert_eq!(
+        state.reduce(search_results(
+            2,
+            1,
+            first_request_id,
+            1,
+            vec![stock_search_result()],
+            None,
+        )),
+        Ok(ReduceOutcome::Ignored)
+    );
+    assert!(state.search_state().results().is_empty());
+    assert_eq!(state.search_state().status(), SearchStatus::Loading);
+}
+
+#[test]
+fn search_response_for_older_index_requeues_the_query() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 2, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+
+    assert_eq!(
+        state.reduce(search_results(2, 1, request_id, 1, vec![], None)),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(state.search_state().status(), SearchStatus::StaleRefreshing);
+    let actions = state.handle(InputEvent::Tick(Duration::from_millis(100)));
+    let [ClientAction::Search(retry)] = actions.as_slice() else {
+        panic!("expected refreshed search action, got {actions:?}");
+    };
+    assert!(retry.request_id.get() > request_id);
+}
+
+#[test]
+fn search_response_for_future_index_requests_snapshot() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+
+    assert_eq!(
+        state.reduce(search_results(2, 2, request_id, 2, vec![], None)),
+        Ok(ReduceOutcome::RequestSnapshot)
+    );
+    assert!(state.awaiting_snapshot());
+    assert!(state.snapshot.is_none());
+    assert_eq!(state.search_state().status(), SearchStatus::StaleRefreshing);
+}
+
+#[test]
+fn search_envelope_and_payload_version_mismatch_fails_closed() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+
+    let error = state
+        .reduce(search_results(2, 1, request_id, 2, vec![], None))
+        .expect_err("mismatched search versions must fail closed");
+
+    assert_eq!(error.code, "state-version");
+    assert_eq!(state.access, AccessState::ProtocolLockout);
+}
+
+#[test]
+fn manual_lock_ignores_a_known_in_flight_search_response() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+    assert_eq!(
+        state.handle(InputEvent::LockTui),
+        vec![ClientAction::RequestLock]
+    );
+
+    assert_eq!(
+        state.reduce(search_results(
+            2,
+            1,
+            request_id,
+            1,
+            vec![stock_search_result()],
+            None,
+        )),
+        Ok(ReduceOutcome::Ignored)
+    );
+    assert_eq!(state.access, AccessState::Locked);
+    assert!(state.lock_pending());
+    assert_eq!(state.reduce(lock_result(3, 1)), Ok(ReduceOutcome::Changed));
+}
+
+#[test]
+fn changed_event_clears_results_and_requeues_the_current_query() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+    let request_id = issue_search(&mut state, "AAPL");
+    state
+        .reduce(search_results(
+            2,
+            1,
+            request_id,
+            1,
+            vec![stock_search_result()],
+            None,
+        ))
+        .unwrap();
+    assert_eq!(state.search_state().results().len(), 1);
+
+    assert_eq!(state.reduce(event(3, 2)), Ok(ReduceOutcome::Changed));
+    assert!(state.search_state().results().is_empty());
+    assert_eq!(state.search_state().status(), SearchStatus::StaleRefreshing);
+
+    assert!(matches!(
+        state
+            .handle(InputEvent::Tick(Duration::from_millis(100)))
+            .as_slice(),
+        [ClientAction::Search(_)]
+    ));
+}
+
+#[test]
+fn task8_arrow_keys_reach_every_focus_panel_and_overflow_row() {
+    let mut envelope_value = serde_json::to_value(snapshot(1, 1, "Current")).unwrap();
+    let sources = envelope_value["payload"]["snapshot"]["data"]["sources"]
+        .as_array_mut()
+        .expect("source rows");
+    let mut second = sources[0].clone();
+    second["source_id"] = json!("source:second");
+    sources.push(second);
+
+    let mut state = AppState::controller();
+    state
+        .reduce(serde_json::from_value(envelope_value).unwrap())
+        .unwrap();
+    for (screen, panels) in [
+        (Screen::RiskApprovals, 4),
+        (Screen::DataEvidence, 2),
+        (Screen::Memory, 3),
+        (Screen::System, 4),
+    ] {
+        state.screen = screen;
+        for expected in 1..panels {
+            state.handle(InputEvent::Right);
+            assert_eq!(state.screen_state().narrow_panel, expected, "{screen:?}");
+        }
+        state.handle(InputEvent::Right);
+        assert_eq!(state.screen_state().narrow_panel, 0, "{screen:?}");
+        state.handle(InputEvent::Left);
+        assert_eq!(state.screen_state().narrow_panel, panels - 1, "{screen:?}");
+        state.handle(InputEvent::Right);
+    }
+
+    state.screen = Screen::DataEvidence;
+    state.handle(InputEvent::Down);
+    assert_eq!(state.screen_state().scroll_offset, 1);
+    state.handle(InputEvent::Up);
+    assert_eq!(state.screen_state().scroll_offset, 0);
+}
+
+#[test]
+fn task7_keys_reach_agent_detail_model_panels_and_all_timeline_events() {
+    let mut value = serde_json::to_value(snapshot(1, 1, "Current")).unwrap();
+    let agent = value["payload"]["snapshot"]["agents"]["rows"][0].clone();
+    let mut second_agent = agent.clone();
+    second_agent["work_id"] = json!("work:2");
+    second_agent["title"] = json!("Review MSFT");
+    second_agent["priority"] = json!(5);
+    value["payload"]["snapshot"]["agents"]["rows"] = json!([agent, second_agent]);
+
+    let event = value["payload"]["snapshot"]["timeline"]["rows"][0].clone();
+    let mut second_event = event.clone();
+    second_event["event_id"] = json!("event:2");
+    second_event["summary"] = json!("MSFT review started");
+    second_event["symbol"] = json!("MSFT");
+    value["payload"]["snapshot"]["timeline"]["rows"] = json!([event, second_event]);
+
+    let mut state = AppState::controller();
+    state
+        .reduce(serde_json::from_value(value).unwrap())
+        .unwrap();
+
+    state.screen = Screen::Agents;
+    state.handle(InputEvent::Right);
+    state.handle(InputEvent::Up);
+    assert_eq!(state.screen_state().selected_id.as_deref(), Some("work:1"));
+    assert!(rendered_text(&state, 140, 40).contains("> [ ] RUNNING"));
+    state.handle(InputEvent::Down);
+    assert_eq!(state.screen_state().selected_id.as_deref(), Some("work:2"));
+    state.handle(InputEvent::Char('o'));
+    assert!(state.screen_state().detail_open);
+    assert_eq!(state.screen_state().scroll_offset, 0);
+    assert_eq!(state.mode, vesper_ratatui_console::state::LocalMode::Open);
+    assert!(rendered_text(&state, 120, 36).contains("TASK ID: work:2"));
+    state.handle(InputEvent::Escape);
+    state.handle(InputEvent::Left);
+    assert_eq!(state.screen_state().narrow_panel, 0);
+    state.handle(InputEvent::Left);
+    assert_eq!(state.screen_state().narrow_panel, 4);
+    state.handle(InputEvent::Right);
+    assert_eq!(state.screen_state().narrow_panel, 0);
+
+    state.screen = Screen::ModelsRegime;
+    state.handle(InputEvent::Down);
+    assert_eq!(state.screen_state().scroll_offset, 0);
+    assert_eq!(
+        state.screen_state().selected_kind,
+        Some(DetailKind::ModelOpinion)
+    );
+    state.handle(InputEvent::Right);
+    assert_eq!(state.screen_state().narrow_panel, 1);
+    assert_eq!(state.screen_state().scroll_offset, 0);
+    state.handle(InputEvent::Right);
+    assert_eq!(state.screen_state().narrow_panel, 2);
+    state.handle(InputEvent::Right);
+    assert_eq!(state.screen_state().narrow_panel, 0);
+
+    state.screen = Screen::Timeline;
+    assert!(!state.screen_state().show_all_events);
+    state.handle(InputEvent::Up);
+    assert_eq!(state.screen_state().selected_id.as_deref(), Some("event:1"));
+    state.handle(InputEvent::Char('o'));
+    let detail = rendered_text(&state, 120, 36);
+    assert!(detail.contains("EVENT DETAIL"));
+    assert!(detail.contains("EVENT ID: event:1"));
+    assert!(detail.contains("SOURCE: fixture"));
+    state.handle(InputEvent::Escape);
+    state.handle(InputEvent::Char('e'));
+    assert!(state.screen_state().show_all_events);
+    state.handle(InputEvent::Char('e'));
+    assert!(!state.screen_state().show_all_events);
+}
+
+#[test]
+fn direct_o_reaches_full_detail_on_every_remaining_screen_panel() {
+    let cases = [
+        ('3', 0, "ORDER DETAIL"),
+        ('5', 0, "MODEL OPINION DETAIL"),
+        ('5', 1, "MODEL CANDIDATE DETAIL"),
+        ('5', 2, "MODEL METRIC DETAIL"),
+        ('7', 0, "RISK LIMIT DETAIL"),
+        ('7', 1, "APPROVAL DETAIL"),
+        ('7', 2, "RISK ALERT DETAIL"),
+        ('7', 3, "RISK METRIC DETAIL"),
+        ('8', 0, "DATA SOURCE DETAIL"),
+        ('8', 1, "DATA EVIDENCE DETAIL"),
+        ('9', 0, "MEMORY DETAIL"),
+        ('9', 2, "MEMORY HISTORY DETAIL"),
+        ('0', 0, "SERVICE DETAIL"),
+        ('0', 1, "SYSTEM METRIC DETAIL"),
+        ('0', 2, "REPOSITORY DETAIL"),
+    ];
+    for (key, panel, expected) in cases {
+        let mut state = AppState::controller();
+        state.reduce(snapshot(1, 1, "Current")).unwrap();
+        state.handle(InputEvent::Char(key));
+        for _ in 0..panel {
+            state.handle(InputEvent::Right);
+        }
+        state.handle(InputEvent::Up);
+        state.handle(InputEvent::Char('o'));
+        let detail = rendered_text(&state, 140, 40);
+        assert!(
+            detail.contains(expected),
+            "{key} panel {panel} did not open {expected}\n{detail}"
+        );
+    }
+}
+
+#[test]
+fn orders_and_models_navigate_typed_entities_in_rendered_order() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 1, "Current")).unwrap();
+
+    state.handle(InputEvent::Char('3'));
+    state.handle(InputEvent::Up);
+    assert_eq!(state.screen_state().selected_id.as_deref(), Some("order:1"));
+    assert_eq!(state.screen_state().selected_kind, Some(DetailKind::Order));
+    assert!(rendered_text(&state, 140, 40).contains("> order:1"));
+    for (id, kind) in [
+        ("fill:1", DetailKind::Fill),
+        ("work:1", DetailKind::Agent),
+        ("event:1", DetailKind::Event),
+    ] {
+        state.handle(InputEvent::Down);
+        assert_eq!(state.screen_state().selected_id.as_deref(), Some(id));
+        assert_eq!(state.screen_state().selected_kind, Some(kind));
+        assert!(
+            rendered_text(&state, 140, 40).contains(&format!("> {id}")),
+            "selected Orders row {id} must be visible"
+        );
+    }
+    state.handle(InputEvent::Char('o'));
+    assert!(rendered_text(&state, 140, 40).contains("ORDER HISTORY DETAIL"));
+
+    state.handle(InputEvent::Escape);
+    state.handle(InputEvent::Char('5'));
+    state.handle(InputEvent::Up);
+    assert_eq!(
+        state.screen_state().selected_kind,
+        Some(DetailKind::ModelOpinion)
+    );
+    state.handle(InputEvent::Right);
+    state.handle(InputEvent::Up);
+    assert_eq!(
+        state.screen_state().selected_kind,
+        Some(DetailKind::ModelCandidate)
+    );
+    state.handle(InputEvent::Right);
+    state.handle(InputEvent::Up);
+    assert_eq!(state.screen_state().selected_kind, Some(DetailKind::Metric));
+    state.handle(InputEvent::Down);
+    assert_eq!(
+        state.screen_state().selected_id.as_deref(),
+        Some("evidence:1")
+    );
+    assert_eq!(
+        state.screen_state().selected_kind,
+        Some(DetailKind::Evidence)
+    );
+    assert!(rendered_text(&state, 140, 40).contains("> evidence:1"));
+    state.handle(InputEvent::Char('o'));
+    assert!(rendered_text(&state, 140, 40).contains("MODEL EVIDENCE DETAIL"));
+}
+
+#[test]
+fn only_supported_direct_detail_targets_offer_context_notes() {
+    for (panel, expected_target) in [
+        (0, None),
+        (1, Some(("approval", "approval:1"))),
+        (2, None),
+        (3, None),
+    ] {
+        let mut state = AppState::controller();
+        state.reduce(snapshot(1, 1, "Current")).unwrap();
+        state.handle(InputEvent::Char('7'));
+        for _ in 0..panel {
+            state.handle(InputEvent::Right);
+        }
+        state.handle(InputEvent::Up);
+        state.handle(InputEvent::Char('o'));
+        assert_eq!(state.note_editor_target(), expected_target, "panel {panel}");
+        state.handle(InputEvent::Char('n'));
+        assert_eq!(
+            state.mode,
+            if expected_target.is_some() {
+                LocalMode::NoteEditor
+            } else {
+                LocalMode::Open
+            },
+            "panel {panel}"
+        );
+    }
+}
+
+#[test]
+fn direct_detail_scroll_uses_wrapped_content_height_instead_of_a_fixed_cap() {
+    let mut value = serde_json::to_value(snapshot(1, 1, "Current")).unwrap();
+    value["payload"]["snapshot"]["risk"]["alerts"][0]["summary"] =
+        json!(format!("{}TAIL MARKER", "wrapped alert detail ".repeat(10)));
+    let mut state = AppState::controller();
+    state
+        .reduce(serde_json::from_value(value).unwrap())
+        .unwrap();
+    state.set_terminal_area(Rect::new(0, 0, 50, 26));
+    state.handle(InputEvent::Char('7'));
+    state.handle(InputEvent::Right);
+    state.handle(InputEvent::Right);
+    state.handle(InputEvent::Up);
+    state.handle(InputEvent::Char('o'));
+
+    for _ in 0..100 {
+        state.handle(InputEvent::Down);
+    }
+
+    assert!(state.screen_state().scroll_offset > 9);
+    assert!(rendered_text(&state, 50, 26).contains("RESOLVED: NOT RESOLVED"));
 }
 
 #[test]

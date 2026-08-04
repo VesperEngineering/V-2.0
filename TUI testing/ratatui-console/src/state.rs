@@ -1,12 +1,22 @@
 use std::fmt;
+use std::time::Instant;
+
+use ratatui::layout::Rect;
 
 use crate::contract::{
-    AccessState as WireAccessState, ConsoleSnapshot, Envelope, LeaseStatus, Message, PasswordString,
+    AccessState as WireAccessState, AgentStage, ConsoleSnapshot, Envelope, Freshness, LeaseStatus,
+    MemoryStatus, Message, PasswordString, SearchRequestPayload,
 };
+use crate::detail::detail_area;
 use crate::input::InputEvent;
-use crate::layout::DisplayMode;
+use crate::layout::{DisplayMode, shell_layout};
 use crate::preferences::{LoadedPreferences, ScreenId, ScreenPreferences, UiPreferences};
-use crate::screens::{PerformancePeriod, ScreenState};
+use crate::reducer::{EventEnvelope, ReduceOutcome as SnapshotReduceOutcome, SnapshotReducer};
+use crate::screens::{DetailKind, PerformancePeriod, ScreenState};
+use crate::search::{
+    ContextNoteDraft, NoteVisibility, SEARCH_DEBOUNCE, SearchResponseDisposition, SearchResult,
+    SearchState, format_filter_expression, parse_filter_expression,
+};
 use crate::theme::Theme;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,13 +59,14 @@ pub enum LocalMode {
     Menu,
     Help,
     AgentInput,
+    NoteEditor,
 }
 
 impl LocalMode {
     fn captures_text(self) -> bool {
         matches!(
             self,
-            Self::Search | Self::Filter | Self::Menu | Self::AgentInput
+            Self::Search | Self::Filter | Self::Menu | Self::AgentInput | Self::NoteEditor
         )
     }
 }
@@ -93,6 +104,7 @@ pub enum ClientAction {
     RequestLease,
     RequestLock,
     RequestSnapshot,
+    Search(SearchRequestPayload),
     SubmitInput(String),
     CloseTui,
     Reconnect,
@@ -181,6 +193,12 @@ struct ViewKey {
     display_mode: DisplayMode,
     preferences_unavailable: bool,
     screen_state: ScreenState,
+    search_state: SearchState,
+    filter_error: Option<String>,
+    note_visibility: NoteVisibility,
+    pending_note: Option<ContextNoteDraft>,
+    show_search_detail: bool,
+    search_return_screen: Option<Screen>,
 }
 
 #[derive(Debug)]
@@ -205,6 +223,15 @@ pub struct AppState {
     preferences_unavailable: bool,
     preferences_save_pending: bool,
     screen_state: ScreenState,
+    snapshot_reducer: SnapshotReducer,
+    search_state: SearchState,
+    local_now: Instant,
+    filter_error: Option<String>,
+    note_visibility: NoteVisibility,
+    pending_note: Option<ContextNoteDraft>,
+    show_search_detail: bool,
+    search_return_screen: Option<Screen>,
+    detail_viewport: Option<Rect>,
 }
 
 impl AppState {
@@ -252,6 +279,15 @@ impl AppState {
             preferences_unavailable: false,
             preferences_save_pending: false,
             screen_state: ScreenState::default(),
+            snapshot_reducer: SnapshotReducer::default(),
+            search_state: SearchState::default(),
+            local_now: Instant::now(),
+            filter_error: None,
+            note_visibility: NoteVisibility::Private,
+            pending_note: None,
+            show_search_detail: false,
+            search_return_screen: None,
+            detail_viewport: None,
         }
     }
 
@@ -294,11 +330,63 @@ impl AppState {
         self.preferences.display_mode
     }
 
+    pub fn set_terminal_area(&mut self, area: Rect) {
+        let viewport = shell_layout(area, self.display_mode()).body;
+        if self.detail_viewport != Some(viewport) {
+            self.detail_viewport = Some(viewport);
+            if self.mode == LocalMode::Open && self.screen_state.detail_open {
+                self.screen_state.scroll_offset = self
+                    .screen_state
+                    .scroll_offset
+                    .min(self.detail_scroll_maximum());
+            }
+            self.dirty = true;
+        }
+    }
+
     pub fn screen_state(&self) -> ScreenState {
         let mut state = self.screen_state.clone();
         state.theme = self.theme();
         state.display_mode = self.display_mode();
         state
+    }
+
+    pub fn search_state(&self) -> &SearchState {
+        &self.search_state
+    }
+
+    pub fn search_detail(&self) -> Option<&SearchResult> {
+        if self.mode != LocalMode::Open || !self.show_search_detail {
+            return None;
+        }
+        let entity_id = self.screen_state.selected_id.as_deref()?;
+        let detail_kind = self.screen_state.selected_kind?;
+        self.search_state
+            .result_for(self.screen, detail_kind, entity_id)
+    }
+
+    pub fn filter_input(&self) -> &str {
+        &self.local_input
+    }
+
+    pub fn filter_error(&self) -> Option<&str> {
+        self.filter_error.as_deref()
+    }
+
+    pub fn note_visibility(&self) -> NoteVisibility {
+        self.note_visibility
+    }
+
+    pub fn pending_note(&self) -> Option<&ContextNoteDraft> {
+        self.pending_note.as_ref()
+    }
+
+    pub fn note_editor_target(&self) -> Option<(&'static str, &str)> {
+        self.current_note_target()
+    }
+
+    pub fn note_input(&self) -> &str {
+        &self.local_input
     }
 
     pub fn set_performance_period(&mut self, period: PerformancePeriod) {
@@ -404,6 +492,9 @@ impl AppState {
         }
         if envelope.sequence != expected_sequence {
             self.last_sequence = envelope.sequence;
+            if self.snapshot_reducer.state_opt().is_some() {
+                let _ = self.snapshot_reducer.observe_sequence(envelope.sequence);
+            }
             if matches!(&envelope.message, Message::ProtocolError(_)) {
                 return Err(self.fail_closed(
                     "protocol",
@@ -418,9 +509,13 @@ impl AppState {
                 ));
             }
             return match &envelope.message {
-                Message::Snapshot(_) | Message::Event(_) | Message::Pong(_) => {
+                Message::Snapshot(_)
+                | Message::SearchResults(_)
+                | Message::Event(_)
+                | Message::Pong(_) => {
                     self.awaiting_snapshot = true;
                     self.snapshot = None;
+                    self.search_state.clear_results();
                     Ok(ReduceOutcome::RequestSnapshot)
                 }
                 _ => Err(self.fail_closed(
@@ -444,6 +539,24 @@ impl AppState {
                 }
                 Message::LeaseResult(_) if self.lease_pending => {
                     self.lease_pending = false;
+                    Ok(ReduceOutcome::Ignored)
+                }
+                Message::SearchResults(payload) => {
+                    let request_id = payload.request_id.get();
+                    if envelope.state_version != payload.indexed_state_version {
+                        return Err(
+                            self.fail_closed("state-version", "Search result version is invalid.")
+                        );
+                    }
+                    if self.search_state.response_disposition(request_id)
+                        == SearchResponseDisposition::Unknown
+                    {
+                        return Err(self.fail_closed(
+                            "search-request",
+                            "Search result request ID was not issued.",
+                        ));
+                    }
+                    self.search_state.complete_without_results(request_id);
                     Ok(ReduceOutcome::Ignored)
                 }
                 Message::Pong(_) => Ok(ReduceOutcome::Ignored),
@@ -504,6 +617,8 @@ impl AppState {
                     self.phase = SessionPhase::Authenticated;
                     self.lease_pending = false;
                     self.snapshot = None;
+                    self.snapshot_reducer = SnapshotReducer::default();
+                    self.search_state.clear_results();
                     self.awaiting_snapshot = true;
                     Ok(ReduceOutcome::RequestSnapshot)
                 } else {
@@ -528,6 +643,7 @@ impl AppState {
                 if self.phase != SessionPhase::Authenticated || !self.lease_pending {
                     return Err(self.fail_closed("state", "Lease result is out of order."));
                 }
+                self.observe_presentation_sequence(envelope.sequence)?;
                 self.lease_pending = false;
                 let access = match payload.status {
                     LeaseStatus::Controller | LeaseStatus::Transferred => AccessState::Controller,
@@ -555,33 +671,69 @@ impl AppState {
                         return Err(self
                             .fail_closed("state-version", "Resynchronization snapshot is stale."));
                     }
+                    self.observe_presentation_sequence(envelope.sequence)?;
                     return Ok(ReduceOutcome::Ignored);
                 }
-                if envelope.state_version == self.state_version
-                    && let Some(current) = &self.snapshot
-                {
-                    if current == &payload.snapshot {
-                        self.awaiting_snapshot = false;
-                        return Ok(ReduceOutcome::Ignored);
-                    }
+                let outcome = self.snapshot_reducer.apply_snapshot(payload.snapshot);
+                if outcome == SnapshotReduceOutcome::ResnapshotRequired {
                     return Err(self.fail_closed(
                         "state-version",
-                        "Equal snapshot versions contain different state.",
+                        "Snapshot cannot safely replace current presentation state.",
                     ));
                 }
-                self.state_version = envelope.state_version;
-                self.snapshot = Some(payload.snapshot);
+                if self
+                    .snapshot_reducer
+                    .observe_sequence(envelope.sequence)
+                    .is_err()
+                {
+                    return Err(self.fail_closed(
+                        "sequence",
+                        "Snapshot sequence cannot rebase presentation state.",
+                    ));
+                }
+                let reduced = self.snapshot_reducer.state();
+                self.state_version = reduced.snapshot.shell.state_version;
+                let snapshot = reduced.snapshot.clone();
+                self.snapshot = Some(snapshot);
+                if outcome == SnapshotReduceOutcome::Changed {
+                    self.invalidate_search_results();
+                }
+                self.show_search_detail = false;
                 self.awaiting_snapshot = false;
-                Ok(ReduceOutcome::Changed)
+                Ok(match outcome {
+                    SnapshotReduceOutcome::Changed => ReduceOutcome::Changed,
+                    SnapshotReduceOutcome::Ignored => ReduceOutcome::Ignored,
+                    SnapshotReduceOutcome::ResnapshotRequired => unreachable!("handled above"),
+                })
             }
-            Message::Event(_) => {
+            Message::Event(payload) => {
                 if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
                     return Err(self.fail_closed("state", "Event arrived before authentication."));
                 }
-                self.state_version = self.state_version.max(envelope.state_version);
-                self.snapshot = None;
-                self.awaiting_snapshot = true;
-                Ok(ReduceOutcome::RequestSnapshot)
+                let event = EventEnvelope {
+                    sequence: envelope.sequence,
+                    state_version: envelope.state_version,
+                    payload: *payload,
+                };
+                match self.snapshot_reducer.apply_event(event) {
+                    Ok(SnapshotReduceOutcome::Changed) => {
+                        let reduced = self.snapshot_reducer.state();
+                        self.state_version = reduced.snapshot.shell.state_version;
+                        let snapshot = reduced.snapshot.clone();
+                        self.snapshot = Some(snapshot);
+                        self.invalidate_search_results();
+                        self.show_search_detail = false;
+                        self.awaiting_snapshot = false;
+                        Ok(ReduceOutcome::Changed)
+                    }
+                    Ok(SnapshotReduceOutcome::Ignored) => Ok(ReduceOutcome::Ignored),
+                    Ok(SnapshotReduceOutcome::ResnapshotRequired) | Err(_) => {
+                        self.snapshot = None;
+                        self.search_state.clear_results();
+                        self.awaiting_snapshot = true;
+                        Ok(ReduceOutcome::RequestSnapshot)
+                    }
+                }
             }
             Message::LockResult(_) => {
                 if self.phase != SessionPhase::Authenticated || !self.lock_pending {
@@ -602,7 +754,70 @@ impl AppState {
                 if self.phase != SessionPhase::Authenticated {
                     return Err(self.fail_closed("state", "Pong arrived before authentication."));
                 }
+                self.observe_presentation_sequence(envelope.sequence)?;
                 Ok(ReduceOutcome::Ignored)
+            }
+            Message::SearchResults(payload) => {
+                if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
+                    return Err(
+                        self.fail_closed("state", "Search results arrived before authentication.")
+                    );
+                }
+                let request_id = payload.request_id.get();
+                if envelope.state_version != payload.indexed_state_version {
+                    return Err(
+                        self.fail_closed("state-version", "Search result version is invalid.")
+                    );
+                }
+                let disposition = self.search_state.response_disposition(request_id);
+                if disposition == SearchResponseDisposition::Unknown {
+                    return Err(self.fail_closed(
+                        "search-request",
+                        "Search result request ID was not issued.",
+                    ));
+                }
+                self.observe_presentation_sequence(envelope.sequence)?;
+                if disposition == SearchResponseDisposition::Superseded {
+                    self.search_state.complete_without_results(request_id);
+                    return Ok(ReduceOutcome::Ignored);
+                }
+                if payload.indexed_state_version < self.state_version {
+                    self.search_state.complete_without_results(request_id);
+                    self.search_state.invalidate_for_refresh(self.local_now);
+                    self.show_search_detail = false;
+                    return Ok(ReduceOutcome::Changed);
+                }
+                if payload.indexed_state_version > self.state_version {
+                    self.search_state.await_resnapshot(request_id);
+                    self.snapshot = None;
+                    self.show_search_detail = false;
+                    self.awaiting_snapshot = true;
+                    return Ok(ReduceOutcome::RequestSnapshot);
+                }
+                let mut rows = Vec::with_capacity(payload.results.len());
+                for result in payload.results {
+                    match SearchResult::try_from(result) {
+                        Ok(result) => rows.push(result),
+                        Err(_) => {
+                            self.search_state.apply_gateway_results(
+                                request_id,
+                                Vec::new(),
+                                Some("Search results were rejected.".to_owned()),
+                            );
+                            self.show_search_detail = false;
+                            return Ok(ReduceOutcome::Changed);
+                        }
+                    }
+                }
+                let error = payload.error.map(|value| value.as_str().to_owned());
+                if self
+                    .search_state
+                    .apply_gateway_results(request_id, rows, error)
+                {
+                    Ok(ReduceOutcome::Changed)
+                } else {
+                    Ok(ReduceOutcome::Ignored)
+                }
             }
             Message::ClientHello(_)
             | Message::AuthSetup(_)
@@ -610,6 +825,7 @@ impl AppState {
             | Message::LeaseRequest(_)
             | Message::LockRequest(_)
             | Message::SnapshotRequest(_)
+            | Message::SearchRequest(_)
             | Message::Ping(_) => {
                 Err(self.fail_closed("direction", "Server message direction is invalid."))
             }
@@ -636,7 +852,29 @@ impl AppState {
                 _ => Vec::new(),
             };
         }
-        if matches!(event, InputEvent::Tick(_)) {
+        if let InputEvent::Tick(elapsed) = event {
+            self.local_now = self
+                .local_now
+                .checked_add(elapsed)
+                .or_else(|| self.local_now.checked_add(SEARCH_DEBOUNCE))
+                .unwrap_or(self.local_now);
+            if self.access.is_unlocked()
+                && self.mode == LocalMode::Search
+                && let Some(request) = self.search_state.take_due_request(self.local_now)
+            {
+                let request_id = request.request_id;
+                return match request.to_wire() {
+                    Ok(payload) => vec![ClientAction::Search(payload)],
+                    Err(error) => {
+                        self.search_state.apply_gateway_results(
+                            request_id,
+                            Vec::new(),
+                            Some(error.to_string()),
+                        );
+                        Vec::new()
+                    }
+                };
+            }
             return Vec::new();
         }
         if !self.access.is_unlocked() {
@@ -701,6 +939,12 @@ impl AppState {
             display_mode: self.display_mode(),
             preferences_unavailable: self.preferences_unavailable,
             screen_state: self.screen_state.clone(),
+            search_state: self.search_state.clone(),
+            filter_error: self.filter_error.clone(),
+            note_visibility: self.note_visibility,
+            pending_note: self.pending_note.clone(),
+            show_search_detail: self.show_search_detail,
+            search_return_screen: self.search_return_screen,
         }
     }
 
@@ -766,20 +1010,82 @@ impl AppState {
 
     fn route_unlocked_input(&mut self, event: InputEvent) -> Vec<ClientAction> {
         if event == InputEvent::Escape {
-            self.mode = LocalMode::Browse;
-            self.local_input.clear();
-            self.screen_state.detail_open = false;
+            if self.mode == LocalMode::NoteEditor {
+                self.mode = LocalMode::Open;
+                self.local_input.clear();
+            } else if self.mode == LocalMode::Open
+                && let Some(search_screen) = self.search_return_screen.take()
+            {
+                self.screen = search_screen;
+                self.mode = LocalMode::Search;
+                self.local_input = self.search_state.query().to_owned();
+                self.search_state.set_active_screen(search_screen);
+                self.show_search_detail = false;
+            } else {
+                self.mode = LocalMode::Browse;
+                self.local_input.clear();
+                self.show_search_detail = false;
+                self.search_return_screen = None;
+            }
+            self.filter_error = None;
+            if self.mode == LocalMode::Browse {
+                self.screen_state.detail_open = false;
+            }
+            self.screen_state.scroll_offset = 0;
             return Vec::new();
         }
 
         if self.mode.captures_text() {
             return match event {
-                InputEvent::Char(character) => {
-                    self.local_input.push(character);
+                InputEvent::Up if self.mode == LocalMode::Search => {
+                    self.search_state.move_selection(false);
                     Vec::new()
                 }
-                InputEvent::Backspace => {
-                    self.local_input.pop();
+                InputEvent::Down if self.mode == LocalMode::Search => {
+                    self.search_state.move_selection(true);
+                    Vec::new()
+                }
+                InputEvent::OpenSearchResult(index) if self.mode == LocalMode::Search => {
+                    self.search_state.select_index(index);
+                    self.open_search_selected();
+                    Vec::new()
+                }
+                InputEvent::Left | InputEvent::Right if self.mode == LocalMode::NoteEditor => {
+                    self.note_visibility = match self.note_visibility {
+                        NoteVisibility::Private => NoteVisibility::Shared,
+                        NoteVisibility::Shared => NoteVisibility::Private,
+                    };
+                    Vec::new()
+                }
+                InputEvent::Enter if self.mode == LocalMode::Search => {
+                    self.open_search_selected();
+                    Vec::new()
+                }
+                InputEvent::Enter if self.mode == LocalMode::Filter => {
+                    match parse_filter_expression(self.screen, &self.local_input) {
+                        Ok(filters) => {
+                            self.search_state.set_filters(self.screen, filters);
+                            self.filter_error = None;
+                            self.local_input.clear();
+                            self.mode = LocalMode::Browse;
+                        }
+                        Err(error) => self.filter_error = Some(error.message().to_owned()),
+                    }
+                    Vec::new()
+                }
+                InputEvent::Enter if self.mode == LocalMode::NoteEditor => {
+                    if !self.local_input.is_empty()
+                        && let Some((target_type, target_id)) = self.current_note_target()
+                    {
+                        self.pending_note = Some(ContextNoteDraft {
+                            target_type,
+                            target_id: target_id.to_owned(),
+                            body: std::mem::take(&mut self.local_input),
+                            visibility: self.note_visibility,
+                            context_only: true,
+                        });
+                        self.mode = LocalMode::Open;
+                    }
                     Vec::new()
                 }
                 InputEvent::Enter if self.mode == LocalMode::AgentInput => {
@@ -790,11 +1096,41 @@ impl AppState {
                         vec![ClientAction::SubmitInput(input)]
                     }
                 }
+                InputEvent::Char(character) => {
+                    let limit = match self.mode {
+                        LocalMode::Search => 256,
+                        LocalMode::Filter => 512,
+                        LocalMode::NoteEditor | LocalMode::AgentInput => 8_000,
+                        _ => 2_000,
+                    };
+                    if self.local_input.chars().count() < limit {
+                        self.local_input.push(character);
+                        if self.mode == LocalMode::Search {
+                            self.search_state
+                                .update_query(self.local_input.clone(), self.local_now);
+                        } else if self.mode == LocalMode::Filter {
+                            self.filter_error = None;
+                        }
+                    }
+                    Vec::new()
+                }
+                InputEvent::Backspace => {
+                    self.local_input.pop();
+                    if self.mode == LocalMode::Search {
+                        self.search_state
+                            .update_query(self.local_input.clone(), self.local_now);
+                    }
+                    Vec::new()
+                }
                 _ => Vec::new(),
             };
         }
 
         match event {
+            InputEvent::OpenBrowseRow { panel, index } => {
+                self.open_browse_row(panel, index);
+                return Vec::new();
+            }
             InputEvent::Up => {
                 self.move_vertical(false);
                 return Vec::new();
@@ -829,8 +1165,31 @@ impl AppState {
             '9' => self.select_screen(Screen::Memory),
             '0' => self.select_screen(Screen::System),
             'o' => self.open_selected(),
-            '/' => self.mode = LocalMode::Search,
-            'f' => self.mode = LocalMode::Filter,
+            'n' if self.mode == LocalMode::Open && self.current_note_target().is_some() => {
+                self.mode = LocalMode::NoteEditor;
+                self.local_input.clear();
+                self.note_visibility = NoteVisibility::Private;
+            }
+            'e' if self.screen == Screen::Timeline => {
+                self.screen_state.show_all_events = !self.screen_state.show_all_events;
+                self.screen_state.scroll_offset = 0;
+                self.screen_state.selected_id = None;
+                self.screen_state.selected_kind = None;
+            }
+            '/' => {
+                self.mode = LocalMode::Search;
+                self.local_input.clear();
+                self.show_search_detail = false;
+                self.search_return_screen = None;
+                self.search_state.set_active_screen(self.screen);
+                self.search_state
+                    .update_query(String::new(), self.local_now);
+            }
+            'f' => {
+                self.mode = LocalMode::Filter;
+                self.local_input = format_filter_expression(self.search_state.filters(self.screen));
+                self.filter_error = None;
+            }
             ':' => self.mode = LocalMode::Menu,
             '?' => self.mode = LocalMode::Help,
             'i' => self.mode = LocalMode::AgentInput,
@@ -848,47 +1207,16 @@ impl AppState {
         self.mode = LocalMode::Browse;
         self.screen_state.scroll_offset = 0;
         self.screen_state.selected_id = None;
+        self.screen_state.selected_kind = None;
         self.screen_state.detail_open = false;
         self.screen_state.narrow_panel = 0;
+        self.show_search_detail = false;
+        self.search_return_screen = None;
     }
 
     fn move_vertical(&mut self, forward: bool) {
-        let ids = self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
-            let rows = match self.screen {
-                Screen::Impact => &snapshot.impact.holdings,
-                Screen::Portfolio => &snapshot.portfolio.rows,
-                _ => return Vec::new(),
-            };
-            rows.iter()
-                .map(|row| row.symbol.as_str().to_owned())
-                .collect()
-        });
-        if !ids.is_empty() {
-            let current = self
-                .screen_state
-                .selected_id
-                .as_deref()
-                .and_then(|selected| ids.iter().position(|id| id == selected))
-                .unwrap_or_else(|| self.screen_state.scroll_offset.min(ids.len() - 1));
-            let next = if forward {
-                current.saturating_add(1).min(ids.len() - 1)
-            } else {
-                current.saturating_sub(1)
-            };
-            self.screen_state.selected_id = Some(ids[next].clone());
-            self.screen_state.scroll_offset = next;
-            return;
-        }
-        if self.screen == Screen::Orders {
-            let maximum = self.snapshot.as_ref().map_or(0, |snapshot| {
-                snapshot
-                    .orders
-                    .rows
-                    .iter()
-                    .map(|order| 4 + order.fills.len().max(1))
-                    .sum::<usize>()
-                    .saturating_sub(1)
-            });
+        if self.mode == LocalMode::Open && self.screen_state.detail_open {
+            let maximum = self.detail_scroll_maximum();
             self.screen_state.scroll_offset = if forward {
                 self.screen_state
                     .scroll_offset
@@ -897,7 +1225,444 @@ impl AppState {
             } else {
                 self.screen_state.scroll_offset.saturating_sub(1)
             };
+            return;
         }
+        if self.screen == Screen::Agents {
+            let stage = match self.screen_state.narrow_panel % 5 {
+                0 => AgentStage::Queued,
+                1 => AgentStage::Running,
+                2 => AgentStage::Waiting,
+                3 => AgentStage::Done,
+                _ => AgentStage::Backlog,
+            };
+            let mut rows = self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
+                snapshot
+                    .agents
+                    .rows
+                    .iter()
+                    .filter(|row| match stage {
+                        AgentStage::Done => {
+                            matches!(row.stage, AgentStage::Done | AgentStage::Failed)
+                        }
+                        _ => row.stage == stage,
+                    })
+                    .collect::<Vec<_>>()
+            });
+            rows.sort_by(|left, right| {
+                right
+                    .urgent
+                    .cmp(&left.urgent)
+                    .then_with(|| right.priority.get().cmp(&left.priority.get()))
+                    .then_with(|| left.work_id.as_str().cmp(right.work_id.as_str()))
+            });
+            let ids = rows
+                .into_iter()
+                .map(|row| row.work_id.as_str().to_owned())
+                .collect();
+            self.move_selection_in(ids, DetailKind::Agent, forward);
+            return;
+        }
+        if self.screen == Screen::ModelsRegime {
+            let targets = self.panel_entity_targets().unwrap_or_default();
+            self.move_selection_in_targets(targets, forward);
+            return;
+        }
+        if let Some(targets) = self.panel_entity_targets() {
+            self.move_selection_in_targets(targets, forward);
+            return;
+        }
+        let ids = self
+            .snapshot
+            .as_ref()
+            .map_or_else(Vec::new, |snapshot| match self.screen {
+                Screen::Impact => snapshot
+                    .impact
+                    .holdings
+                    .iter()
+                    .map(|row| row.symbol.as_str().to_owned())
+                    .collect(),
+                Screen::Portfolio => snapshot
+                    .portfolio
+                    .rows
+                    .iter()
+                    .map(|row| row.symbol.as_str().to_owned())
+                    .collect(),
+                Screen::Timeline => snapshot
+                    .timeline
+                    .rows
+                    .iter()
+                    .filter(|row| self.screen_state.show_all_events || row.impact)
+                    .map(|row| row.event_id.as_str().to_owned())
+                    .collect(),
+                _ => Vec::new(),
+            });
+        if !ids.is_empty() {
+            let kind = match self.screen {
+                Screen::Impact | Screen::Portfolio => DetailKind::Stock,
+                Screen::Timeline => DetailKind::Event,
+                _ => return,
+            };
+            self.move_selection_in(ids, kind, forward);
+            return;
+        }
+        let maximum = self.snapshot.as_ref().map_or(0, |snapshot| {
+            let count = match self.screen {
+                Screen::RiskApprovals => match self.screen_state.narrow_panel % 4 {
+                    0 => snapshot.risk.limits.len(),
+                    1 => snapshot.risk.approvals.len(),
+                    2 => snapshot.risk.alerts.len(),
+                    _ => snapshot.risk.metrics.len(),
+                },
+                Screen::DataEvidence => match self.screen_state.narrow_panel % 2 {
+                    0 => snapshot.data.sources.len(),
+                    _ => snapshot.data.evidence.len(),
+                },
+                Screen::Memory => match self.screen_state.narrow_panel % 3 {
+                    0 => snapshot
+                        .memory
+                        .rows
+                        .iter()
+                        .filter(|row| row.status == MemoryStatus::Core)
+                        .count(),
+                    1 => snapshot
+                        .memory
+                        .rows
+                        .iter()
+                        .filter(|row| row.status == MemoryStatus::Archived)
+                        .count(),
+                    _ => snapshot.memory.history.len(),
+                },
+                Screen::System => match self.screen_state.narrow_panel % 4 {
+                    0 => snapshot.system.services.len(),
+                    1 => snapshot.system.metrics.len(),
+                    2 => snapshot.system.repositories.len(),
+                    _ => 0,
+                },
+                Screen::ModelsRegime => {
+                    let spacing = match self.display_mode() {
+                        DisplayMode::Compact => 0,
+                        DisplayMode::Standard => 1,
+                        DisplayMode::LargeText => 2,
+                    };
+                    match self.screen_state.narrow_panel % 3 {
+                        0 => 2 + snapshot.models.opinions.len() * (2 + spacing),
+                        1 => snapshot.models.candidates.len() * (2 + spacing),
+                        _ => {
+                            2 + snapshot.models.metrics.len() * (1 + spacing)
+                                + snapshot.models.evidence.len() * (2 + spacing)
+                        }
+                    }
+                }
+                _ => 0,
+            };
+            count.saturating_sub(1)
+        });
+        self.screen_state.scroll_offset = if forward {
+            self.screen_state
+                .scroll_offset
+                .saturating_add(1)
+                .min(maximum)
+        } else {
+            self.screen_state.scroll_offset.saturating_sub(1)
+        };
+    }
+
+    fn move_selection_in(&mut self, ids: Vec<String>, kind: DetailKind, forward: bool) {
+        let targets = ids.into_iter().map(|id| (id, kind)).collect();
+        self.move_selection_in_targets(targets, forward);
+    }
+
+    fn move_selection_in_targets(&mut self, targets: Vec<(String, DetailKind)>, forward: bool) {
+        if targets.is_empty() {
+            self.screen_state.selected_id = None;
+            self.screen_state.selected_kind = None;
+            self.screen_state.scroll_offset = 0;
+            return;
+        }
+        let current = self
+            .screen_state
+            .selected_id
+            .as_deref()
+            .zip(self.screen_state.selected_kind)
+            .and_then(|(selected_id, selected_kind)| {
+                targets
+                    .iter()
+                    .position(|(id, kind)| id == selected_id && *kind == selected_kind)
+            })
+            .unwrap_or_else(|| self.screen_state.scroll_offset.min(targets.len() - 1));
+        let next = if forward {
+            current.saturating_add(1).min(targets.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.screen_state.selected_id = Some(targets[next].0.clone());
+        self.screen_state.selected_kind = Some(targets[next].1);
+        self.screen_state.scroll_offset = next;
+    }
+
+    fn panel_entity_targets(&self) -> Option<Vec<(String, DetailKind)>> {
+        self.browse_targets_for_panel(self.screen_state.narrow_panel)
+    }
+
+    pub(crate) fn browse_targets_for_panel(
+        &self,
+        panel: usize,
+    ) -> Option<Vec<(String, DetailKind)>> {
+        let snapshot = self.snapshot.as_ref()?;
+        let targets = match self.screen {
+            Screen::Orders => snapshot
+                .orders
+                .rows
+                .iter()
+                .flat_map(|row| {
+                    std::iter::once((row.order_id.as_str().to_owned(), DetailKind::Order)).chain(
+                        row.fills
+                            .iter()
+                            .map(|fill| (fill.fill_id.as_str().to_owned(), DetailKind::Fill)),
+                    )
+                })
+                .chain(
+                    snapshot
+                        .orders
+                        .reconciliation_agents
+                        .iter()
+                        .map(|row| (row.work_id.as_str().to_owned(), DetailKind::Agent)),
+                )
+                .chain(
+                    snapshot
+                        .orders
+                        .history
+                        .iter()
+                        .map(|row| (row.event_id.as_str().to_owned(), DetailKind::Event)),
+                )
+                .collect(),
+            Screen::Agents => {
+                let stage = match panel % 5 {
+                    0 => AgentStage::Queued,
+                    1 => AgentStage::Running,
+                    2 => AgentStage::Waiting,
+                    3 => AgentStage::Done,
+                    _ => AgentStage::Backlog,
+                };
+                let mut rows = snapshot
+                    .agents
+                    .rows
+                    .iter()
+                    .filter(|row| match stage {
+                        AgentStage::Done => {
+                            matches!(row.stage, AgentStage::Done | AgentStage::Failed)
+                        }
+                        _ => row.stage == stage,
+                    })
+                    .collect::<Vec<_>>();
+                rows.sort_by(|left, right| {
+                    right
+                        .urgent
+                        .cmp(&left.urgent)
+                        .then_with(|| right.priority.get().cmp(&left.priority.get()))
+                        .then_with(|| left.work_id.as_str().cmp(right.work_id.as_str()))
+                });
+                rows.into_iter()
+                    .map(|row| (row.work_id.as_str().to_owned(), DetailKind::Agent))
+                    .collect()
+            }
+            Screen::ModelsRegime => {
+                match panel % 3 {
+                    0 => snapshot
+                        .models
+                        .opinions
+                        .iter()
+                        .map(|row| (row.model_id.as_str().to_owned(), DetailKind::ModelOpinion))
+                        .collect(),
+                    1 => snapshot
+                        .models
+                        .candidates
+                        .iter()
+                        .map(|row| {
+                            (
+                                row.candidate_id.as_str().to_owned(),
+                                DetailKind::ModelCandidate,
+                            )
+                        })
+                        .collect(),
+                    _ => {
+                        snapshot
+                            .models
+                            .metrics
+                            .iter()
+                            .map(|row| (row.metric_id.as_str().to_owned(), DetailKind::Metric))
+                            .chain(snapshot.models.evidence.iter().map(|row| {
+                                (row.evidence_id.as_str().to_owned(), DetailKind::Evidence)
+                            }))
+                            .collect()
+                    }
+                }
+            }
+            Screen::RiskApprovals => match panel % 4 {
+                0 => snapshot
+                    .risk
+                    .limits
+                    .iter()
+                    .map(|row| (row.limit_id.as_str().to_owned(), DetailKind::RiskLimit))
+                    .collect(),
+                1 => snapshot
+                    .risk
+                    .approvals
+                    .iter()
+                    .map(|row| (row.approval_id.as_str().to_owned(), DetailKind::Approval))
+                    .collect(),
+                2 => snapshot
+                    .risk
+                    .alerts
+                    .iter()
+                    .map(|row| (row.alert_id.as_str().to_owned(), DetailKind::Alert))
+                    .collect(),
+                _ => snapshot
+                    .risk
+                    .metrics
+                    .iter()
+                    .map(|row| (row.metric_id.as_str().to_owned(), DetailKind::Metric))
+                    .collect(),
+            },
+            Screen::DataEvidence => match panel % 2 {
+                0 => snapshot
+                    .data
+                    .sources
+                    .iter()
+                    .map(|row| (row.source_id.as_str().to_owned(), DetailKind::Source))
+                    .collect(),
+                _ => snapshot
+                    .data
+                    .evidence
+                    .iter()
+                    .map(|row| (row.evidence_id.as_str().to_owned(), DetailKind::Evidence))
+                    .collect(),
+            },
+            Screen::Memory => match panel % 3 {
+                0 => snapshot
+                    .memory
+                    .rows
+                    .iter()
+                    .filter(|row| row.status == MemoryStatus::Core)
+                    .map(|row| (row.memory_id.as_str().to_owned(), DetailKind::Memory))
+                    .collect(),
+                1 => snapshot
+                    .memory
+                    .rows
+                    .iter()
+                    .filter(|row| row.status == MemoryStatus::Archived)
+                    .map(|row| (row.memory_id.as_str().to_owned(), DetailKind::Memory))
+                    .collect(),
+                _ => snapshot
+                    .memory
+                    .history
+                    .iter()
+                    .map(|row| (row.event_id.as_str().to_owned(), DetailKind::Event))
+                    .collect(),
+            },
+            Screen::System => match panel % 4 {
+                0 => snapshot
+                    .system
+                    .services
+                    .iter()
+                    .map(|row| (row.service_id.as_str().to_owned(), DetailKind::Service))
+                    .collect(),
+                1 => snapshot
+                    .system
+                    .metrics
+                    .iter()
+                    .map(|row| (row.metric_id.as_str().to_owned(), DetailKind::Metric))
+                    .collect(),
+                2 => snapshot
+                    .system
+                    .repositories
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.repository_id.as_str().to_owned(),
+                            DetailKind::Repository,
+                        )
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            Screen::Timeline => snapshot
+                .timeline
+                .rows
+                .iter()
+                .filter(|row| self.screen_state.show_all_events || row.impact)
+                .map(|row| (row.event_id.as_str().to_owned(), DetailKind::Event))
+                .collect(),
+            Screen::Impact | Screen::Portfolio => return None,
+        };
+        Some(targets)
+    }
+
+    fn detail_scroll_maximum(&self) -> usize {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return 0;
+        };
+        let mut area = self
+            .detail_viewport
+            .unwrap_or_else(|| Rect::new(0, 0, 80, 3));
+        let state = self.screen_state();
+        if let Some(result) = self.search_detail() {
+            let line_count = crate::ui::search_detail_line_count(
+                self,
+                result,
+                area.width.saturating_sub(2).max(1),
+            );
+            return line_count.saturating_sub(usize::from(area.height.saturating_sub(2).max(1)));
+        }
+        let line_count = match self.screen {
+            Screen::Agents => {
+                if snapshot.agents.freshness == Freshness::Stale {
+                    area.y = area.y.saturating_add(3);
+                    area.height = area.height.saturating_sub(3);
+                }
+                crate::screens::agents::agent_detail_line_count(
+                    &snapshot.agents,
+                    &state,
+                    area.width.saturating_sub(2).max(1),
+                )
+            }
+            Screen::Timeline => {
+                if snapshot.timeline.freshness == Freshness::Stale {
+                    area.y = area.y.saturating_add(3);
+                    area.height = area.height.saturating_sub(3);
+                }
+                crate::screens::timeline::timeline_detail_line_count(
+                    &snapshot.timeline,
+                    &state,
+                    area.width.saturating_sub(2).max(1),
+                )
+            }
+            Screen::Portfolio => {
+                if snapshot.portfolio.freshness == Freshness::Stale {
+                    area.y = area.y.saturating_add(3);
+                    area.height = area.height.saturating_sub(3);
+                }
+                area = detail_area(area);
+                crate::screens::portfolio::portfolio_detail_line_count(
+                    &snapshot.portfolio,
+                    &state,
+                    area.width.saturating_sub(2).max(1),
+                )
+            }
+            Screen::Orders
+            | Screen::ModelsRegime
+            | Screen::RiskApprovals
+            | Screen::DataEvidence
+            | Screen::Memory
+            | Screen::System => crate::screens::detail::direct_detail_line_count(
+                snapshot,
+                self.screen,
+                &state,
+                area.width.saturating_sub(2).max(1),
+            ),
+            Screen::Impact => 0,
+        };
+        line_count.saturating_sub(usize::from(area.height.saturating_sub(2).max(1)))
     }
 
     fn move_horizontal(&mut self, forward: bool) {
@@ -921,39 +1686,193 @@ impl AppState {
                 };
                 self.set_performance_period(period);
             }
+            Screen::Agents => self.cycle_narrow_panel(forward, 5),
+            Screen::ModelsRegime => self.cycle_narrow_panel(forward, 3),
+            Screen::RiskApprovals => self.cycle_narrow_panel(forward, 4),
+            Screen::DataEvidence => self.cycle_narrow_panel(forward, 2),
+            Screen::Memory => self.cycle_narrow_panel(forward, 3),
+            Screen::System => self.cycle_narrow_panel(forward, 4),
             _ => {}
         }
     }
 
+    fn cycle_narrow_panel(&mut self, forward: bool, count: usize) {
+        self.screen_state.narrow_panel = if forward {
+            (self.screen_state.narrow_panel + 1) % count
+        } else {
+            (self.screen_state.narrow_panel + count - 1) % count
+        };
+        self.screen_state.scroll_offset = 0;
+        self.screen_state.selected_id = None;
+        self.screen_state.selected_kind = None;
+    }
+
+    fn open_search_selected(&mut self) {
+        let Some(target) = self.search_state.open_selected() else {
+            return;
+        };
+        let return_screen = self.screen;
+        self.screen = target.screen;
+        self.mode = LocalMode::Open;
+        self.local_input.clear();
+        self.screen_state.scroll_offset = 0;
+        self.screen_state.selected_id = Some(target.entity_id);
+        self.screen_state.selected_kind = Some(target.detail_kind);
+        self.screen_state.detail_open = true;
+        self.screen_state.narrow_panel = 0;
+        self.show_search_detail = true;
+        self.search_return_screen = Some(return_screen);
+    }
+
+    fn invalidate_search_results(&mut self) {
+        self.search_state.invalidate_for_refresh(self.local_now);
+    }
+
+    fn open_browse_row(&mut self, panel: usize, index: usize) {
+        let selected = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| match self.screen {
+                Screen::Impact if panel == 0 => snapshot
+                    .impact
+                    .holdings
+                    .get(index)
+                    .map(|row| (row.symbol.as_str().to_owned(), DetailKind::Stock)),
+                Screen::Portfolio if panel == 0 => snapshot
+                    .portfolio
+                    .rows
+                    .get(index)
+                    .map(|row| (row.symbol.as_str().to_owned(), DetailKind::Stock)),
+                _ => self
+                    .browse_targets_for_panel(panel)
+                    .and_then(|targets| targets.get(index).cloned()),
+            });
+        let Some((selected_id, selected_kind)) = selected else {
+            return;
+        };
+        self.screen_state.narrow_panel = panel;
+        self.screen_state.selected_id = Some(selected_id);
+        self.screen_state.selected_kind = Some(selected_kind);
+        self.open_selected();
+    }
+
     fn open_selected(&mut self) {
         self.mode = LocalMode::Open;
-        if !matches!(self.screen, Screen::Impact | Screen::Portfolio) {
-            return;
-        }
-        let symbol = self.snapshot.as_ref().and_then(|snapshot| {
-            let rows = if self.screen == Screen::Impact {
-                &snapshot.impact.holdings
-            } else {
-                &snapshot.portfolio.rows
-            };
+        self.show_search_detail = false;
+        self.search_return_screen = None;
+        let selected = if let Some(targets) = self.panel_entity_targets() {
             self.screen_state
                 .selected_id
                 .as_deref()
-                .and_then(|selected| {
-                    rows.iter()
-                        .find(|row| row.symbol.as_str() == selected)
-                        .map(|row| row.symbol.as_str().to_owned())
+                .zip(self.screen_state.selected_kind)
+                .and_then(|(selected_id, selected_kind)| {
+                    targets
+                        .iter()
+                        .find(|(id, kind)| id == selected_id && *kind == selected_kind)
+                        .cloned()
                 })
-                .or_else(|| {
-                    rows.get(self.screen_state.scroll_offset)
-                        .map(|row| row.symbol.as_str().to_owned())
+                .or_else(|| targets.get(self.screen_state.scroll_offset).cloned())
+        } else {
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| match self.screen {
+                    Screen::Impact | Screen::Portfolio => {
+                        let rows = if self.screen == Screen::Impact {
+                            &snapshot.impact.holdings
+                        } else {
+                            &snapshot.portfolio.rows
+                        };
+                        self.screen_state
+                            .selected_id
+                            .as_deref()
+                            .and_then(|selected| {
+                                rows.iter()
+                                    .find(|row| row.symbol.as_str() == selected)
+                                    .map(|row| (row.symbol.as_str().to_owned(), DetailKind::Stock))
+                            })
+                            .or_else(|| {
+                                rows.get(self.screen_state.scroll_offset)
+                                    .map(|row| (row.symbol.as_str().to_owned(), DetailKind::Stock))
+                            })
+                    }
+                    Screen::Agents => self
+                        .screen_state
+                        .selected_id
+                        .clone()
+                        .map(|id| (id, DetailKind::Agent))
+                        .or_else(|| {
+                            snapshot
+                                .agents
+                                .rows
+                                .first()
+                                .map(|row| (row.work_id.as_str().to_owned(), DetailKind::Agent))
+                        }),
+                    Screen::Timeline => self
+                        .screen_state
+                        .selected_id
+                        .clone()
+                        .map(|id| (id, DetailKind::Event))
+                        .or_else(|| {
+                            snapshot
+                                .timeline
+                                .rows
+                                .iter()
+                                .find(|row| self.screen_state.show_all_events || row.impact)
+                                .map(|row| (row.event_id.as_str().to_owned(), DetailKind::Event))
+                        }),
+                    Screen::Orders
+                    | Screen::ModelsRegime
+                    | Screen::RiskApprovals
+                    | Screen::DataEvidence
+                    | Screen::Memory
+                    | Screen::System => None,
                 })
-        });
-        if let Some(symbol) = symbol {
-            self.screen = Screen::Portfolio;
-            self.screen_state.selected_id = Some(symbol);
+        };
+        if let Some((selected_id, selected_kind)) = selected {
+            if matches!(self.screen, Screen::Impact | Screen::Portfolio) {
+                self.screen = Screen::Portfolio;
+            }
+            self.screen_state.selected_id = Some(selected_id);
+            self.screen_state.selected_kind = Some(selected_kind);
             self.screen_state.detail_open = true;
+            self.screen_state.scroll_offset = 0;
         }
+    }
+
+    fn current_note_target(&self) -> Option<(&'static str, &str)> {
+        let entity_id = self.screen_state.selected_id.as_deref()?;
+        let target_type = match self.screen_state.selected_kind? {
+            DetailKind::Stock => "stock",
+            DetailKind::Order => "order",
+            DetailKind::Approval => "approval",
+            DetailKind::Agent | DetailKind::Event => "agent-event",
+            DetailKind::Fill
+            | DetailKind::ModelOpinion
+            | DetailKind::ModelCandidate
+            | DetailKind::Metric
+            | DetailKind::Evidence
+            | DetailKind::RiskLimit
+            | DetailKind::Alert
+            | DetailKind::Source
+            | DetailKind::Memory
+            | DetailKind::Note
+            | DetailKind::Service
+            | DetailKind::Repository => return None,
+        };
+        Some((target_type, entity_id))
+    }
+
+    fn observe_presentation_sequence(&mut self, sequence: u64) -> Result<(), ProtocolError> {
+        if self.awaiting_snapshot || self.snapshot_reducer.state_opt().is_none() {
+            return Ok(());
+        }
+        if self.snapshot_reducer.observe_sequence(sequence).is_err() {
+            return Err(self.fail_closed(
+                "sequence",
+                "Presentation sequence cannot be reduced safely.",
+            ));
+        }
+        Ok(())
     }
 
     fn clear_auth(&mut self) {
@@ -966,9 +1885,15 @@ impl AppState {
     fn begin_manual_lock(&mut self) {
         self.access = AccessState::Locked;
         self.snapshot = None;
+        self.snapshot_reducer = SnapshotReducer::default();
+        self.search_state.clear_results();
         self.mode = LocalMode::Browse;
         self.clear_auth();
         self.local_input.clear();
+        self.filter_error = None;
+        self.pending_note = None;
+        self.show_search_detail = false;
+        self.search_return_screen = None;
         self.lock_pending = true;
     }
 
@@ -976,9 +1901,15 @@ impl AppState {
         self.access = AccessState::Locked;
         self.phase = SessionPhase::AwaitingAuth { first_run: false };
         self.snapshot = None;
+        self.snapshot_reducer = SnapshotReducer::default();
+        self.search_state = SearchState::default();
         self.mode = LocalMode::Browse;
         self.clear_auth();
         self.local_input.clear();
+        self.filter_error = None;
+        self.pending_note = None;
+        self.show_search_detail = false;
+        self.search_return_screen = None;
         self.awaiting_snapshot = false;
         self.lock_pending = false;
         self.lease_pending = false;
@@ -988,9 +1919,15 @@ impl AppState {
         self.access = AccessState::ProtocolLockout;
         self.phase = SessionPhase::ProtocolLockout;
         self.snapshot = None;
+        self.snapshot_reducer = SnapshotReducer::default();
+        self.search_state = SearchState::default();
         self.mode = LocalMode::Browse;
         self.clear_auth();
         self.local_input.clear();
+        self.filter_error = None;
+        self.pending_note = None;
+        self.show_search_detail = false;
+        self.search_return_screen = None;
         self.awaiting_snapshot = false;
         self.lock_pending = false;
         self.lease_pending = false;

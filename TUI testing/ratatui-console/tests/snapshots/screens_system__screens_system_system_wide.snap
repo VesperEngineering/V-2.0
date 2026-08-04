@@ -1,0 +1,36 @@
+---
+source: tests/screens_system.rs
+expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::default();\n    render_text(w, h, |frame|\n    { render_system(frame, frame.area(), &snapshot.system, &state) })\n} (120, 32)"
+---
+┌> SERVICES────────────────────────────────────────────────┐┌SYSTEM METRICS────────────────────────────────────────────┐
+│[>] RUNNING service:qwen | 2026-07-15 08:34:56 EDT        ││[OK] FRESH metric:cpu | 12.50 percent | 2026-07-15        │
+│[!] FAILED service:worker | 2026-01-15 07:34:56 EST |     ││08:34:56 EDT                                              │
+│Worker?stopped                                            ││[~] STALE metric:gpu | 42.00 percent | 2026-07-15 08:34:56│
+│                                                          ││EDT | Sensor delayed                                      │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+┌SOURCE CONTROL────────────────────────────────────────────────────────┐┌UNSUPPORTED FACTS─────────────────────────────┐
+│[OK] FRESH repository:v20 | Source git | Branch                       ││Backup status: [?] UNAVAILABLE - Not in the   │
+│codex/vesper/ratatui-console | Revision 0123456789abcdef | [!] DIRTY |││SystemView contract.                          │
+│Worktrees C:/Users/bgonn/Desktop/v20, C:/tmp/worktree | Unpushed 2 |  ││Recovery status: [?] UNAVAILABLE - Not in the │
+│2026-07-15 08:34:56 EDT                                               ││SystemView contract.                          │
+│[?] UNAVAILABLE repository:missing | Repository unavailable           ││Notification status: [?] UNAVAILABLE - Not in │
+│                                                                      ││the SystemView contract.                      │
+│                                                                      ││[i] READ ONLY - This panel reports facts; it  │
+│                                                                      ││exposes no controls.                          │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘

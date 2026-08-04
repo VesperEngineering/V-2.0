@@ -113,9 +113,9 @@ class EventStore:
         self._require_open()
         self._require_event(event)
         with self._ledger.transaction() as connection:
-            return self._append_in_transaction(connection, event)
+            return self.append_in_transaction(connection, event)
 
-    def _append_in_transaction(
+    def append_in_transaction(
         self,
         connection: sqlite3.Connection,
         event: EventInput,
@@ -187,6 +187,15 @@ class EventStore:
             {**event.model_dump(mode="python"), "sequence": sequence},
             strict=True,
         )
+
+    def _append_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        event: EventInput,
+    ) -> StoredEvent:
+        """Compatibility shim; new controller code uses the public admission seam."""
+
+        return self.append_in_transaction(connection, event)
 
     def since(self, sequence: int, limit: int) -> tuple[StoredEvent, ...]:
         """Return events after a database sequence, oldest admitted first."""
@@ -275,7 +284,7 @@ class EventStore:
         tokens = _SEARCH_TOKEN.findall(query.casefold())
         if not tokens:
             return ()
-        match_expression = " AND ".join(f'"{token}"' for token in tokens)
+        match_expression = " AND ".join(f'"{token}"*' for token in tokens)
         clauses = ["event_search MATCH ?"]
         parameters: list[object] = [match_expression]
         for name in (
@@ -293,13 +302,21 @@ class EventStore:
                 continue
             clauses.append(f"e.{name} = ?")
             parameters.append(int(value) if name == "impact" else value)
-        parameters.append(page_size)
+        parameters.extend((query, query, query, page_size))
         statement = f"""
             SELECT e.*
             FROM event_search
             JOIN events AS e ON e.sequence = event_search.rowid
             WHERE {" AND ".join(clauses)}
-            ORDER BY bm25(event_search), e.sequence DESC
+            ORDER BY
+                CASE
+                    WHEN lower(e.event_id) = lower(?) THEN 0
+                    WHEN lower(e.event_id) LIKE lower(?) || '%'
+                      OR lower(e.summary) LIKE lower(?) || '%' THEN 1
+                    ELSE 2
+                END,
+                bm25(event_search),
+                e.sequence DESC
             LIMIT ?
         """
         with self._ledger.read() as connection:

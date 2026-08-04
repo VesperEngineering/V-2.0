@@ -1,0 +1,89 @@
+---
+source: tests/screens_agents.rs
+expression: "composite_snapshot(150, Theme::Charcoal, DisplayMode::Standard)"
+---
+AGENTS
+┌QUEUED <────────────────────────────┐┌RUNNING────────────────────────────┐┌WAITING─────────────────────────────┐┌DONE───────────────────────────────┐
+│[!] URGENT | QUEUED | urgent queued ││[!] URGENT | RUNNING | urgent      ││[ ] WAITING | waiting task          ││! FAILED | failed task             │
+│agent:queue | P1 | 1m 05s |         ││running                            ││agent:wait | P30 | 1m 05s |         ││agent:failed | P100 | 1m 05s |     │
+│work:queued-urgent                  ││agent:run | P5 | 1m 05s |          ││work:waiting                        ││work:failed                        │
+│MODEL qwen:64k | AREA portfolio,    ││work:running-urgent                ││MODEL qwen:64k | AREA portfolio,    ││MODEL qwen:64k | AREA portfolio,   │
+│evidence                            ││MODEL qwen:64k | AREA portfolio,   ││evidence                            ││evidence                           │
+│                                    ││evidence                           ││                                    ││                                   │
+│[ ] QUEUED | normal queued          ││                                   ││                                    ││[ ] DONE | completed task          │
+│agent:queue | P90 | 1m 05s |        ││                                   ││                                    ││agent:done | P20 | 1m 05s |        │
+│work:queued-normal                  ││                                   ││                                    ││work:done                          │
+│MODEL qwen:64k | AREA portfolio,    ││                                   ││                                    ││MODEL qwen:64k | AREA portfolio,   │
+│evidence                            ││                                   ││                                    ││evidence                           │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+└────────────────────────────────────┘└───────────────────────────────────┘└────────────────────────────────────┘└───────────────────────────────────┘
+┌BACKLOG─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[ ] BACKLOG | backlog task                                                                                                                          │
+│agent:backlog | P10 | 1m 05s | work:backlog                                                                                                         │
+│MODEL qwen:64k | AREA portfolio, evidence                                                                                                           │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+MODELS & REGIME
+┌> MODEL OPINIONS / FINAL──────────────────────┐┌CANDIDATES─────────────────────────────────────────────────────┐┌EVIDENCE & METRICS─────────────────┐
+│FINAL REGIME: UNAVAILABLE - controller truth  ││  candidate:evaluating | FAMILY approved-family | STRATEGY     ││METRICS                            │
+│not provided                                  ││ml_model | 2026-08-02 20:00:00 EDT                             ││  metric:cpu | 12.5000 percent |   │
+│OPINION CONSENSUS: UNCERTAIN                  ││STATUS EVALUATING | RETENTION POLICY UNAVAILABLE | EVIDENCE    ││FRESH | 2026-08-02 20:00:00 EDT |  │
+│                                              ││evidence:evaluating                                            ││ERROR NONE                         │
+│  model:macro | risk-on | 80.0%               ││                                                               ││                                   │
+│2026-08-02 20:00:00 EDT                       ││  candidate:failed | FAMILY approved-family | STRATEGY ml_model││EVIDENCE                           │
+│                                              ││| 2026-08-02 20:00:00 EDT                                      ││  evidence:evaluating |            │
+│  model:micro | risk-off | 60.0%              ││STATUS FAILED | RETENTION POLICY 30 DAYS | EVIDENCE            ││evaluation-receipt | SOURCE        │
+│2026-08-02 20:00:00 EDT                       ││evidence:failed                                                ││controller                         │
+│                                              ││                                                               ││2026-08-02 20:00:00 EDT | SHA256   │
+│                                              ││  candidate:passed | FAMILY approved-family | STRATEGY ml_model││aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
+│                                              ││| 2026-08-02 20:00:00 EDT                                      ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaa      │
+│                                              ││STATUS PASSED | RETENTION POLICY 90 DAYS | EVIDENCE            ││                                   │
+│                                              ││evidence:passed                                                ││  evidence:failed | gate-receipt | │
+│                                              ││                                                               ││SOURCE controller                  │
+│                                              ││  candidate:active | FAMILY approved-family | STRATEGY ml_model││2026-08-02 20:00:00 EDT | SHA256   │
+│                                              ││| 2026-08-02 20:00:00 EDT                                      ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
+│                                              ││STATUS ACTIVE | RETENTION POLICY PERMANENT | EVIDENCE          ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbb      │
+│                                              ││evidence:active                                                ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+└──────────────────────────────────────────────┘└───────────────────────────────────────────────────────────────┘└───────────────────────────────────┘
+
+TIMELINE
+┌TIMELINE - IMPACT ONLY──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│EXCLUDED BY FILTER 1 | HIDDEN BY SOURCE 7                                                                                                           │
+│                                                                                                                                                    │
+│[!] URGENT | 2026-08-02 20:00:00 EDT | Portfolio impact detected                                                                                    │
+│ID event:impact | AGENT agent:queue | SYMBOL AAPL | MODEL model:macro | ORDER order:1 | EVIDENCE evidence:impact                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

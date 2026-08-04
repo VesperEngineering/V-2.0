@@ -569,7 +569,6 @@ def _project(
         generated_at_utc,
         portfolio_rows,
         active_agents,
-        model_facts,
         agent_facts,
     )
     return _ProjectedSnapshot(
@@ -820,7 +819,6 @@ def _header(
     generated_at_utc: datetime,
     portfolio_rows: tuple[PortfolioRow, ...],
     active_agents: tuple[AgentCard, ...],
-    model_facts_value: object | None,
     agent_facts_value: object | None,
 ) -> HeaderView:
     data_metadata = metadata["data"]
@@ -829,14 +827,6 @@ def _header(
     if data_metadata.as_of_utc is not None:
         age = max(0.0, (generated_at_utc - data_metadata.as_of_utc).total_seconds())
 
-    model_facts = cast(ModelFacts | None, model_facts_value)
-    opinion: ModelOpinionRow | None = None
-    if (
-        metadata["models"].freshness is Freshness.FRESH
-        and model_facts is not None
-        and model_facts.opinions
-    ):
-        opinion = max(model_facts.opinions, key=lambda row: (row.as_of_utc, row.model_id))
     agents_are_fresh = metadata["agents"].freshness is Freshness.FRESH
     running = (
         sorted(
@@ -861,8 +851,8 @@ def _header(
         operating_mode_reason=_UNAVAILABLE_MODE_REASON,
         data_freshness=data_freshness,
         data_age_seconds=age,
-        regime_label=opinion.regime if opinion is not None else "Unavailable",
-        regime_confidence=opinion.confidence if opinion is not None else None,
+        regime_label="Unavailable",
+        regime_confidence=None,
         portfolio_value=portfolio_value,
         next_rebalance_at_utc=None,
         rebalance_blockers=None,

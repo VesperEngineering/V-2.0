@@ -23,6 +23,8 @@ from vesper.platform.tui.contracts import (
     LeaseRequestPayload,
     MessageType,
     OperatingMode,
+    SearchRequestPayload,
+    SearchResultsPayload,
     SnapshotRequestPayload,
     UntrustedProtocolDiagnostic,
     WIRE_SCHEMA_RECEIPT,
@@ -33,6 +35,13 @@ from vesper.platform.tui.contracts import (
     decode_payload,
 )
 from vesper.platform.tui.protocol import MAX_FRAME_BYTES, encode_frame
+from vesper.platform.tui.search import (
+    SearchFilters,
+    SearchKind,
+    SearchRecordType,
+    SearchResult,
+    SearchScreen,
+)
 
 
 def _envelope(**changes: object) -> WireEnvelope:
@@ -144,6 +153,134 @@ def test_decode_payload_maps_only_the_matching_exact_model() -> None:
         )
     with pytest.raises(ValidationError):
         LeaseRequestPayload(action="release")
+
+
+def test_search_wire_payloads_are_strict_bounded_and_echo_the_request() -> None:
+    request = decode_payload(
+        _envelope(
+            message_type=MessageType.SEARCH_REQUEST,
+            payload={
+                "request_id": 7,
+                "query": "AAPL",
+                "filters": {
+                    "kinds": ["stock"],
+                    "screens": ["portfolio"],
+                    "source": "fixture",
+                },
+                "limit": 100,
+            },
+        )
+    )
+    assert request == SearchRequestPayload(
+        request_id=7,
+        query="AAPL",
+        filters=SearchFilters(
+            kinds=(SearchKind.STOCK,),
+            screens=(SearchScreen.PORTFOLIO,),
+            source="fixture",
+        ),
+        limit=100,
+    )
+
+    result = SearchResult(
+        kind=SearchKind.NOTE,
+        record_type=SearchRecordType.NOTE,
+        record_id="note:1",
+        label="AAPL note",
+        summary="Review concentration risk.",
+        occurred_at_utc=None,
+        source="operator",
+        screen=SearchScreen.PORTFOLIO,
+    )
+    response = decode_payload(
+        _envelope(
+            message_type=MessageType.SEARCH_RESULTS,
+            payload={
+                "request_id": 7,
+                "indexed_state_version": 12,
+                "results": [result.model_dump(mode="json")],
+                "error": None,
+            },
+        )
+    )
+    assert response == SearchResultsPayload(
+        request_id=7,
+        indexed_state_version=12,
+        results=(result,),
+        error=None,
+    )
+
+    valid_request = {
+        "request_id": 7,
+        "query": "AAPL",
+        "filters": {"kinds": [], "screens": [], "source": None},
+        "limit": 100,
+    }
+    for changes in (
+        {"request_id": True},
+        {"request_id": -1},
+        {"request_id": 0},
+        {"query": ""},
+        {"query": " "},
+        {"query": "x" * 257},
+        {"limit": True},
+        {"limit": 0},
+        {"limit": 101},
+        {
+            "filters": {
+                "kinds": ["stock"] * 11,
+                "screens": [],
+                "source": None,
+            }
+        },
+        {
+            "filters": {
+                "kinds": [],
+                "screens": ["portfolio"] * 10,
+                "source": None,
+            }
+        },
+        {"unknown": "field"},
+    ):
+        with pytest.raises(ValidationError):
+            decode_payload(
+                _envelope(
+                    message_type=MessageType.SEARCH_REQUEST,
+                    payload={**valid_request, **changes},
+                )
+            )
+
+    with pytest.raises(ValidationError):
+        SearchResultsPayload(
+            request_id=7,
+            indexed_state_version=12,
+            results=tuple(result for _ in range(101)),
+            error=None,
+        )
+    with pytest.raises(ValidationError):
+        SearchResultsPayload(
+            request_id=7,
+            indexed_state_version=12,
+            results=(),
+            error="x" * 513,
+        )
+    result_payload = result.model_dump(mode="json")
+    missing_record_type = dict(result_payload)
+    missing_record_type.pop("record_type")
+    unknown_record_type = {**result_payload, "record_type": "unknown-row"}
+    for invalid_result in (missing_record_type, unknown_record_type):
+        with pytest.raises(ValidationError):
+            decode_payload(
+                _envelope(
+                    message_type=MessageType.SEARCH_RESULTS,
+                    payload={
+                        "request_id": 7,
+                        "indexed_state_version": 12,
+                        "results": [invalid_result],
+                        "error": None,
+                    },
+                )
+            )
 
 
 def test_untrusted_diagnostic_scrubs_retained_references_and_cannot_serialize() -> None:
@@ -358,13 +495,13 @@ def test_canonical_fixture_and_schema_receipt_have_exact_bytes_and_hashes() -> N
     ).encode("utf-8")
     assert (
         WIRE_SCHEMA_RECEIPT_SHA256
-        == "0ab696e243fd0da2bf13fe8115c390c3560dca18c93850eb9fa3665f8b37efe3"
+        == "4023f5c520b999c4d57cbcc2ca51a68d56ce4b7fb1e0f525e15e4fcc9a7ed8b1"
     )
     assert hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest() == WIRE_SCHEMA_RECEIPT_SHA256
 
 
 def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() -> None:
-    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 15
+    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 17
     assert {decode_envelope_json(frame).message_type for frame in CANONICAL_WIRE_FIXTURES} == set(
         MessageType
     )

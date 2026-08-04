@@ -12,6 +12,7 @@ pub struct DetailOverlay {
     title: String,
     lines: Vec<String>,
     palette: Palette,
+    scroll_offset: u16,
 }
 
 impl DetailOverlay {
@@ -20,7 +21,13 @@ impl DetailOverlay {
             title: title.into(),
             lines,
             palette,
+            scroll_offset: 0,
         }
+    }
+
+    pub fn scroll(mut self, offset: usize) -> Self {
+        self.scroll_offset = u16::try_from(offset).unwrap_or(u16::MAX);
+        self
     }
 }
 
@@ -36,6 +43,7 @@ impl Widget for DetailOverlay {
         Paragraph::new(lines)
             .style(style)
             .wrap(Wrap { trim: false })
+            .scroll((self.scroll_offset, 0))
             .block(
                 Block::default()
                     .borders(Borders::ALL)

@@ -183,7 +183,7 @@ fn unlocked_shell_has_six_sections_and_truthful_snapshot_unavailable_content() {
     assert!(text.contains("UNAVAILABLE"));
     assert!(!text.contains("STOPPED"));
     assert!(text.contains("UNAVAILABLE - Controller snapshot has not arrived."));
-    assert!(text.contains("UNAVAILABLE - Phase 1 provides the secure console shell only."));
+    assert!(text.contains("UNAVAILABLE - Agent input is not connected to the controller yet."));
 }
 
 #[test]
@@ -293,14 +293,39 @@ fn all_ten_screens_show_their_current_truthful_availability() {
             state.screen = screen;
             let text = normalized_render(width, if width == 120 { 36 } else { 24 }, &state);
             assert!(text.contains(&format!("SCREEN: {name}")), "{width} {name}");
-            let expected = if matches!(screen, Screen::Impact | Screen::Portfolio | Screen::Orders)
-            {
-                "UNAVAILABLE - Controller snapshot has not arrived."
-            } else {
-                "UNAVAILABLE - Phase 1 provides the secure console shell only."
-            };
-            assert!(text.contains(expected), "{width} {name}\n{text}");
+            assert!(
+                text.contains("UNAVAILABLE - Controller snapshot has not arrived."),
+                "{width} {name}\n{text}"
+            );
         }
+    }
+}
+
+#[test]
+fn all_observability_screens_dispatch_to_their_integrated_renderers() {
+    for (screen, heading) in [
+        (Screen::Agents, "QUEUED"),
+        (Screen::ModelsRegime, "MODEL OPINIONS / FINAL"),
+        (Screen::Timeline, "TIMELINE - IMPACT ONLY"),
+        (Screen::RiskApprovals, "RISK LIMITS"),
+        (Screen::DataEvidence, "DATA SOURCES"),
+        (Screen::Memory, "CORE MEMORY"),
+        (Screen::System, "SERVICES"),
+    ] {
+        let mut state = AppState::controller();
+        state.screen = screen;
+        state.snapshot = Some(
+            serde_json::from_slice(include_bytes!(
+                "../../contracts/v1/console_snapshot_empty_command_specs.json"
+            ))
+            .expect("valid shared console snapshot"),
+        );
+        let text = normalized_render(120, 36, &state);
+        assert!(
+            text.contains(heading),
+            "{screen:?} missing {heading:?}\n{text}"
+        );
+        assert!(!text.contains("Phase 1 provides"), "{screen:?}\n{text}");
     }
 }
 

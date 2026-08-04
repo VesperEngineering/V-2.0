@@ -16,6 +16,7 @@ from typing import Literal, Sequence
 from .contracts import SafeId, WireEnvelope
 from .event_store import EventStore
 from .gateway import Gateway
+from .notes import NoteStore
 from .pipe_security import current_logon_sid, pipe_name
 from .pipe_server import ConnectionFactory, WindowsPipeServer
 from .ports import UnavailablePort
@@ -23,6 +24,8 @@ from .projections import EventTimelineProjection, LegacyStateProjection, NativeP
 from .projections.repository import RepositoryProjection
 from .projections.windows_system import WindowsSystemProjection
 from .snapshot import SnapshotBuilder
+from .search import GlobalSearchService
+from .sqlite_ledger import TuiLedger
 from .stream import ProjectionLoop
 
 _PARENT_IDLE_SECONDS = 30.0
@@ -86,21 +89,44 @@ def _serving_state_root(value: Path | None) -> Path:
 @dataclass(frozen=True, slots=True)
 class _ProjectionRuntime:
     loop: ProjectionLoop
+    ledger: TuiLedger | None
     event_store: EventStore | None
+    note_store: NoteStore | None
+    search_service: GlobalSearchService
 
     def close(self) -> None:
+        self.search_service.close()
         if self.event_store is not None:
             self.event_store.close()
+        if self.note_store is not None:
+            self.note_store.close()
+        if self.ledger is not None:
+            self.ledger.close()
 
 
 def _build_projection_runtime(state_root: Path, gateway: Gateway) -> _ProjectionRuntime:
     repository_root = Path(__file__).resolve().parents[3]
+    ledger: TuiLedger | None = None
     event_store: EventStore | None = None
+    note_store: NoteStore | None = None
+    search_service: GlobalSearchService | None = None
+    persistent_search_error: str | None = None
     try:
         try:
-            event_store = EventStore(state_root / "operations.sqlite3")
+            ledger = TuiLedger(state_root / "operations.sqlite3")
+            event_store = EventStore(ledger)
+            note_store = NoteStore(ledger)
         except _OPERATIONAL_ADAPTER_ERRORS:
-            pass
+            if event_store is not None:
+                event_store.close()
+                event_store = None
+            if note_store is not None:
+                note_store.close()
+                note_store = None
+            if ledger is not None:
+                ledger.close()
+                ledger = None
+            persistent_search_error = "Persisted search history is unavailable."
 
         try:
             native = NativePlatformProjection(repository_root)
@@ -179,11 +205,30 @@ def _build_projection_runtime(state_root: Path, gateway: Gateway) -> _Projection
             builder=SnapshotBuilder(),
             publisher=gateway,
         )
+        search_service = GlobalSearchService(
+            gateway.snapshot(),
+            event_store,
+            note_store,
+            persistent_error=persistent_search_error,
+        )
+        gateway.attach_search_service(search_service)
     except BaseException:
+        if search_service is not None:
+            search_service.close()
         if event_store is not None:
             event_store.close()
+        if note_store is not None:
+            note_store.close()
+        if ledger is not None:
+            ledger.close()
         raise
-    return _ProjectionRuntime(loop=loop, event_store=event_store)
+    return _ProjectionRuntime(
+        loop=loop,
+        ledger=ledger,
+        event_store=event_store,
+        note_store=note_store,
+        search_service=search_service,
+    )
 
 
 @dataclass

@@ -440,9 +440,11 @@ Expected: FAIL because stores are absent.
 - [ ] **Step 3: Implement SQLite stores under LocalAppData**
 
 Use WAL mode, foreign keys, `busy_timeout=5000`, explicit transactions, an
-append-only event table, FTS5 search, and a mutable notes table with an immutable
-note-history table. Store JSON payloads with sorted keys. Reject bodies above
-8,000 characters and queries above 256 characters.
+append-only event table, FTS5 search, and a current-notes table with immutable
+note history. This phase admits revision-1 notes only and exposes no edit
+command. Any future revision must update the current row, immutable history,
+and FTS index in one transaction. Store JSON payloads with sorted keys. Reject
+bodies above 8,000 characters and queries above 256 characters.
 
 ```python
 def append(self, event: EventInput) -> StoredEvent:
@@ -1063,6 +1065,106 @@ git add -- 'vesper/platform/tui/search.py' 'tests/platform/tui/test_search.py' '
 git commit -m "feat(tui): add search drilldown and notes"
 ```
 
+### Task 9b: Search controller history and stored notes
+
+**Files:**
+- Modify: `vesper/platform/tui/contracts.py`
+- Modify: `vesper/platform/tui/search.py`
+- Modify: `vesper/platform/tui/gateway.py`
+- Modify: `vesper/platform/tui/cli.py`
+- Modify: `vesper/platform/tui/event_store.py`
+- Modify: `vesper/platform/tui/notes.py`
+- Modify: `vesper/platform/tui/sqlite_ledger.py`
+- Modify: `tests/platform/tui/test_contracts.py`
+- Modify: `tests/platform/tui/test_search.py`
+- Modify: `tests/platform/tui/test_gateway.py`
+- Modify: `tests/platform/tui/test_event_store.py`
+- Modify: `tests/platform/tui/test_notes.py`
+- Modify: `TUI testing/ratatui-console/src/contract.rs`
+- Modify: `TUI testing/ratatui-console/src/search.rs`
+- Modify: `TUI testing/ratatui-console/src/state.rs`
+- Modify: `TUI testing/ratatui-console/src/app.rs`
+- Modify: `TUI testing/ratatui-console/src/ui.rs`
+- Modify: `TUI testing/ratatui-console/tests/contract.rs`
+- Modify: `TUI testing/ratatui-console/tests/search.rs`
+- Modify: `TUI testing/ratatui-console/tests/state.rs`
+- Modify: `TUI testing/ratatui-console/tests/input.rs`
+
+**Interfaces:**
+- Produces authenticated read-only `search-request` and `search-results` wire messages.
+- Produces `GlobalSearchService` that merges the current snapshot, the complete
+  append-only event ledger, and stored context notes.
+- Adds `note` as a typed search kind while retaining exact-stock, exact-ID,
+  prefix, and FTS ordering.
+- Requires one exact search record type: `portfolio-row`, `agent-card`,
+  `model-opinion-row`, `candidate-row`, `order-row`, `approval-row`,
+  `timeline-row`, `evidence-row`, `memory-row`, `source-row`, `repository-row`,
+  or `note`.
+- Produces a deterministic event-admission seam for later controller-owned
+  order, approval, agent, and portfolio transitions. It never derives history
+  by comparing snapshots.
+
+- [ ] **Step 1: Write full-history and authentication regressions**
+
+Insert 10,001 events so the oldest event is outside the snapshot window, then
+prove global search still returns it before and after a restart. Prove Private
+and Shared notes are searchable only after authentication and remain
+`context_only`. An authenticated viewer may search without Take Control; a
+locked session receives no result. Cover prefix rank, filters, hostile FTS text,
+deduplication, duplicate IDs with different kinds, and the 100-result limit.
+Also prove same-ID records with the same broad kind survive when their exact
+record types differ, including model-opinion/candidate and source/repository.
+
+- [ ] **Step 2: Add a strict v1-to-v2 ledger migration and note FTS**
+
+Migrate only a valid V20-owned version-1 ledger. Add `note_search` and populate
+it in the same transaction as note creation. Any future revision must update
+the current note, immutable history, and FTS rows in one transaction. Verify
+schema and content before committing the migration. Validate every note payload against
+its columns and immutable history, then verify exact FTS row/content parity
+inside the migration transaction. A corrupt, foreign, or newer ledger must fail
+closed without modification.
+
+- [ ] **Step 3: Implement controller-owned merged search**
+
+Add bounded `SearchRequestPayload` and `SearchResultsPayload` contracts with an
+echoed request ID and indexed state version. Require `record_type` on every
+result. Merge snapshot, EventStore, and NoteStore results, deduplicate by
+`(record_type, record_id)` using case-insensitive ID comparison, and return at
+most 100.
+The gateway validates authentication and owns all access to the persistent
+stores. Search performs no broker, scheduler, training, or protected-data read.
+
+- [ ] **Step 4: Route Rust debounce through the gateway**
+
+Keep the existing 100 ms debounce and stale-request suppression, but send the
+typed request to the gateway instead of treating the bounded snapshot as the
+production history index. Render visible server errors without substituting
+local fixture data. Keep a local index only for isolated tests or an explicitly
+labeled disconnected fallback that cannot claim full history.
+
+- [ ] **Step 5: Add deterministic history admission**
+
+Provide a transaction-bound API that admits authoritative controller events
+with deterministic IDs, receipt/evidence links, idempotent replay, and conflict
+rejection. Controls Task 4 must use this seam for enabled operator transitions;
+later conversation and memory stores must register their own bounded search
+sources. Typed order history stays unavailable until a reviewed authoritative
+source exists.
+
+- [ ] **Step 6: Run focused and boundary verification**
+
+Run the Python contract, ledger, event, note, gateway, and search suites. Run
+the Rust contract, search, state, and input suites. Repeat the read-boundary
+proof with all broker, scheduler, training, and protected-path counters at zero.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add -- 'vesper/platform/tui/contracts.py' 'vesper/platform/tui/search.py' 'vesper/platform/tui/gateway.py' 'vesper/platform/tui/cli.py' 'vesper/platform/tui/event_store.py' 'vesper/platform/tui/notes.py' 'vesper/platform/tui/sqlite_ledger.py' 'tests/platform/tui/test_contracts.py' 'tests/platform/tui/test_search.py' 'tests/platform/tui/test_gateway.py' 'tests/platform/tui/test_event_store.py' 'tests/platform/tui/test_notes.py' 'TUI testing/ratatui-console/src/contract.rs' 'TUI testing/ratatui-console/src/search.rs' 'TUI testing/ratatui-console/src/state.rs' 'TUI testing/ratatui-console/src/app.rs' 'TUI testing/ratatui-console/src/ui.rs' 'TUI testing/ratatui-console/tests/contract.rs' 'TUI testing/ratatui-console/tests/search.rs' 'TUI testing/ratatui-console/tests/state.rs' 'TUI testing/ratatui-console/tests/input.rs'
+git commit -m "feat(tui): search complete controller history"
+```
+
 ### Task 10: Verify refresh performance and safety
 
 **Files:**
@@ -1170,6 +1272,10 @@ git commit -m "test(tui): verify complete read-only console"
 - Agent cards use the approved Jira-style stages.
 - Timeline defaults to impact and exposes all events with `e`.
 - Search, filters, notes, mouse, keyboard, and drill-down work.
+- Global search finds complete persisted event history and stored context notes,
+  including records older than the 10,000-row snapshot window.
+- Search preserves same-ID records of different exact types and never collapses
+  model opinions with candidates or sources with repositories.
 - Sequence gaps force a snapshot; required events are never silently dropped.
 - No broker, scheduler, training, or protected-data path was accessed.
 - Python, Rust, snapshot, and performance checks have fresh receipts.

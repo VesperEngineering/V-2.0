@@ -1,0 +1,32 @@
+---
+source: tests/screens_system.rs
+expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::default();\n    render_text(w, h, |frame|\n    { render_data(frame, frame.area(), &snapshot.data, &state) })\n} (120, 28)"
+---
+┌SOURCE STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[~] STALE - Refresh delayed?retrying                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> DATA SOURCES────────────────────────────────────────────────────────┐┌EVIDENCE──────────────────────────────────────┐
+│[~] STALE source:massive | Age 12.5s | Coverage S&P 500 | Consumers   ││[E] evidence:1 | receipt | Source controller |│
+│ml_model, momentum | Dependencies [?] UNAVAILABLE - Not in the        ││2026-07-15 08:34:56 EDT | SHA-256             │
+│SourceRow contract. | 2026-07-15 08:34:56 EDT | Late sample           ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
+│[?] UNAVAILABLE source:missing | No reviewed adapter                  ││aaaaaaaaaaaaaaaaaa                            │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+│                                                                      ││                                              │
+└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘

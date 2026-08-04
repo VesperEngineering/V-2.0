@@ -27,6 +27,144 @@ from vesper.platform.tui.sqlite_ledger import (
 NOW = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
 APPLICATION_ID = 0x56323054
 
+_V1_SCHEMA = """
+CREATE TABLE events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    occurred_at_utc TEXT NOT NULL,
+    impact INTEGER NOT NULL CHECK (impact IN (0, 1)),
+    severity TEXT NOT NULL CHECK (
+        severity IN ('info', 'active', 'waiting', 'urgent', 'resolved')
+    ),
+    summary TEXT NOT NULL,
+    agent_id TEXT,
+    symbol TEXT,
+    model_id TEXT,
+    approval_id TEXT,
+    order_id TEXT,
+    source TEXT NOT NULL,
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+);
+
+CREATE VIRTUAL TABLE event_search USING fts5(
+    event_id,
+    source,
+    summary,
+    agent_id,
+    symbol,
+    model_id,
+    approval_id,
+    order_id,
+    evidence_ids,
+    tokenize='unicode61'
+);
+
+CREATE TABLE notes (
+    note_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id TEXT NOT NULL UNIQUE,
+    target_type TEXT NOT NULL CHECK (
+        target_type IN ('stock', 'order', 'approval', 'agent-event')
+    ),
+    target_id TEXT NOT NULL,
+    body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 8000),
+    visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared')),
+    author TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+);
+
+CREATE INDEX notes_target_order
+ON notes(target_type, target_id, note_sequence DESC);
+
+CREATE TABLE note_history (
+    history_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    changed_at_utc TEXT NOT NULL,
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+    UNIQUE(note_id, revision),
+    FOREIGN KEY(note_id) REFERENCES notes(note_id) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER events_no_update
+BEFORE UPDATE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events are append-only');
+END;
+
+CREATE TRIGGER events_no_delete
+BEFORE DELETE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events are append-only');
+END;
+
+CREATE TRIGGER note_history_no_update
+BEFORE UPDATE ON note_history
+BEGIN
+    SELECT RAISE(ABORT, 'note history is immutable');
+END;
+
+CREATE TRIGGER note_history_no_delete
+BEFORE DELETE ON note_history
+BEGIN
+    SELECT RAISE(ABORT, 'note history is immutable');
+END;
+"""
+
+
+def _create_v1_database(path, *, with_note: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(_V1_SCHEMA)
+        connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+        connection.execute("PRAGMA user_version = 1")
+        if with_note:
+            payload = json.dumps(
+                {
+                    "author": "operator",
+                    "body": "legacy risk context",
+                    "context_only": True,
+                    "created_at_utc": "2026-08-03T16:00:00Z",
+                    "note_id": "note:legacy",
+                    "revision": 1,
+                    "target": {"target_id": "AAPL", "target_type": "stock"},
+                    "updated_at_utc": "2026-08-03T16:00:00Z",
+                    "visibility": "private",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            connection.execute(
+                """
+                INSERT INTO notes (
+                    note_id, target_type, target_id, body, visibility, author,
+                    revision, created_at_utc, updated_at_utc, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "note:legacy",
+                    "stock",
+                    "AAPL",
+                    "legacy risk context",
+                    "private",
+                    "operator",
+                    1,
+                    "2026-08-03T16:00:00Z",
+                    "2026-08-03T16:00:00Z",
+                    payload,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO note_history (
+                    note_id, revision, changed_at_utc, payload_json
+                ) VALUES (?, ?, ?, ?)
+                """,
+                ("note:legacy", 1, "2026-08-03T16:00:00Z", payload),
+            )
+
 
 def _event(index: int, **changes: object) -> EventInput:
     values: dict[str, object] = {
@@ -55,7 +193,7 @@ def test_ledger_migrates_reopens_and_configures_required_pragmas(tmp_path) -> No
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
         assert connection.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         tables = {
             row[0]
             for row in connection.execute(
@@ -64,7 +202,7 @@ def test_ledger_migrates_reopens_and_configures_required_pragmas(tmp_path) -> No
         }
     ledger.close()
 
-    assert {"events", "event_search", "notes", "note_history"} <= tables
+    assert {"events", "event_search", "notes", "note_history", "note_search"} <= tables
     reopened = TuiLedger(database)
     reopened.close()
 
@@ -73,13 +211,13 @@ def test_ledger_rejects_future_wrong_and_corrupt_databases(tmp_path) -> None:
     future = tmp_path / "future.db"
     TuiLedger(future).close()
     with sqlite3.connect(future) as connection:
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
     future_before = future.read_bytes()
     with pytest.raises(LedgerSchemaError, match="newer"):
         TuiLedger(future)
     assert future.read_bytes() == future_before
     with sqlite3.connect(future) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
     wrong = tmp_path / "wrong.db"
     with sqlite3.connect(wrong) as connection:
@@ -117,6 +255,151 @@ def test_ledger_rejects_future_wrong_and_corrupt_databases(tmp_path) -> None:
     with pytest.raises(LedgerCorruptionError):
         TuiLedger(corrupt)
     assert corrupt.read_bytes() == b"not a sqlite database"
+
+
+def test_ledger_migrates_exact_v1_data_and_backfills_note_search(tmp_path) -> None:
+    database = tmp_path / "legacy.db"
+    _create_v1_database(database, with_note=True)
+
+    ledger = TuiLedger(database)
+    with ledger.read() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        row = connection.execute(
+            "SELECT note_id, body FROM note_search WHERE note_search MATCH ?",
+            ('"legacy"*',),
+        ).fetchone()
+        parity = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM notes AS n
+            JOIN note_search AS s ON s.rowid = n.note_sequence
+            WHERE s.note_id = n.note_id
+              AND s.target_type = n.target_type
+              AND s.target_id = n.target_id
+              AND s.body = n.body
+              AND s.visibility = n.visibility
+              AND s.author = n.author
+            """
+        ).fetchone()[0]
+        note_count = connection.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+    ledger.close()
+
+    assert tuple(row) == ("note:legacy", "legacy risk context")
+    assert parity == note_count == 1
+
+
+def test_ledger_rejects_semantically_corrupt_v1_note_without_modification(tmp_path) -> None:
+    database = tmp_path / "semantic-v1.db"
+    _create_v1_database(database, with_note=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE notes SET body = 'column disagrees' WHERE note_id = 'note:legacy'"
+        )
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerCorruptionError, match="note content"):
+        TuiLedger(database)
+
+    assert database.read_bytes() == before
+    assert not database.with_name(f"{database.name}-wal").exists()
+    assert not database.with_name(f"{database.name}-shm").exists()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'note_search'"
+        ).fetchone()[0] == 0
+
+
+def test_ledger_rejects_v1_note_history_identity_mutation(tmp_path) -> None:
+    database = tmp_path / "identity-v1.db"
+    _create_v1_database(database, with_note=True)
+    with sqlite3.connect(database) as connection:
+        original = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM notes WHERE note_id = 'note:legacy'"
+            ).fetchone()[0]
+        )
+        mutated_history = json.loads(json.dumps(original))
+        mutated_history["target"]["target_id"] = "MSFT"
+        mutated_history_json = json.dumps(
+            mutated_history,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        current = json.loads(json.dumps(original))
+        current["body"] = "new context"
+        current["revision"] = 2
+        current["updated_at_utc"] = "2026-08-03T16:00:01Z"
+        current_json = json.dumps(
+            current,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        connection.execute(
+            """
+            UPDATE notes
+            SET body = ?, revision = ?, updated_at_utc = ?, payload_json = ?
+            WHERE note_id = 'note:legacy'
+            """,
+            ("new context", 2, "2026-08-03T16:00:01Z", current_json),
+        )
+        connection.execute("DROP TRIGGER note_history_no_update")
+        connection.execute(
+            "UPDATE note_history SET payload_json = ? WHERE note_id = 'note:legacy'",
+            (mutated_history_json,),
+        )
+        connection.executescript(
+            """
+            CREATE TRIGGER note_history_no_update
+            BEFORE UPDATE ON note_history
+            BEGIN
+                SELECT RAISE(ABORT, 'note history is immutable');
+            END;
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO note_history(note_id, revision, changed_at_utc, payload_json)
+            VALUES ('note:legacy', 2, '2026-08-03T16:00:01Z', ?)
+            """,
+            (current_json,),
+        )
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerCorruptionError, match="note content"):
+        TuiLedger(database)
+
+    assert database.read_bytes() == before
+
+
+def test_ledger_rejects_damaged_v1_without_modifying_it(tmp_path) -> None:
+    database = tmp_path / "damaged-v1.db"
+    _create_v1_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER events_no_delete")
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerSchemaError, match="schema"):
+        TuiLedger(database)
+
+    assert database.read_bytes() == before
+    assert not database.with_name(f"{database.name}-wal").exists()
+    assert not database.with_name(f"{database.name}-shm").exists()
+
+
+def test_ledger_rejects_foreign_object_in_claimed_v1_without_modifying_it(tmp_path) -> None:
+    database = tmp_path / "foreign-v1.db"
+    _create_v1_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE foreign_state(value TEXT)")
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerSchemaError, match="schema"):
+        TuiLedger(database)
+
+    assert database.read_bytes() == before
 
 
 def test_ledger_rejects_nested_transactions_and_rolls_back(tmp_path) -> None:
@@ -328,6 +611,7 @@ def test_search_is_bounded_filtered_deterministic_and_fts_safe(tmp_path) -> None
     )
     assert len(store.search("common", EventFilters(), 100)) == 100
     assert store.search("lookup unique", EventFilters(), 100) == (id_only,)
+    assert store.search("look uni", EventFilters(), 100) == (id_only,)
     assert store.search("--- ??? ' \"", EventFilters(), 100) == ()
     for hostile in ('AAPL" OR MSFT*', "NEAR(AAPL MSFT)", "agent_id:AAPL", "' OR 1=1 --"):
         filtered = store.search(hostile, EventFilters(symbol="AAPL"), 100)
@@ -496,17 +780,30 @@ def test_owned_and_borrowed_ledger_close_behavior(tmp_path) -> None:
     retryable.close()
 
 
-def test_event_transaction_helper_requires_its_own_active_ledger_transaction(tmp_path) -> None:
+def test_public_event_admission_is_transaction_bound_idempotent_and_conflict_safe(
+    tmp_path,
+) -> None:
     ledger = TuiLedger(tmp_path / "events.db")
     other_ledger = TuiLedger(tmp_path / "other.db")
     store = EventStore(ledger)
     with ledger.read() as connection:
         with pytest.raises(LedgerTransactionError):
-            store._append_in_transaction(connection, _event(1))
+            store.append_in_transaction(connection, _event(1))
     with other_ledger.transaction() as connection:
         with pytest.raises(LedgerTransactionError):
-            store._append_in_transaction(connection, _event(1))
-    assert store.since(0, 10) == ()
+            store.append_in_transaction(connection, _event(1))
+
+    with ledger.transaction() as connection:
+        admitted = store.append_in_transaction(connection, _event(1))
+        replayed = store.append_in_transaction(connection, _event(1))
+        assert replayed == admitted
+        with pytest.raises(EventConflictError):
+            store.append_in_transaction(connection, _event(1, summary="conflict"))
+
+    assert store.since(0, 10) == (admitted,)
+    with ledger.read() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM event_search").fetchone()[0] == 1
     ledger.close()
     other_ledger.close()
 

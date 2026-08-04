@@ -21,8 +21,8 @@ expression: "normalized_render(80, 24, & state)"
 │  AAPL               10.00%              11.00%             -                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────┐
-│UNAVAILABLE - Phase 1 provides the secure console shell only.                 │
+│UNAVAILABLE - Agent input is not connected to the controller yet.             │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────┐
-│Up/Down Holdings | Left/Right Panels | o Open | q Close TUI                   │
+│Up/Down Holdings | o Open | q Close | f Filter                                │
 └──────────────────────────────────────────────────────────────────────────────┘

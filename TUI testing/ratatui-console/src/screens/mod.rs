@@ -1,6 +1,14 @@
+pub mod agents;
+pub mod data;
+pub mod detail;
 pub mod impact;
+pub mod memory;
+pub mod models;
 pub mod orders;
 pub mod portfolio;
+pub mod risk;
+pub mod system;
+pub mod timeline;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -23,6 +31,27 @@ pub enum PerformancePeriod {
     SinceStart,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DetailKind {
+    Stock,
+    Order,
+    Fill,
+    Agent,
+    Event,
+    ModelOpinion,
+    ModelCandidate,
+    Metric,
+    Evidence,
+    RiskLimit,
+    Approval,
+    Alert,
+    Source,
+    Memory,
+    Note,
+    Service,
+    Repository,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenState {
     pub theme: Theme,
@@ -30,6 +59,7 @@ pub struct ScreenState {
     pub performance_period: PerformancePeriod,
     pub scroll_offset: usize,
     pub selected_id: Option<String>,
+    pub selected_kind: Option<DetailKind>,
     pub detail_open: bool,
     pub show_all_events: bool,
     pub narrow_panel: usize,
@@ -43,6 +73,7 @@ impl Default for ScreenState {
             performance_period: PerformancePeriod::Today,
             scroll_offset: 0,
             selected_id: None,
+            selected_kind: None,
             detail_open: false,
             show_all_events: false,
             narrow_panel: 0,

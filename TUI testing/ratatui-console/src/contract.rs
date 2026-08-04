@@ -175,6 +175,15 @@ impl NonEmptyString {
     pub(crate) fn literal(value: &'static str) -> Self {
         Self(value.to_owned())
     }
+
+    pub(crate) fn from_input(value: String) -> Result<Self, &'static str> {
+        let trimmed = value.trim();
+        if (1..=512).contains(&trimmed.chars().count()) {
+            Ok(Self(trimmed.to_owned()))
+        } else {
+            Err("string must contain 1 to 512 characters")
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -306,12 +315,98 @@ impl<'de> Deserialize<'de> for NonEmptyString {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
+        Self::from_input(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchQuery(String);
+
+impl SearchQuery {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn from_input(value: String) -> Result<Self, &'static str> {
         let trimmed = value.trim();
-        if (1..=512).contains(&trimmed.chars().count()) {
+        if (1..=256).contains(&trimmed.chars().count()) {
             Ok(Self(trimmed.to_owned()))
         } else {
+            Err("search query must contain 1 to 256 characters")
+        }
+    }
+}
+
+impl Serialize for SearchQuery {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SearchQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_input(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SearchLimit(u8);
+
+impl SearchLimit {
+    pub fn get(self) -> u8 {
+        self.0
+    }
+
+    pub(crate) fn maximum() -> Self {
+        Self(100)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SearchRequestId(u64);
+
+impl SearchRequestId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn from_sequence(value: u64) -> Result<Self, &'static str> {
+        if value == 0 {
+            Err("search request ID must be positive")
+        } else {
+            Ok(Self(value))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SearchRequestId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::from_sequence(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for SearchLimit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u8::deserialize(deserializer)?;
+        if (1..=100).contains(&value) {
+            Ok(Self(value))
+        } else {
             Err(serde::de::Error::custom(
-                "string must contain 1 to 512 bytes",
+                "search limit must be between 1 and 100",
             ))
         }
     }
@@ -473,6 +568,67 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+fn deserialize_optional_true<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<bool>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(true) => Ok(Some(true)),
+        Some(false) => Err(serde::de::Error::custom(
+            "context_only must be true or null",
+        )),
+    }
+}
+
+fn deserialize_bounded_search_kinds<'de, D>(
+    deserializer: D,
+) -> Result<Vec<WireSearchKind>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<WireSearchKind>::deserialize(deserializer)?;
+    if values.len() <= 10 {
+        Ok(values)
+    } else {
+        Err(serde::de::Error::custom(
+            "search kinds cannot exceed 10 entries",
+        ))
+    }
+}
+
+fn deserialize_bounded_search_screens<'de, D>(
+    deserializer: D,
+) -> Result<Vec<WireSearchScreen>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<WireSearchScreen>::deserialize(deserializer)?;
+    if values.len() <= 9 {
+        Ok(values)
+    } else {
+        Err(serde::de::Error::custom(
+            "search screens cannot exceed 9 entries",
+        ))
+    }
+}
+
+fn deserialize_bounded_search_results<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SearchResultPayload>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<SearchResultPayload>::deserialize(deserializer)?;
+    if values.len() <= 100 {
+        Ok(values)
+    } else {
+        Err(serde::de::Error::custom(
+            "search results cannot exceed 100 entries",
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MessageType {
@@ -487,6 +643,8 @@ pub enum MessageType {
     LockResult,
     SnapshotRequest,
     Snapshot,
+    SearchRequest,
+    SearchResults,
     Event,
     ProtocolError,
     Ping,
@@ -526,6 +684,8 @@ pub enum Message {
     LockResult(LockResultPayload),
     SnapshotRequest(SnapshotRequestPayload),
     Snapshot(Box<SnapshotPayload>),
+    SearchRequest(SearchRequestPayload),
+    SearchResults(SearchResultsPayload),
     Event(Box<EventPayload>),
     ProtocolError(ProtocolErrorPayload),
     Ping(PingPayload),
@@ -546,6 +706,8 @@ impl Message {
             Self::LockResult(_) => MessageType::LockResult,
             Self::SnapshotRequest(_) => MessageType::SnapshotRequest,
             Self::Snapshot(_) => MessageType::Snapshot,
+            Self::SearchRequest(_) => MessageType::SearchRequest,
+            Self::SearchResults(_) => MessageType::SearchResults,
             Self::Event(_) => MessageType::Event,
             Self::ProtocolError(_) => MessageType::ProtocolError,
             Self::Ping(_) => MessageType::Ping,
@@ -639,6 +801,100 @@ strict_struct!(SnapshotRequestPayload {});
 strict_struct!(SnapshotPayload {
     snapshot: ConsoleSnapshot
 });
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireSearchKind {
+    Stock,
+    Agent,
+    Model,
+    Order,
+    Approval,
+    Event,
+    Evidence,
+    Memory,
+    Source,
+    Note,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireSearchScreen {
+    Portfolio,
+    Agents,
+    ModelsRegime,
+    Orders,
+    RiskApprovals,
+    Timeline,
+    DataEvidence,
+    Memory,
+    System,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireSearchRecordType {
+    PortfolioRow,
+    AgentCard,
+    ModelOpinionRow,
+    CandidateRow,
+    OrderRow,
+    ApprovalRow,
+    TimelineRow,
+    EvidenceRow,
+    MemoryRow,
+    SourceRow,
+    RepositoryRow,
+    Note,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchFiltersPayload {
+    #[serde(default, deserialize_with = "deserialize_bounded_search_kinds")]
+    pub kinds: Vec<WireSearchKind>,
+    #[serde(default, deserialize_with = "deserialize_bounded_search_screens")]
+    pub screens: Vec<WireSearchScreen>,
+    #[serde(default)]
+    pub source: Option<NonEmptyString>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchResultPayload {
+    pub kind: WireSearchKind,
+    pub record_type: WireSearchRecordType,
+    pub record_id: SafeId,
+    pub label: NonEmptyString,
+    pub summary: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub occurred_at_utc: Option<UtcTimestamp>,
+    pub source: NonEmptyString,
+    pub screen: WireSearchScreen,
+    #[serde(default, deserialize_with = "deserialize_optional_true")]
+    pub context_only: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchRequestPayload {
+    pub request_id: SearchRequestId,
+    pub query: SearchQuery,
+    pub filters: SearchFiltersPayload,
+    pub limit: SearchLimit,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchResultsPayload {
+    pub request_id: SearchRequestId,
+    pub indexed_state_version: u64,
+    #[serde(deserialize_with = "deserialize_bounded_search_results")]
+    pub results: Vec<SearchResultPayload>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub error: Option<NonEmptyString>,
+}
+
 strict_struct!(ProtocolErrorPayload {
     code: SafeId,
     safe_message: NonEmptyString,

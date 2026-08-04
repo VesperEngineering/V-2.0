@@ -7,6 +7,7 @@ pub mod layout;
 pub mod preferences;
 pub mod reducer;
 pub mod screens;
+pub mod search;
 pub mod state;
 pub mod theme;
 pub mod transport;

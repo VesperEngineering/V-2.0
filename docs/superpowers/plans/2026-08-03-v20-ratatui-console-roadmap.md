@@ -42,7 +42,7 @@ must not turn legacy Python objects into an unreviewed broker control path.
      drill-down, freshness, portfolio ordering, broker mismatch display, and
      presentation performance. Cached-first-screen verification belongs to
      phase 4 after the encrypted snapshot cache exists.
-   - 10 executable tasks.
+   - 11 executable tasks. Task 9b closes full-ledger and stored-note search.
 
 3. `2026-08-03-v20-ratatui-controls.md`
    - Controller command registry, receipts, confirmations, existing agent and
@@ -97,7 +97,7 @@ Writing and testing code behind a disabled capability does not activate it.
 | Risk and approvals read view | 2 |
 | Data and evidence | 2 |
 | Memory and system read views | 2 |
-| Search, filters, notes, drill-down | 2 |
+| Search, filters, notes, drill-down, full persisted history | 2 |
 | Risk-based button behavior | 3 |
 | Agent and approval commands | 3 |
 | Runtime/mode/risk command gates | 3 |

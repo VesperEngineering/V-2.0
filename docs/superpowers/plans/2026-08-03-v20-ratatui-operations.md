@@ -1286,6 +1286,16 @@ git commit -m "feat(tui): govern local code maintenance"
 - Create: `scripts/install-tui-shortcut.ps1`
 - Create: `scripts/verify-tui.ps1`
 - Create: `tests/platform/tui/test_tui_scripts.py`
+- Create: `TUI testing/ratatui-console/src/render_plan.rs`
+- Create: `TUI testing/ratatui-console/src/renderer.rs`
+- Modify: `TUI testing/ratatui-console/src/lib.rs`
+- Modify: `TUI testing/ratatui-console/src/state.rs`
+- Modify: `TUI testing/ratatui-console/src/ui.rs`
+- Modify: `TUI testing/ratatui-console/src/app.rs`
+- Create: `TUI testing/ratatui-console/tests/render_cache.rs`
+- Modify: `TUI testing/ratatui-console/tests/performance.rs`
+- Modify: `TUI testing/ratatui-console/tests/state.rs`
+- Modify: `TUI testing/ratatui-console/tests/input.rs`
 - Modify: `TUI testing/ratatui-console/README.md`
 - Create: `TUI testing/results/FINAL_VERIFICATION.md`
 - Create: `TUI testing/results/performance.json`
@@ -1365,6 +1375,17 @@ completion.
 
 - [ ] **Step 6: Measure approved performance targets**
 
+Before measuring, replace the phase-2 global redraw flag with production
+`RenderPlan::Full` or `RenderPlan::Partial` invalidation and a committed
+full-frame `Buffer` cache. A partial draw seeds Ratatui's reset current buffer
+from the committed frame, clears only dirty shell regions, renders only those
+regions, and commits the candidate buffer only after backend success. Resize,
+theme, text size, screen, access, reconnect, snapshot replacement, cache
+mismatch, or render failure force a full draw. Add exhaustive target-to-region
+tests, partial-versus-full buffer equality, stale-cell clearing, backend-failure
+recovery, wide-character safety, and actual backend cell-write receipts. The
+phase-2 test-local dirty-panel harness is not sufficient evidence for this gate.
+
 Record cached unlock-to-first-screen, event-to-visible latency, input latency,
 idle CPU, continuous memory growth, 10,000-row filter/navigation, long chat
 streaming, and clean process shutdown. Use at least 10 warmups and 100 measured
@@ -1406,7 +1427,7 @@ code path is disabled and tested.
 - [ ] **Step 9: Commit**
 
 ```powershell
-git add -- 'scripts/build-tui.ps1' 'scripts/install-tui-shortcut.ps1' 'scripts/verify-tui.ps1' 'tests/platform/tui/test_tui_scripts.py' 'TUI testing/ratatui-console/README.md' 'TUI testing/results/FINAL_VERIFICATION.md' 'TUI testing/results/performance.json'
+git add -- 'scripts/build-tui.ps1' 'scripts/install-tui-shortcut.ps1' 'scripts/verify-tui.ps1' 'tests/platform/tui/test_tui_scripts.py' 'TUI testing/ratatui-console/src/render_plan.rs' 'TUI testing/ratatui-console/src/renderer.rs' 'TUI testing/ratatui-console/src/lib.rs' 'TUI testing/ratatui-console/src/state.rs' 'TUI testing/ratatui-console/src/ui.rs' 'TUI testing/ratatui-console/src/app.rs' 'TUI testing/ratatui-console/tests/render_cache.rs' 'TUI testing/ratatui-console/tests/performance.rs' 'TUI testing/ratatui-console/tests/state.rs' 'TUI testing/ratatui-console/tests/input.rs' 'TUI testing/ratatui-console/README.md' 'TUI testing/results/FINAL_VERIFICATION.md' 'TUI testing/results/performance.json'
 git commit -m "release(tui): verify V20 operations console"
 ```
 

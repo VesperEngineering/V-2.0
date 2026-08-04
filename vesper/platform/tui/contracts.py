@@ -9,12 +9,14 @@ from enum import StrEnum
 from typing import Annotated, Literal, TypeAlias, cast
 
 from pydantic import (
+    Field,
     StringConstraints,
     ValidationError,
     field_validator,
 )
 from typing_extensions import TypeAliasType
 
+from .search import SearchFilters, SearchResult
 from .views import (
     AlertView,
     CapabilityState,
@@ -59,6 +61,8 @@ class MessageType(StrEnum):
     LOCK_RESULT = "lock-result"
     SNAPSHOT_REQUEST = "snapshot-request"
     SNAPSHOT = "snapshot"
+    SEARCH_REQUEST = "search-request"
+    SEARCH_RESULTS = "search-results"
     EVENT = "event"
     PROTOCOL_ERROR = "protocol-error"
     PING = "ping"
@@ -145,6 +149,28 @@ class SnapshotPayload(StrictModel):
     snapshot: ConsoleSnapshot
 
 
+SearchQuery = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
+SearchLimit = Annotated[int, Field(ge=1, le=100)]
+SearchRequestId = Annotated[int, Field(ge=1, le=2**64 - 1)]
+
+
+class SearchRequestPayload(StrictModel):
+    request_id: SearchRequestId
+    query: SearchQuery
+    filters: SearchFilters
+    limit: SearchLimit
+
+
+class SearchResultsPayload(StrictModel):
+    request_id: SearchRequestId
+    indexed_state_version: WireUInt
+    results: Annotated[tuple[SearchResult, ...], Field(max_length=100)]
+    error: NonEmptyStr | None
+
+
 class ProtocolErrorPayload(StrictModel):
     code: SafeId
     safe_message: NonEmptyStr
@@ -184,6 +210,8 @@ StrictPayload: TypeAlias = (
     | LockResultPayload
     | SnapshotRequestPayload
     | SnapshotPayload
+    | SearchRequestPayload
+    | SearchResultsPayload
     | EventPayload
     | ProtocolErrorPayload
     | PingPayload
@@ -203,6 +231,8 @@ PAYLOAD_MODELS: dict[MessageType, PayloadModel] = {
     MessageType.LOCK_RESULT: LockResultPayload,
     MessageType.SNAPSHOT_REQUEST: SnapshotRequestPayload,
     MessageType.SNAPSHOT: SnapshotPayload,
+    MessageType.SEARCH_REQUEST: SearchRequestPayload,
+    MessageType.SEARCH_RESULTS: SearchResultsPayload,
     MessageType.EVENT: EventPayload,
     MessageType.PROTOCOL_ERROR: ProtocolErrorPayload,
     MessageType.PING: PingPayload,
@@ -473,6 +503,40 @@ _FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
     (MessageType.SNAPSHOT_REQUEST, {}),
     (MessageType.SNAPSHOT, {"snapshot": _FIXTURE_SNAPSHOT}),
     (
+        MessageType.SEARCH_REQUEST,
+        {
+            "request_id": 1,
+            "query": "AAPL",
+            "filters": {
+                "kinds": ["stock", "note"],
+                "screens": ["portfolio"],
+                "source": None,
+            },
+            "limit": 100,
+        },
+    ),
+    (
+        MessageType.SEARCH_RESULTS,
+        {
+            "request_id": 1,
+            "indexed_state_version": 0,
+            "results": [
+                {
+                    "kind": "note",
+                    "record_type": "note",
+                    "record_id": "note:1",
+                    "label": "AAPL note",
+                    "summary": "Review concentration risk.",
+                    "occurred_at_utc": "2026-08-03T00:00:00Z",
+                    "source": "operator",
+                    "screen": "portfolio",
+                    "context_only": True,
+                }
+            ],
+            "error": None,
+        },
+    ),
+    (
         MessageType.EVENT,
         {
             "entity_type": "alert-row",
@@ -581,6 +645,9 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
         "nullable_required": [
             "auth-result.reason",
             "lease-result.reason",
+            "search-results.error",
+            "search-results.results[].occurred_at_utc",
+            "search-results.results[].context_only",
             "event.entity",
             "snapshot.shell.alerts",
             "alert.resolved_at_utc",

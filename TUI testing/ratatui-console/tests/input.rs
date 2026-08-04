@@ -7,17 +7,21 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use serde_json::json;
 
 use vesper_ratatui_console::app::{
     App, ConnectionControl, FoundationClient, FoundationSession, GatewayConnector,
     MAX_EVENTS_PER_TICK, MouseCaptureChange, MouseCaptureTracker, POLL_INTERVAL, SEND_TIMEOUT,
-    SessionError, SessionStep, connect_with_retry, key_to_input, process_input_batch,
-    resolve_repo_root_from, with_restore,
+    SessionError, SessionStep, connect_with_retry, key_to_input, mouse_to_input,
+    process_input_batch, resolve_repo_root_from, with_restore,
 };
-use vesper_ratatui_console::contract::{Envelope, MessageType, UtcTimestamp};
+use vesper_ratatui_console::contract::{Envelope, Message, MessageType, UtcTimestamp};
 use vesper_ratatui_console::input::InputEvent;
+use vesper_ratatui_console::layout::shell_layout;
 use vesper_ratatui_console::state::{
     AccessState, AppState, AuthRequest, AuthStage, ClientAction, LocalMode, ReduceOutcome, Screen,
 };
@@ -213,12 +217,14 @@ impl TempCheckout {
             "vesper/platform/tui/contracts.py",
             "vesper/platform/tui/event_store.py",
             "vesper/platform/tui/gateway.py",
+            "vesper/platform/tui/notes.py",
             "vesper/platform/tui/outbox.py",
             "vesper/platform/tui/pipe_security.py",
             "vesper/platform/tui/pipe_server.py",
             "vesper/platform/tui/ports.py",
             "vesper/platform/tui/process_capture.py",
             "vesper/platform/tui/protocol.py",
+            "vesper/platform/tui/search.py",
             "vesper/platform/tui/snapshot.py",
             "vesper/platform/tui/sqlite_ledger.py",
             "vesper/platform/tui/stream.py",
@@ -538,6 +544,61 @@ fn crossterm_conversion_accepts_press_only_and_blocks_modified_character_leakage
 fn polling_is_exactly_ten_milliseconds() {
     assert_eq!(POLL_INTERVAL, Duration::from_millis(10));
     assert_eq!(SEND_TIMEOUT, Duration::from_millis(50));
+}
+
+#[tokio::test]
+async fn due_search_from_merged_idle_effect_is_dispatched_to_the_session() {
+    let mut client = FoundationClient::from_app(App::new(AppState::controller()));
+    let mut inputs = [
+        InputEvent::Char('/'),
+        InputEvent::Char('A'),
+        InputEvent::Char('A'),
+        InputEvent::Char('P'),
+        InputEvent::Char('L'),
+    ]
+    .into_iter();
+    let mut effect = process_input_batch(&mut client, &mut inputs);
+
+    for _ in 0..9 {
+        effect.merge(client.app_mut().on_idle());
+        assert!(effect.foundation_actions.is_empty());
+    }
+    effect.merge(client.app_mut().on_idle());
+    assert_eq!(effect.foundation_actions.len(), 1);
+
+    let mut session = FakeSession::default();
+    assert_eq!(
+        client.dispatch(effect, &mut session).await.unwrap(),
+        SessionStep::Continue
+    );
+    assert_eq!(session.sent.len(), 1);
+    assert_eq!(session.sent[0].message_type(), MessageType::SearchRequest);
+    let Message::SearchRequest(payload) = &session.sent[0].message else {
+        panic!("search action must serialize as search-request");
+    };
+    assert_eq!(payload.request_id.get(), 4);
+    assert_eq!(payload.query.as_str(), "AAPL");
+}
+
+#[test]
+fn models_header_click_without_typed_selection_does_not_open_a_detail() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot_envelope(1)).unwrap();
+    state.handle(InputEvent::Char('5'));
+    assert!(state.screen_state().selected_id.is_none());
+    assert!(state.screen_state().selected_kind.is_none());
+
+    let area = Rect::new(0, 0, 140, 40);
+    let body = shell_layout(area, state.display_mode()).body;
+    let opinion_header = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: body.x + 2,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    assert_eq!(mouse_to_input(opinion_header, area, &state), None);
+    assert_eq!(state.mode, LocalMode::Browse);
 }
 
 #[test]

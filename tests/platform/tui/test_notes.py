@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
+from vesper.platform.tui import notes as notes_module
 from vesper.platform.tui.event_store import EventStore
 from vesper.platform.tui.notes import NoteStore, NoteTarget, NoteVisibility
 from vesper.platform.tui.sqlite_ledger import (
@@ -131,6 +132,7 @@ def test_note_transaction_helper_rolls_back_with_its_future_receipt_transaction(
             )
             raise RuntimeError("receipt failed")
     assert store.list(_target()) == ()
+    assert store.search("context", notes_module.NoteFilters(), 10) == ()
     ledger.close()
 
 
@@ -231,6 +233,112 @@ def test_note_list_is_target_isolated_and_newest_first(tmp_path) -> None:
 
     assert [note.body for note in store.list(_target())] == ["newest", "first"]
     assert [note.body for note in store.list(_target("order", "order:1"))] == ["other"]
+    store.close()
+
+
+def test_note_search_is_unicode_prefix_ranked_and_exactly_filtered(tmp_path) -> None:
+    identifiers = iter(("note:private", "note:shared", "note:order"))
+    store = NoteStore(
+        tmp_path / "events.db",
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    private = store.add(
+        _target(),
+        "Résumé risk review",
+        NoteVisibility.PRIVATE,
+        "operator",
+    )
+    store.add(
+        _target(),
+        "Résumé shared review",
+        NoteVisibility.SHARED,
+        "v20-product",
+    )
+    store.add(
+        _target("order", "order:1"),
+        "Résumé order review",
+        NoteVisibility.PRIVATE,
+        "operator",
+    )
+
+    results = store.search(
+        "résu",
+        notes_module.NoteFilters(
+            target_type="stock",
+            target_id="AAPL",
+            visibility=NoteVisibility.PRIVATE,
+            author="operator",
+        ),
+        10,
+    )
+
+    assert results == (private,)
+    store.close()
+
+
+def test_note_search_is_bounded_newest_first_and_fts_safe(tmp_path) -> None:
+    counter = iter(f"note:{index}" for index in range(105))
+    store = NoteStore(
+        tmp_path / "events.db",
+        clock=lambda: NOW,
+        id_factory=lambda: next(counter),
+    )
+    for index in range(105):
+        store.add(
+            _target(),
+            f"common context {index}",
+            NoteVisibility.PRIVATE,
+            "operator",
+        )
+
+    results = store.search("common", notes_module.NoteFilters(), 100)
+    assert len(results) == 100
+    assert results[0].note_id == "note:104"
+    assert results[-1].note_id == "note:5"
+    assert store.search("--- ??? ' \"", notes_module.NoteFilters(), 100) == ()
+    for hostile in ('common" OR missing*', "NEAR(common missing)", "body:common", "' OR 1=1 --"):
+        assert len(store.search(hostile, notes_module.NoteFilters(), 100)) <= 100
+
+    for query in ("", "   ", "x" * 257):
+        with pytest.raises(ValueError):
+            store.search(query, notes_module.NoteFilters(), 10)
+    store.search("x" * 256, notes_module.NoteFilters(), 10)
+    for limit in (0, 101, True):
+        with pytest.raises((TypeError, ValueError)):
+            store.search("common", notes_module.NoteFilters(), limit)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        store.search("common", object(), 10)  # type: ignore[arg-type]
+    store.close()
+
+
+def test_note_search_ranks_exact_id_and_id_or_target_prefix_before_fts_limit(
+    tmp_path,
+) -> None:
+    identifiers = iter(("note:needle", *(f"note:decoy-{index}" for index in range(101))))
+    store = NoteStore(
+        tmp_path / "events.db",
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    expected = store.add(
+        _target(target_id="SPECIAL-TARGET"),
+        "reference",
+        NoteVisibility.PRIVATE,
+        "operator",
+    )
+    for _ in range(101):
+        store.add(
+            _target(),
+            "note needle special target decoy",
+            NoteVisibility.PRIVATE,
+            "operator",
+        )
+
+    for query in ("note:needle", "note:nee", "SPECIAL-T"):
+        results = store.search(query, notes_module.NoteFilters(), 100)
+        assert results[0] == expected
+        assert expected in results
     store.close()
 
 

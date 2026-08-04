@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -24,11 +25,21 @@ from vesper.platform.tui.views import SafeId, StrictModel, UtcDateTime
 NoteBody = Annotated[str, StringConstraints(min_length=1, max_length=8_000)]
 NoteRevision = Annotated[int, Field(ge=1, le=2**63 - 1)]
 NoteTargetType = Literal["stock", "order", "approval", "agent-event"]
+_SEARCH_TOKEN = re.compile(r"\w+", re.UNICODE)
 
 
 class NoteVisibility(StrEnum):
     PRIVATE = "private"
     SHARED = "shared"
+
+
+class NoteFilters(StrictModel):
+    """Exact optional filters applied to full-text note search."""
+
+    target_type: NoteTargetType | None = None
+    target_id: SafeId | None = None
+    visibility: NoteVisibility | None = None
+    author: SafeId | None = None
 
 
 class NoteTarget(StrictModel):
@@ -69,6 +80,14 @@ def _default_clock() -> datetime:
 
 def _default_id_factory() -> str:
     return f"note:{secrets.token_hex(16)}"
+
+
+def _require_plain_int(value: object, *, name: str, minimum: int, maximum: int) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 class NoteStore:
@@ -161,7 +180,7 @@ class NoteStore:
         )
         values = note.model_dump(mode="json")
         payload_json = _canonical_note_json(note)
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO notes (
                 note_id, target_type, target_id, body, visibility, author,
@@ -179,6 +198,25 @@ class NoteStore:
                 values["created_at_utc"],
                 values["updated_at_utc"],
                 payload_json,
+            ),
+        )
+        note_sequence = cursor.lastrowid
+        if note_sequence is None:
+            raise LedgerCorruptionError("SQLite did not assign a note sequence")
+        connection.execute(
+            """
+            INSERT INTO note_search (
+                rowid, note_id, target_type, target_id, body, visibility, author
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                note_sequence,
+                note.note_id,
+                note.target.target_type,
+                note.target.target_id,
+                note.body,
+                note.visibility,
+                note.author,
             ),
         )
         connection.execute(
@@ -210,6 +248,60 @@ class NoteStore:
                 """,
                 (target.target_type, target.target_id),
             ).fetchall()
+        return tuple(self._decode_row(row) for row in rows)
+
+    def search(
+        self,
+        query: str,
+        filters: NoteFilters,
+        limit: int,
+    ) -> tuple[NoteView, ...]:
+        """Search current context notes with bounded FTS and exact filters."""
+
+        self._require_open()
+        if type(query) is not str:
+            raise TypeError("query must be a string")
+        if not query.strip():
+            raise ValueError("query cannot be empty")
+        if len(query) > 256:
+            raise ValueError("query cannot exceed 256 characters")
+        if type(filters) is not NoteFilters:
+            raise TypeError("filters must be NoteFilters")
+        page_size = _require_plain_int(limit, name="limit", minimum=1, maximum=100)
+        tokens = _SEARCH_TOKEN.findall(query.casefold())
+        if not tokens:
+            return ()
+        match_expression = " AND ".join(f'"{token}"*' for token in tokens)
+        clauses = ["note_search MATCH ?"]
+        parameters: list[object] = [match_expression]
+        for name in ("target_type", "target_id", "visibility", "author"):
+            value = getattr(filters, name)
+            if value is None:
+                continue
+            clauses.append(f"n.{name} = ?")
+            parameters.append(value.value if isinstance(value, NoteVisibility) else value)
+        normalized_query = query.strip()
+        parameters.extend(
+            (normalized_query, normalized_query, normalized_query, page_size)
+        )
+        statement = f"""
+            SELECT n.*
+            FROM note_search
+            JOIN notes AS n ON n.note_sequence = note_search.rowid
+            WHERE {" AND ".join(clauses)}
+            ORDER BY
+                CASE
+                    WHEN lower(n.note_id) = lower(?) THEN 0
+                    WHEN lower(n.note_id) LIKE lower(?) || '%'
+                      OR lower(n.target_id) LIKE lower(?) || '%' THEN 1
+                    ELSE 2
+                END,
+                bm25(note_search),
+                n.note_sequence DESC
+            LIMIT ?
+        """
+        with self._ledger.read() as connection:
+            rows = connection.execute(statement, parameters).fetchall()
         return tuple(self._decode_row(row) for row in rows)
 
     @staticmethod

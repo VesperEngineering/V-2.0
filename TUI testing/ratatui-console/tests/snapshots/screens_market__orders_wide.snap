@@ -4,10 +4,10 @@ expression: wide_orders
 ---
 ┌ORDERS - GROUPED BY SYMBOL / NEWEST FIRST───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │== AAPL ==                                                                                                                                          │
-│order:1 | BUY 10 AAPL | FILLED | submitted 2026-08-02 20:00:00 EDT | broker paper-order-1 | RECONCILIATION MATCHED                                  │
+│  order:1 | BUY 10 AAPL | FILLED | submitted 2026-08-02 20:00:00 EDT | broker paper-order-1 | RECONCILIATION MATCHED                                │
 │EXPECTED 100.00 | ACTUAL 100.25 | SLIPPAGE 100.00 -> 100.25                                                                                         │
 │FILLS 1                                                                                                                                             │
-│FILL fill:1 | quantity 10 | price 100.25 | FEE 0 | 2026-08-02 20:00:00 EDT                                                                          │
+│  fill:1 | quantity 10 | price 100.25 | FEE 0 | 2026-08-02 20:00:00 EDT                                                                             │
 │                                                                                                                                                    │
 │                                                                                                                                                    │
 │                                                                                                                                                    │
@@ -28,10 +28,10 @@ expression: wide_orders
 │                                                                                                                                                    │
 │                                                                                                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌RECONCILIATION OWNER────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│portfolio-research | Review AAPL | RUNNING | priority 10 | affected portfolio                                                                       │
-│                                                                                                                                                    │
-│                                                                                                                                                    │
+┌RECONCILIATION OWNER / HISTORY──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│work:1 | portfolio-research | Review AAPL | RUNNING | priority 10 | affected portfolio                                                              │
+│HISTORY                                                                                                                                             │
+│event:1 | 2026-08-02 20:00:00 EDT | AAPL review started                                                                                             │
 │                                                                                                                                                    │
 │                                                                                                                                                    │
 │                                                                                                                                                    │

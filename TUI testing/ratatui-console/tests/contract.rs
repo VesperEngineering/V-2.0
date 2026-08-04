@@ -570,7 +570,7 @@ fn decode_base64(value: &str) -> Vec<u8> {
 #[test]
 fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     let bundle = python_contract_bundle();
-    assert_eq!(bundle.fixtures.len(), 15);
+    assert_eq!(bundle.fixtures.len(), 17);
     let mut seen = Vec::new();
     for fixture in bundle.fixtures {
         let envelope: Envelope =
@@ -580,7 +580,7 @@ fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     }
     seen.sort_by_key(|value| value.to_string());
     seen.dedup();
-    assert_eq!(seen.len(), 15);
+    assert_eq!(seen.len(), 17);
     assert_eq!(rust_contract_descriptor(), bundle.descriptor);
 }
 
@@ -619,11 +619,15 @@ fn rust_contract_descriptor() -> Vec<u8> {
             "pong": ["nonce"],
             "protocol-error": ["code", "safe_message"],
             "server-hello": ["server_version", "requires_setup"],
+            "search-request": ["request_id", "query", "filters", "limit"],
+            "search-results": ["request_id", "indexed_state_version", "results", "error"],
             "snapshot": ["snapshot"],
             "snapshot-request": [],
         },
         "nullable_required": [
-            "auth-result.reason", "lease-result.reason", "event.entity", "snapshot.shell.alerts",
+            "auth-result.reason", "lease-result.reason", "search-results.error",
+            "search-results.results[].occurred_at_utc",
+            "search-results.results[].context_only", "event.entity", "snapshot.shell.alerts",
             "alert.resolved_at_utc", "snapshot.shell.header.operating_mode_reason",
             "snapshot.shell.header.data_age_seconds",
             "snapshot.shell.header.regime_confidence",
@@ -960,7 +964,7 @@ fn rejects_wrong_schema_negative_versions_and_invalid_ids() {
 }
 
 #[test]
-fn parses_all_fifteen_strict_payloads() {
+fn parses_all_seventeen_strict_payloads() {
     let snapshot = String::from_utf8(shared_snapshot_fixture()).unwrap();
     let event = serde_json::to_string(&serde_json::json!({
         "entity_type": "alert-row",
@@ -998,6 +1002,14 @@ fn parses_all_fifteen_strict_payloads() {
         ("lock-result", r#"{"locked":true}"#.to_owned()),
         ("snapshot-request", r#"{}"#.to_owned()),
         ("snapshot", format!(r#"{{"snapshot":{snapshot}}}"#)),
+        (
+            "search-request",
+            r#"{"request_id":1,"query":"AAPL","filters":{"kinds":["stock","note"],"screens":["portfolio"],"source":null},"limit":100}"#.to_owned(),
+        ),
+        (
+            "search-results",
+            r#"{"request_id":1,"indexed_state_version":0,"results":[{"kind":"note","record_type":"note","record_id":"note:1","label":"AAPL note","summary":"Review concentration risk.","occurred_at_utc":"2026-08-03T00:00:00Z","source":"operator","screen":"portfolio","context_only":true}],"error":null}"#.to_owned(),
+        ),
         ("event", event),
         (
             "protocol-error",
@@ -1047,6 +1059,22 @@ fn matches_python_literal_and_string_constraints() {
         ),
         ("auth-unlock", r#"{"password":""}"#),
         ("lock-result", r#"{"locked":false}"#),
+        (
+            "search-request",
+            r#"{"request_id":0,"query":"AAPL","filters":{"kinds":[],"screens":[],"source":null},"limit":100}"#,
+        ),
+        (
+            "search-request",
+            r#"{"request_id":1,"query":"   ","filters":{"kinds":[],"screens":[],"source":null},"limit":100}"#,
+        ),
+        (
+            "search-request",
+            r#"{"request_id":1,"query":"AAPL","filters":{"kinds":[],"screens":[],"source":null},"limit":0}"#,
+        ),
+        (
+            "search-results",
+            r#"{"request_id":1,"indexed_state_version":0,"results":[{"kind":"note","record_type":"note","record_id":"note:1","label":"AAPL note","summary":"context","occurred_at_utc":null,"source":"operator","screen":"portfolio","context_only":false}],"error":null}"#,
+        ),
         ("protocol-error", r#"{"code":"ok","safe_message":""}"#),
     ] {
         let wire = base

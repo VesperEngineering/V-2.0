@@ -1,0 +1,36 @@
+---
+source: tests/screens_system.rs
+expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::default();\n    render_text(w, h, |frame|\n    { render_risk(frame, frame.area(), &snapshot.risk, &state) })\n} (120, 32)"
+---
+┌> RISK LIMITS────────────────────────────────────────────────────┐┌APPROVALS──────────────────────────────────────────┐
+│[~] PENDING limit:concentration | Current 0.10 | Proposed 0.12   ││[~] STALE approval:stale | 2026-01-15 07:34:56 EST │
+│[!] VIOLATED limit:drawdown | Current 0.08 | Proposed UNAVAILABLE││| Approval?reason | Evidence evidence:1            │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+└─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
+┌ALERTS───────────────────────────────────────────────────────────┐┌RISK METRICS───────────────────────────────────────┐
+│[OK] RESOLVED alert:resolved | Mismatch repaired | Created       ││Blocked actions + Circuit breaker: [?] UNAVAILABLE │
+│2026-01-15 07:00:00 EST | Resolved 2026-01-15 07:34:56 EST       ││(RiskView gap)                                     │
+│                                                                 ││[~] STALE metric:drawdown | 8.00 percent |         │
+│                                                                 ││2026-01-15 07:34:56 EST | Risk refresh delayed     │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+│                                                                 ││                                                   │
+└─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘

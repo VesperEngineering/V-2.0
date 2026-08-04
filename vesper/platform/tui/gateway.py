@@ -30,6 +30,8 @@ from .contracts import (
     PongPayload,
     ProtocolErrorPayload,
     SafeId,
+    SearchRequestPayload,
+    SearchResultsPayload,
     ServerHelloPayload,
     ShellSnapshot,
     SnapshotPayload,
@@ -37,6 +39,7 @@ from .contracts import (
     decode_payload,
 )
 from .outbox import OutboundQueue
+from .search import GlobalSearchService
 from .snapshot import diff_snapshots
 from .views import (
     AgentsView,
@@ -139,6 +142,7 @@ class Gateway:
         state_root: Path,
         *,
         clock: Callable[[], datetime] | None = None,
+        search_service: GlobalSearchService | None = None,
     ) -> None:
         self._verifier_path = Path(state_root) / "password-verifier.json"
         self._password_store = PasswordStore(self._verifier_path)
@@ -149,10 +153,28 @@ class Gateway:
         self._publication_lock = threading.RLock()
         self._snapshot = self._unavailable_snapshot()
         self._has_projection_snapshot = False
+        self._search_service = search_service
+        if search_service is not None:
+            search_service.update_snapshot(self._snapshot)
 
     @property
     def controller_id(self) -> str | None:
         return self._lease.controller_id
+
+    @property
+    def search_service(self) -> GlobalSearchService | None:
+        return self._search_service
+
+    def attach_search_service(self, service: GlobalSearchService) -> None:
+        """Attach the one controller-owned read-only search service."""
+
+        if type(service) is not GlobalSearchService:
+            raise TypeError("service must be GlobalSearchService")
+        with self._publication_lock:
+            if self._search_service is not None and self._search_service is not service:
+                raise RuntimeError("search service is already attached")
+            service.update_snapshot(self._snapshot)
+            self._search_service = service
 
     def session(self, client_id: SafeId) -> GatewaySession:
         client_id = _SAFE_ID_ADAPTER.validate_python(client_id, strict=True)
@@ -203,6 +225,8 @@ class Gateway:
                 except (TypeError, ValueError):
                     events = ()
             self._snapshot = snapshot
+            if self._search_service is not None:
+                self._search_service.update_snapshot(snapshot)
             first_projection = not self._has_projection_snapshot
             self._has_projection_snapshot = True
             if first_projection or not events:
@@ -343,6 +367,44 @@ class Gateway:
                 if response.message_type is MessageType.SNAPSHOT:
                     session._subscribed = True
                 return (response,)
+            if envelope.message_type is MessageType.SEARCH_REQUEST:
+                payload = self._payload(envelope, SearchRequestPayload, session)
+                if isinstance(payload, WireEnvelope):
+                    return (payload,)
+                assert isinstance(payload, SearchRequestPayload)
+                service = self._search_service
+                if service is None:
+                    result = SearchResultsPayload(
+                        request_id=payload.request_id,
+                        indexed_state_version=self._snapshot.shell.state_version,
+                        results=(),
+                        error="Search is unavailable.",
+                    )
+                else:
+                    try:
+                        page = service.search(payload.query, payload.filters, payload.limit)
+                    except (OSError, RuntimeError, ValueError):
+                        result = SearchResultsPayload(
+                            request_id=payload.request_id,
+                            indexed_state_version=service.indexed_state_version,
+                            results=(),
+                            error="Search is unavailable.",
+                        )
+                    else:
+                        result = SearchResultsPayload(
+                            request_id=payload.request_id,
+                            indexed_state_version=page.indexed_state_version,
+                            results=page.results,
+                            error=page.error,
+                        )
+                return (
+                    self._emit(
+                        session,
+                        MessageType.SEARCH_RESULTS,
+                        result,
+                        state_version=result.indexed_state_version,
+                    ),
+                )
             if envelope.message_type is MessageType.LEASE_REQUEST:
                 try:
                     decode_payload(envelope)

@@ -1,0 +1,26 @@
+---
+source: tests/screens_system.rs
+expression: "|_, _| { render_system_narrow(&fixture().system, 3) } (78, 22)"
+---
+┌> UNSUPPORTED FACTS - PANEL 4/4─────────────────────────────────────────────┐
+│Backup status: [?] UNAVAILABLE - Not in the SystemView contract.            │
+│Recovery status: [?] UNAVAILABLE - Not in the SystemView contract.          │
+│Notification status: [?] UNAVAILABLE - Not in the SystemView contract.      │
+│[i] READ ONLY - This panel reports facts; it exposes no controls.           │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘

@@ -17,15 +17,19 @@ from vesper.platform.tui.contracts import (
     OperatingMode,
     PongPayload,
     ProtocolErrorPayload,
+    SearchResultsPayload,
     SnapshotPayload,
     WireEnvelope,
     decode_payload,
 )
 from vesper.platform.tui.gateway import Gateway
+from vesper.platform.tui.notes import NoteFilters, NoteStore, NoteTarget, NoteVisibility
 from vesper.platform.tui.protocol import MAX_FRAME_BYTES
+from vesper.platform.tui.search import GlobalSearchService, SearchKind
 from vesper.platform.tui.views import (
     AlertRow,
     CommandSpecView,
+    ConsoleSnapshot,
     EventPayload,
     EventPresentation,
     MetricRow,
@@ -231,6 +235,133 @@ def test_locked_session_rejects_state_lease_and_lock(
     assert response.message_type is MessageType.PROTOCOL_ERROR
     assert isinstance(error, ProtocolErrorPayload)
     assert error.code == "locked"
+
+
+def test_locked_search_returns_no_results_but_viewer_searches_private_and_shared_notes(
+    tmp_path: Path,
+) -> None:
+    notes = NoteStore(
+        tmp_path / "operations.sqlite3",
+        clock=lambda: NOW,
+        id_factory=iter(("note:private", "note:shared", "note:blank")).__next__,
+    )
+    notes.add(
+        NoteTarget(target_type="stock", target_id="AAPL"),
+        "operator context private",
+        NoteVisibility.PRIVATE,
+        "operator",
+    )
+    notes.add(
+        NoteTarget(target_type="stock", target_id="AAPL"),
+        "operator context shared",
+        NoteVisibility.SHARED,
+        "operator",
+    )
+    notes.add(
+        NoteTarget(target_type="stock", target_id="AAPL"),
+        "   ",
+        NoteVisibility.PRIVATE,
+        "operator",
+    )
+    initial = Gateway(tmp_path / "seed", clock=lambda: NOW).snapshot()
+    search = GlobalSearchService(initial, None, notes)
+    gateway = Gateway(tmp_path / "auth", clock=lambda: NOW, search_service=search)
+    request = {
+        "request_id": 9,
+        "query": "operator context",
+        "filters": {"kinds": ["note"], "screens": [], "source": None},
+        "limit": 100,
+    }
+    try:
+        locked = send(gateway, "locked", MessageType.SEARCH_REQUEST, 1, **request)
+        assert locked.message_type is MessageType.PROTOCOL_ERROR
+        assert "note" not in json.dumps(locked.payload).casefold()
+
+        setup(gateway, "viewer")
+        response = send(gateway, "viewer", MessageType.SEARCH_REQUEST, 3, **request)
+        payload = decode_payload(response)
+        assert response.message_type is MessageType.SEARCH_RESULTS
+        assert isinstance(payload, SearchResultsPayload)
+        assert payload.request_id == 9
+        assert payload.indexed_state_version == initial.shell.state_version
+        assert [(row.kind, row.record_id) for row in payload.results] == [
+            (SearchKind.NOTE, "note:shared"),
+            (SearchKind.NOTE, "note:private"),
+        ]
+        assert all(row.context_only is True for row in payload.results)
+        assert payload.error is None
+        assert gateway.controller_id is None
+
+        blank_response = send(
+            gateway,
+            "viewer",
+            MessageType.SEARCH_REQUEST,
+            4,
+            request_id=10,
+            query="note blank",
+            filters={"kinds": ["note"], "screens": [], "source": None},
+            limit=10,
+        )
+        blank_payload = decode_payload(blank_response)
+        assert isinstance(blank_payload, SearchResultsPayload)
+        assert [(row.record_id, row.summary) for row in blank_payload.results] == [
+            ("note:blank", "NOTE BODY IS BLANK")
+        ]
+    finally:
+        search.close()
+        notes.close()
+
+
+def test_search_index_tracks_published_state_and_missing_service_is_a_safe_visible_error(
+    tmp_path: Path,
+) -> None:
+    fixture = Path("TUI testing/contracts/v1/console_snapshot_empty_command_specs.json")
+    snapshot = ConsoleSnapshot.model_validate_json(fixture.read_text(encoding="utf-8"))
+    snapshot = snapshot.model_copy(
+        update={
+            "shell": snapshot.shell.model_copy(update={"state_version": 12}),
+        }
+    )
+    seed = Gateway(tmp_path / "seed", clock=lambda: NOW).snapshot()
+    search = GlobalSearchService(seed, None, None)
+    gateway = Gateway(tmp_path / "auth", clock=lambda: NOW, search_service=search)
+    gateway.publish_snapshot(snapshot)
+    setup(gateway)
+
+    response = send(
+        gateway,
+        "first",
+        MessageType.SEARCH_REQUEST,
+        3,
+        request_id=10,
+        query="AAPL",
+        filters={"kinds": ["stock"], "screens": [], "source": None},
+        limit=10,
+    )
+    payload = decode_payload(response)
+    assert isinstance(payload, SearchResultsPayload)
+    assert payload.indexed_state_version == 12
+    assert [(row.kind, row.record_id) for row in payload.results] == [
+        (SearchKind.STOCK, "AAPL")
+    ]
+    search.close()
+
+    unavailable = Gateway(tmp_path / "missing", clock=lambda: NOW)
+    setup(unavailable)
+    response = send(
+        unavailable,
+        "first",
+        MessageType.SEARCH_REQUEST,
+        3,
+        request_id=11,
+        query="AAPL",
+        filters={"kinds": [], "screens": [], "source": None},
+        limit=10,
+    )
+    payload = decode_payload(response)
+    assert isinstance(payload, SearchResultsPayload)
+    assert payload.results == ()
+    assert payload.error == "Search is unavailable."
 
 
 def test_ping_works_while_locked_without_state(gateway: Gateway) -> None:
@@ -746,7 +877,8 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
     from vesper.platform.tui.projections.windows_system import WindowsSystemProjection
     from vesper.platform.tui.sqlite_ledger import LedgerClosedError
 
-    runtime = cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+    gateway = Gateway(tmp_path / "auth")
+    runtime = cli._build_projection_runtime(tmp_path, gateway)
     sources = runtime.loop._sources
     assert tuple(sources) == (
         "native.agents",
@@ -772,10 +904,138 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
     assert isinstance(sources["windows.system"], WindowsSystemProjection)
     assert isinstance(sources["events.timeline"], EventTimelineProjection)
     assert runtime.event_store._ledger.path == tmp_path / "operations.sqlite3"
+    assert runtime.note_store._ledger is runtime.event_store._ledger
+    assert gateway.search_service is runtime.search_service
 
     runtime.close()
     with pytest.raises(LedgerClosedError):
         runtime.event_store.latest(1)
+    with pytest.raises(LedgerClosedError):
+        runtime.note_store.search("note", NoteFilters(), 1)
+
+
+def test_projection_reads_never_cross_mutating_or_protected_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import builtins
+    import io
+    import os
+    import sqlite3
+    import subprocess
+
+    from vesper.execution import broker as broker_module
+    from vesper.platform.tui import cli
+    from vesper.platform.tui.views import Freshness
+    from vesper.scheduler import engine as scheduler_module
+
+    access_counts = {
+        "broker": 0,
+        "scheduler": 0,
+        "training": 0,
+        "protected_path": 0,
+    }
+
+    def forbidden_boundary(name: str):
+        def blocked(*_args, **_kwargs):
+            access_counts[name] += 1
+            raise AssertionError(f"projection crossed the {name} boundary")
+
+        return blocked
+
+    monkeypatch.setattr(broker_module.PaperBroker, "__init__", forbidden_boundary("broker"))
+    monkeypatch.setattr(broker_module.AlpacaBroker, "__init__", forbidden_boundary("broker"))
+    monkeypatch.setattr(
+        scheduler_module.MarketScheduler,
+        "__init__",
+        forbidden_boundary("scheduler"),
+    )
+
+    original_popen = subprocess.Popen
+    original_run = subprocess.run
+
+    def is_training_command(command: object) -> bool:
+        if isinstance(command, (str, bytes, os.PathLike)):
+            parts = (os.fsdecode(command),)
+        else:
+            try:
+                parts = tuple(os.fsdecode(part) for part in command)  # type: ignore[arg-type]
+            except TypeError:
+                return False
+        return any("train_model.py" in part.replace("\\", "/").casefold() for part in parts)
+
+    def guarded_popen(command, *args, **kwargs):
+        if is_training_command(command):
+            access_counts["training"] += 1
+            raise AssertionError("projection launched model training")
+        return original_popen(command, *args, **kwargs)
+
+    def guarded_run(command, *args, **kwargs):
+        if is_training_command(command):
+            access_counts["training"] += 1
+            raise AssertionError("projection launched model training")
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", guarded_popen)
+    monkeypatch.setattr(subprocess, "run", guarded_run)
+
+    def is_protected_path(value: object) -> bool:
+        try:
+            normalized = os.fsdecode(value).replace("\\", "/").casefold().strip("/")
+        except TypeError:
+            return False
+        return any(
+            marker in normalized for marker in ("vesper/data/massive", "vesper/data/model_research")
+        )
+
+    def guarded(original):
+        def wrapper(path, *args, **kwargs):
+            if is_protected_path(path):
+                access_counts["protected_path"] += 1
+                raise PermissionError("protected V20 data is read-only and outside TUI scope")
+            return original(path, *args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(builtins, "open", guarded(builtins.open))
+    monkeypatch.setattr(io, "open", guarded(io.open))
+    monkeypatch.setattr(os, "open", guarded(os.open))
+    monkeypatch.setattr(os, "stat", guarded(os.stat))
+    monkeypatch.setattr(os, "lstat", guarded(os.lstat))
+    monkeypatch.setattr(os, "scandir", guarded(os.scandir))
+    monkeypatch.setattr(sqlite3, "connect", guarded(sqlite3.connect))
+
+    gateway = Gateway(tmp_path / "auth")
+    runtime = cli._build_projection_runtime(tmp_path, gateway)
+    try:
+        samples = {source_id: source.read() for source_id, source in runtime.loop._sources.items()}
+        snapshot = runtime.loop._builder.build(samples=samples, generated_at_utc=NOW)
+        gateway.publish_snapshot(snapshot)
+        setup(gateway)
+        search_response = send(
+            gateway,
+            "first",
+            MessageType.SEARCH_REQUEST,
+            3,
+            request_id=1,
+            query="boundary probe",
+            filters={"kinds": [], "screens": [], "source": None},
+            limit=100,
+        )
+        search_payload = decode_payload(search_response)
+
+        assert snapshot.portfolio.freshness is Freshness.UNAVAILABLE
+        assert snapshot.orders.freshness is Freshness.UNAVAILABLE
+        assert isinstance(search_payload, SearchResultsPayload)
+        assert search_payload.error is None
+        assert access_counts == {
+            "broker": 0,
+            "scheduler": 0,
+            "training": 0,
+            "protected_path": 0,
+        }
+    finally:
+        runtime.close()
 
 
 def test_projection_runtime_degrades_corrupt_ledger_without_losing_other_sources(
@@ -786,11 +1046,26 @@ def test_projection_runtime_degrades_corrupt_ledger_without_losing_other_sources
     from vesper.platform.tui.projections import NativePlatformProjection
 
     (tmp_path / "operations.sqlite3").write_bytes(b"not sqlite")
-    runtime = cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+    gateway = Gateway(tmp_path / "auth")
+    runtime = cli._build_projection_runtime(tmp_path, gateway)
 
     assert runtime.event_store is None
     assert isinstance(runtime.loop._sources["events.timeline"], UnavailablePort)
     assert isinstance(runtime.loop._sources["native.agents"], NativePlatformProjection)
+    setup(gateway)
+    response = send(
+        gateway,
+        "first",
+        MessageType.SEARCH_REQUEST,
+        3,
+        request_id=1,
+        query="AAPL",
+        filters={"kinds": [], "screens": [], "source": None},
+        limit=10,
+    )
+    payload = decode_payload(response)
+    assert isinstance(payload, SearchResultsPayload)
+    assert payload.error == "Persisted search history is unavailable."
     runtime.close()
 
 

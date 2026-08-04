@@ -44,53 +44,78 @@ pub fn render_portfolio(
         && state.detail_open
         && let Some(symbol) = state.selected_id.as_deref()
     {
-        let current = view.rows.iter().find(|row| row.symbol.as_str() == symbol);
-        let mut lines = Vec::new();
-        if let Some(row) = current {
-            lines.push(format!(
-                "PINNED {} | {} | quantity {} | price {} | value {}",
-                row.symbol.as_str(),
-                asset_type(row.asset_type),
-                row.quantity.as_str(),
-                row.price
-                    .as_ref()
-                    .map_or("UNAVAILABLE", |value| value.as_str()),
-                row.market_value
-                    .as_ref()
-                    .map_or("UNAVAILABLE", |value| value.as_str()),
-            ));
-            lines.push(format!(
-                "CURRENT {:.2}% | PROPOSED {} | APPROVED {} | RECONCILIATION {:?}",
-                row.current_weight * 100.0,
-                format_optional_weight(row.proposed_weight),
-                format_optional_weight(row.approved_weight),
-                row.reconciliation
-            ));
-        } else {
-            lines.push("Current position facts are unavailable.".to_owned());
-        }
-        lines.extend(
-            view.history
-                .iter()
-                .filter(|event| {
-                    event
-                        .symbol
-                        .as_ref()
-                        .is_some_and(|value| value.as_str() == symbol)
-                })
-                .map(|event| {
-                    format!(
-                        "{} | {}",
-                        event.occurred_at_utc.as_str(),
-                        sanitize_line(event.summary.as_str())
-                    )
-                }),
-        );
+        let lines = portfolio_detail_lines(view, symbol);
         frame.render_widget(
-            DetailOverlay::new(format!("{symbol} HISTORY"), lines, palette),
+            DetailOverlay::new(format!("{symbol} HISTORY"), lines, palette)
+                .scroll(state.scroll_offset),
             detail_area(area),
         );
     }
+}
+
+pub(crate) fn portfolio_detail_line_count(
+    view: &PortfolioView,
+    state: &ScreenState,
+    width: u16,
+) -> usize {
+    let lines = state
+        .selected_id
+        .as_deref()
+        .map_or_else(Vec::new, |symbol| portfolio_detail_lines(view, symbol));
+    Paragraph::new(
+        lines
+            .into_iter()
+            .map(|line| Line::from(sanitize_line(&line)))
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: false })
+    .line_count(width)
+}
+
+fn portfolio_detail_lines(view: &PortfolioView, symbol: &str) -> Vec<String> {
+    let current = view.rows.iter().find(|row| row.symbol.as_str() == symbol);
+    let mut lines = Vec::new();
+    if let Some(row) = current {
+        lines.push(format!(
+            "PINNED {} | {} | quantity {} | price {} | value {}",
+            row.symbol.as_str(),
+            asset_type(row.asset_type),
+            row.quantity.as_str(),
+            row.price
+                .as_ref()
+                .map_or("UNAVAILABLE", |value| value.as_str()),
+            row.market_value
+                .as_ref()
+                .map_or("UNAVAILABLE", |value| value.as_str()),
+        ));
+        lines.push(format!(
+            "CURRENT {:.2}% | PROPOSED {} | APPROVED {} | RECONCILIATION {:?}",
+            row.current_weight * 100.0,
+            format_optional_weight(row.proposed_weight),
+            format_optional_weight(row.approved_weight),
+            row.reconciliation
+        ));
+    } else {
+        lines.push("Current position facts are unavailable.".to_owned());
+    }
+    lines.extend(
+        view.history
+            .iter()
+            .filter(|event| {
+                event
+                    .symbol
+                    .as_ref()
+                    .is_some_and(|value| value.as_str() == symbol)
+            })
+            .map(|event| {
+                format!(
+                    "{} | {}",
+                    event.occurred_at_utc.as_str(),
+                    sanitize_line(event.summary.as_str())
+                )
+            }),
+    );
+    lines
 }
 
 fn render_weights(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state: &ScreenState) {

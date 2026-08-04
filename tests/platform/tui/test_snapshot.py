@@ -731,6 +731,26 @@ def test_stale_samples_do_not_leak_unmarked_facts_into_the_header() -> None:
     assert header.qwen_state == "Unavailable"
 
 
+def test_model_opinions_do_not_invent_a_controller_final_regime() -> None:
+    snapshot = _build(
+        {
+            "native.models": _sample(
+                _model_facts(
+                    opinions=(
+                        _opinion("model:one"),
+                        _opinion("model:two"),
+                    )
+                ),
+                source="native models",
+            )
+        }
+    )
+
+    assert len(snapshot.models.opinions) == 2
+    assert snapshot.shell.header.regime_label == "Unavailable"
+    assert snapshot.shell.header.regime_confidence is None
+
+
 def test_state_and_control_versions_change_for_their_separate_inputs() -> None:
     first = _build(
         {
