@@ -64,6 +64,7 @@ from .pipe_security import current_logon_sid
 from .search import GlobalSearchService
 from .live_readiness import unavailable_live_readiness
 from .snapshot import diff_snapshots, requires_full_snapshot
+from .snapshot_cache import CachedSnapshot, SnapshotCache, SnapshotCacheError
 from .ports import PlatformRuntimeFacts, SourceSample
 from .projections.platform_runtime import platform_runtime_control_binding
 from .recovery import RecoveryReport, RecoveryService
@@ -189,12 +190,15 @@ class Gateway:
         command_registry: CommandRegistry | None = None,
         platform_runtime_reader: _PlatformRuntimeReadPort | None = None,
         recovery_service: RecoveryService | None = None,
+        snapshot_cache: SnapshotCache | None = None,
         logon_sid_provider: Callable[[], str] = current_logon_sid,
     ) -> None:
         if not callable(logon_sid_provider):
             raise TypeError("logon_sid_provider must be callable")
         if recovery_service is not None and type(recovery_service) is not RecoveryService:
             raise TypeError("recovery_service must be a RecoveryService")
+        if snapshot_cache is not None and type(snapshot_cache) is not SnapshotCache:
+            raise TypeError("snapshot_cache must be a SnapshotCache")
         self._verifier_path = Path(state_root) / "password-verifier.json"
         self._password_store = PasswordStore(self._verifier_path)
         self._lease = ControlLease()
@@ -211,6 +215,9 @@ class Gateway:
         self._platform_runtime_reader: _PlatformRuntimeReadPort | None = None
         self._platform_runtime_sample = self._unavailable_platform_runtime_sample()
         self._recovery_service = recovery_service
+        self._snapshot_cache = snapshot_cache
+        self._cached_snapshot: CachedSnapshot | None = None
+        self._snapshot_cache_unavailable = False
         self._logon_sid_provider = logon_sid_provider
         self._operator_id_value: str | None = None
         if search_service is not None:
@@ -234,6 +241,25 @@ class Gateway:
         with self._control_lock:
             service = self._recovery_service
         return None if service is None else service.inspect()
+
+    def cached_snapshot(self, client_id: SafeId) -> CachedSnapshot | None:
+        """Return cached data only to an authenticated local session."""
+
+        client_id = _SAFE_ID_ADAPTER.validate_python(client_id, strict=True)
+        with self._sessions_lock:
+            session = self._sessions.get(client_id)
+        if session is None:
+            return None
+        with session._lock:
+            if not session._authenticated:
+                return None
+        with self._control_lock:
+            return self._cached_snapshot
+
+    @property
+    def snapshot_cache_unavailable(self) -> bool:
+        with self._control_lock:
+            return self._snapshot_cache_unavailable
 
     @property
     def operator_id(self) -> str:
@@ -381,8 +407,17 @@ class Gateway:
                         events = ()
                 self._upstream_snapshot = snapshot
                 self._snapshot = effective
+                self._cached_snapshot = None
                 first_projection = not self._has_projection_snapshot
                 self._has_projection_snapshot = True
+                cache = self._snapshot_cache
+                if cache is not None:
+                    try:
+                        cache.write(effective)
+                    except SnapshotCacheError:
+                        self._snapshot_cache_unavailable = True
+                    else:
+                        self._snapshot_cache_unavailable = False
             if self._search_service is not None:
                 self._search_service.update_snapshot(effective)
             if first_projection or not events:
@@ -1084,6 +1119,8 @@ class Gateway:
         session._authenticated = success
         if not success:
             self._lease.release(session.client_id)
+        else:
+            self._load_cached_snapshot_after_unlock()
         return self._emit(
             session,
             MessageType.AUTH_RESULT,
@@ -1093,6 +1130,24 @@ class Gateway:
                 reason=reason,
             ),
         )
+
+    def _load_cached_snapshot_after_unlock(self) -> None:
+        cache = self._snapshot_cache
+        if cache is None:
+            return
+        with self._control_lock:
+            if self._has_projection_snapshot or self._cached_snapshot is not None:
+                return
+            try:
+                cached = cache.read_after_unlock()
+            except SnapshotCacheError:
+                self._snapshot_cache_unavailable = True
+                return
+            if cached is None:
+                return
+            self._cached_snapshot = cached
+            self._snapshot = cached.snapshot
+            self._snapshot_cache_unavailable = False
 
     @staticmethod
     def _payload(
