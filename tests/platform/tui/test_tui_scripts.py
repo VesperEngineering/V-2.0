@@ -50,8 +50,16 @@ def test_build_script_is_locked_isolated_and_packages_only_public_files() -> Non
     assert "vesper-ratatui-console.exe" in text
     assert "README.md" in text
     assert "Get-FileHash" in text and "SHA256" in text
-    assert ".env" in text and "credentials" in text and "target" in text
+    assert "$allowedPackageNames" in text
     assert "Copy-Item -Recurse" not in text
+
+
+def test_build_rejects_any_preexisting_unapproved_package_entry() -> None:
+    text = SCRIPTS[0].read_text(encoding="utf-8")
+
+    assert "$allowedPackageNames" in text
+    assert "Unapproved package entry" in text
+    assert "Get-ChildItem -LiteralPath $output -Force" in text
 
 
 def test_verify_script_uses_exact_locked_python_temp_contract_and_receipts() -> None:

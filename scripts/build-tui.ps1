@@ -21,7 +21,11 @@ $env:TEMP = 'C:\tmp\v20-tui-operations-temp'
 $env:TMP = 'C:\tmp\v20-tui-operations-temp'
 $env:UV_CACHE_DIR = 'C:\tmp\v20-tui-operations-uv-cache'
 $env:CARGO_TARGET_DIR = 'C:\tmp\v20-tui-release-target'
-$forbiddenNames = @('.env', 'credentials', 'target')
+$allowedPackageNames = @(
+    'vesper-ratatui-console.exe',
+    'README.md',
+    'build-receipt.json'
+)
 
 function Invoke-Checked {
     param(
@@ -37,6 +41,11 @@ function Invoke-Checked {
 Push-Location $repoRoot
 try {
     New-Item -ItemType Directory -Force -Path $env:TEMP, $env:CARGO_TARGET_DIR, $output | Out-Null
+    foreach ($entry in Get-ChildItem -LiteralPath $output -Force) {
+        if ($entry.PSIsContainer -or $allowedPackageNames -notcontains $entry.Name) {
+            throw "Unapproved package entry: $($entry.Name)"
+        }
+    }
 
     Invoke-Checked -Label 'Python TUI verification' -Action {
         uv run --locked python -m pytest --basetemp C:\tmp\v20-tui-operations-pytest -o cache_dir=C:\tmp\v20-tui-operations-cache tests/platform/tui tests/platform/ops -q
@@ -63,13 +72,6 @@ try {
     Copy-Item -LiteralPath $sourceExe -Destination $destinationExe -Force
     Copy-Item -LiteralPath 'TUI testing/ratatui-console/README.md' -Destination $destinationReadme -Force
 
-    $packagedNames = Get-ChildItem -LiteralPath $output -File | ForEach-Object Name
-    foreach ($forbidden in $forbiddenNames) {
-        if ($packagedNames -contains $forbidden) {
-            throw "Forbidden package entry: $forbidden"
-        }
-    }
-
     $hash = (Get-FileHash -LiteralPath $destinationExe -Algorithm SHA256).Hash.ToLowerInvariant()
     $receipt = [ordered]@{
         executable = 'dist/tui/vesper-ratatui-console.exe'
@@ -82,6 +84,15 @@ try {
         }
     }
     $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output 'build-receipt.json') -Encoding utf8
+    $packagedEntries = @(Get-ChildItem -LiteralPath $output -Force)
+    if ($packagedEntries.Count -ne $allowedPackageNames.Count) {
+        throw 'Package output does not contain the exact approved file set.'
+    }
+    foreach ($entry in $packagedEntries) {
+        if ($entry.PSIsContainer -or $allowedPackageNames -notcontains $entry.Name) {
+            throw "Unapproved package entry: $($entry.Name)"
+        }
+    }
 }
 finally {
     Pop-Location
