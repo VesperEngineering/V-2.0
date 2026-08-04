@@ -19,6 +19,8 @@ from .command_contracts import (
     MAX_COMMAND_PAYLOAD_BYTES,
     AgentEnqueuePayload,
     ApprovalPayload,
+    BackupCreatePayload,
+    BackupRestorePayload,
     CommandJsonValue,
     CommandReceipt,
     CommandRequest,
@@ -38,6 +40,7 @@ from .command_policy import (
 )
 from .compression import CompressionReceipt
 from .command_ports import (
+    BackupCommandPort,
     DISABLED_COMMAND_REASONS,
     MemoryCommandPort,
     PlatformCommandPort,
@@ -71,6 +74,8 @@ _HANDLER_KEYS: Mapping[CommandType, str] = MappingProxyType(
         "runtime.stop-safe": "runtime.stop-safe",
         "runtime.stop-force": "runtime.stop-force",
         "runtime.prepare-shutdown": "runtime.prepare-shutdown",
+        "backup.create": "backup.create",
+        "backup.restore": "backup.restore",
     }
 )
 _EXTERNAL_HANDLERS = {
@@ -83,6 +88,8 @@ _EXTERNAL_HANDLERS = {
     "runtime.stop-safe",
     "runtime.stop-force",
     "runtime.prepare-shutdown",
+    "backup.create",
+    "backup.restore",
 }
 _RUNTIME_HANDLERS = frozenset(
     {
@@ -93,6 +100,7 @@ _RUNTIME_HANDLERS = frozenset(
     }
 )
 _SERVICE_HANDLERS = frozenset({"service.pause", "service.restart"})
+_BACKUP_HANDLERS = frozenset({"backup.create", "backup.restore"})
 _RECOVERY_STATES = {"not-started", "completed", "failed", "unknown"}
 _MANUAL_INTERVENTION_MESSAGE = "Downstream command state is unknown; inspect it before any retry."
 _UTC = TypeAdapter(UtcDateTime)
@@ -156,6 +164,7 @@ class CommandRegistry:
         memory_port: MemoryCommandPort | None = None,
         runtime_port: RuntimeCommandPort | None = None,
         service_port: ServiceCommandPort | None = None,
+        backup_port: BackupCommandPort | None = None,
         policy: CommandPolicy | None = None,
         specs: tuple[CommandSpecView, ...] = COMMAND_SPECS,
         clock: Callable[[], datetime] = _utc_now,
@@ -178,6 +187,7 @@ class CommandRegistry:
         self._memory_port = memory_port
         self._runtime_port = runtime_port
         self._service_port = service_port
+        self._backup_port = backup_port
         self._policy = CommandPolicy() if policy is None else policy
         if type(self._policy) is not CommandPolicy:
             raise TypeError("policy must be CommandPolicy")
@@ -584,6 +594,36 @@ class CommandRegistry:
                 else service_port.restart(request.command_id, payload.service_id)
             )
             return self._service_result(service_receipt, request)
+        if request.command_type in _BACKUP_HANDLERS:
+            backup_port = self._backup_port
+            if backup_port is None:
+                raise LedgerCorruptionError("enabled backup port disappeared")
+            if request.command_type == "backup.create":
+                payload = cast(BackupCreatePayload, request.payload)
+                backup_receipt = backup_port.create(
+                    request.command_id,
+                    Path(payload.destination),
+                )
+            else:
+                from .backup import RestoreConfirmation
+
+                payload = cast(BackupRestorePayload, request.payload)
+                confirmation = request.confirmation
+                if confirmation is None:
+                    raise LedgerCorruptionError("accepted backup.restore has no confirmation")
+                backup_receipt = backup_port.restore(
+                    request.command_id,
+                    Path(payload.archive),
+                    payload.preview_hash,
+                    payload.safety_backup_receipt_id,
+                    RestoreConfirmation(
+                        preview_hash=payload.preview_hash,
+                        safety_backup_receipt_id=payload.safety_backup_receipt_id,
+                        first_confirmed=confirmation.first_confirmed,
+                        second_confirmed=confirmation.second_confirmed,
+                    ),
+                )
+            return self._backup_result(backup_receipt, request)
         raise LedgerCorruptionError("claimed command has no reviewed external handler")
 
     def _recover_external(self, request: CommandRequest) -> str:
@@ -591,6 +631,8 @@ class CommandRegistry:
             port = self._runtime_port
         elif request.command_type in _SERVICE_HANDLERS:
             port = self._service_port
+        elif request.command_type in _BACKUP_HANDLERS:
+            port = self._backup_port
         else:
             port = self._port
         if port is None:
@@ -669,6 +711,45 @@ class CommandRegistry:
         )
 
     @staticmethod
+    def _backup_result(receipt: object, request: CommandRequest) -> PortResult:
+        from .backup import BackupManifest, RestoreReceipt
+
+        if request.command_type == "backup.create":
+            if type(receipt) is not BackupManifest:
+                raise TypeError("backup port must return BackupManifest")
+            validated = BackupManifest.model_validate(
+                receipt.model_dump(mode="python", warnings=False),
+                strict=True,
+            )
+            payload = cast(BackupCreatePayload, request.payload)
+            if Path(validated.destination) != Path(payload.destination):
+                raise ValueError("backup manifest does not match the command")
+            return PortResult(
+                ok=True,
+                code="completed",
+                safe_message="Encrypted backup created.",
+                result=validated.model_dump(mode="json"),
+            )
+        if type(receipt) is not RestoreReceipt:
+            raise TypeError("backup port must return RestoreReceipt")
+        validated_restore = RestoreReceipt.model_validate(
+            receipt.model_dump(mode="python", warnings=False),
+            strict=True,
+        )
+        payload = cast(BackupRestorePayload, request.payload)
+        if validated_restore.preview_hash != payload.preview_hash or (
+            validated_restore.accepted
+            and validated_restore.safety_backup_receipt_id != payload.safety_backup_receipt_id
+        ):
+            raise ValueError("restore receipt does not match the command")
+        return PortResult(
+            ok=validated_restore.accepted,
+            code="completed" if validated_restore.accepted else "restore-rejected",
+            safe_message=validated_restore.reason,
+            result=validated_restore.model_dump(mode="json"),
+        )
+
+    @staticmethod
     def _require_memory_agent(request: CommandRequest) -> str:
         payload = cast(CompressMemoryPayload, request.payload)
         try:
@@ -707,6 +788,8 @@ class CommandRegistry:
             return self._optional_port_capability(command_type, self._runtime_port)
         if command_type in _SERVICE_HANDLERS:
             return self._optional_port_capability(command_type, self._service_port)
+        if command_type in _BACKUP_HANDLERS:
+            return self._optional_port_capability(command_type, self._backup_port)
         enabled = command_type in _HANDLER_KEYS
         return CapabilityView(
             capability_id=command_type,

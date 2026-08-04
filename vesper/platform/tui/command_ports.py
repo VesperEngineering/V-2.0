@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Callable, Literal, Mapping, Protocol
 
@@ -22,6 +23,7 @@ from vesper.platform.tui.views import CapabilityView, SafeId
 
 if TYPE_CHECKING:
     from vesper.platform.ops.services import RuntimeReceipt, ServiceReceipt
+    from vesper.platform.tui.backup import BackupManifest, RestoreConfirmation, RestoreReceipt
 
 
 RecoveryStatus = Literal["not-started", "completed", "failed", "unknown"]
@@ -54,8 +56,8 @@ DISABLED_COMMAND_REASONS: Mapping[str, str] = MappingProxyType(
         "model.request-promotion": "No reviewed model promotion port is configured.",
         "model.request-rollback": "No reviewed model rollback port is configured.",
         "memory.compress-now": "No controller-owned context compression port is configured.",
-        "backup.create": "Backup service is not installed.",
-        "backup.restore": "Backup service is not installed.",
+        "backup.create": "No controller-owned backup command adapter is configured.",
+        "backup.restore": "No controller-owned backup command adapter is configured.",
         "source-control.push": "Source-control command port is not installed.",
     }
 )
@@ -156,6 +158,25 @@ class ServiceCommandPort(Protocol):
     def pause(self, command_id: SafeId, service_id: SafeId) -> ServiceReceipt: ...
 
     def restart(self, command_id: SafeId, service_id: SafeId) -> ServiceReceipt: ...
+
+    def recover(self, command_id: str, request: CommandRequest) -> RecoveryStatus: ...
+
+
+class BackupCommandPort(Protocol):
+    """Optional current-user encrypted backup adapter."""
+
+    def available(self, command_type: CommandType) -> CapabilityView: ...
+
+    def create(self, command_id: SafeId, destination: Path) -> BackupManifest: ...
+
+    def restore(
+        self,
+        command_id: SafeId,
+        archive: Path,
+        preview_hash: str,
+        safety_backup_receipt_id: SafeId,
+        confirmation: RestoreConfirmation,
+    ) -> RestoreReceipt: ...
 
     def recover(self, command_id: str, request: CommandRequest) -> RecoveryStatus: ...
 

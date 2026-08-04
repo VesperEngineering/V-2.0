@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,11 @@ from vesper.platform.tui.command_contracts import (
     CommandRequest,
     ConfirmationProof,
     ReceiptStatus,
+)
+from vesper.platform.tui.backup import (
+    BackupManifest,
+    RestoreConfirmation,
+    RestoreReceipt,
 )
 from vesper.platform.tui.command_policy import (
     CommandContext,
@@ -192,6 +198,61 @@ class PortSpy:
         )
 
 
+class BackupPort:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, object]] = []
+        self.effects: set[str] = set()
+        self.raise_after_effect: set[str] = set()
+
+    def available(self, command_type: str) -> CapabilityView:
+        return CapabilityView(
+            capability_id=command_type,
+            state=CapabilityState.ENABLED,
+            reason=None,
+        )
+
+    def create(self, command_id: str, destination: Path) -> BackupManifest:
+        self.calls.append(("create", command_id, destination))
+        self.effects.add(command_id)
+        if command_id in self.raise_after_effect:
+            raise RuntimeError("crash after backup effect")
+        return BackupManifest(
+            receipt_id="backup:" + "1" * 64,
+            destination=str(destination),
+            paths=("state/config.json",),
+            plaintext_sha256="1" * 64,
+            ciphertext_sha256="2" * 64,
+        )
+
+    def restore(
+        self,
+        command_id: str,
+        archive: Path,
+        preview_hash: str,
+        safety_backup_receipt_id: str,
+        confirmation: RestoreConfirmation,
+    ) -> RestoreReceipt:
+        self.calls.append(
+            (
+                "restore",
+                command_id,
+                (archive, preview_hash, safety_backup_receipt_id, confirmation),
+            )
+        )
+        self.effects.add(command_id)
+        return RestoreReceipt(
+            accepted=True,
+            reason="restore-completed",
+            preview_hash=preview_hash,
+            safety_backup_receipt_id=safety_backup_receipt_id,
+            restored_paths=("state/config.json",),
+        )
+
+    def recover(self, command_id: str, request: CommandRequest) -> str:
+        del request
+        return "completed" if command_id in self.effects else "not-started"
+
+
 def _spec(command_type: str):
     return next(spec for spec in COMMAND_SPECS if spec.command_type == command_type)
 
@@ -213,9 +274,7 @@ def _request(
         confirmation = ConfirmationProof(
             first_confirmed=True,
             second_confirmed=True,
-            bound_preview_hash=(
-                CONTROL_HASH if command_type == "backup.restore" else None
-            ),
+            bound_preview_hash=(CONTROL_HASH if command_type == "backup.restore" else None),
         )
     elif spec.confirmation_level == "typed-live":
         confirmation = ConfirmationProof(
@@ -398,6 +457,59 @@ def test_missing_handler_fails_closed_if_capability_is_incorrectly_enabled(
     registry.close()
 
 
+def test_backup_port_receipts_are_exactly_bound_to_create_and_restore(tmp_path) -> None:
+    backup = BackupPort()
+    registry = CommandRegistry(
+        tmp_path / "backup.db",
+        PortSpy(),
+        backup_port=backup,
+        clock=MutableClock(),
+    )
+    create = _request("backup.create", command_id="client:backup:create")
+    restore = _request("backup.restore", command_id="client:backup:restore")
+
+    created = registry.execute(_context(create), create)
+    restored = registry.execute(_context(restore), restore)
+
+    assert created.status is ReceiptStatus.COMPLETED
+    assert created.result["destination"] == PAYLOADS["backup.create"]["destination"]
+    assert restored.status is ReceiptStatus.COMPLETED
+    assert restored.result["preview_hash"] == CONTROL_HASH
+    restore_call = backup.calls[1][2]
+    assert isinstance(restore_call, tuple)
+    confirmation = restore_call[3]
+    assert confirmation == RestoreConfirmation(
+        preview_hash=CONTROL_HASH,
+        safety_backup_receipt_id="receipt:backup",
+        first_confirmed=True,
+        second_confirmed=True,
+    )
+    registry.close()
+
+
+def test_backup_recovery_never_repeats_an_effect_after_registry_crash(tmp_path) -> None:
+    backup = BackupPort()
+    clock = MutableClock()
+    request = _request("backup.create", command_id="client:backup:crash")
+    backup.raise_after_effect.add(request.command_id)
+    registry = CommandRegistry(
+        tmp_path / "backup-recovery.db",
+        PortSpy(),
+        backup_port=backup,
+        clock=clock,
+        claim_lease=timedelta(seconds=1),
+    )
+
+    with pytest.raises(RuntimeError, match="after backup effect"):
+        registry.execute(_context(request), request)
+    clock.advance(seconds=2)
+    recovered = registry.recover_running(clock.now)
+
+    assert recovered[0].status is ReceiptStatus.COMPLETED
+    assert [call[0] for call in backup.calls] == ["create"]
+    registry.close()
+
+
 def test_stale_request_is_rejected_before_any_port_call(tmp_path) -> None:
     port = PortSpy()
     registry = _registry(tmp_path / "registry.db", port, MutableClock())
@@ -573,9 +685,7 @@ def test_recovery_reclaims_crash_after_claim_before_handler(
     monkeypatch.setattr(
         registry,
         "_execute_claimed",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("after claim before handler")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("after claim before handler")),
     )
     with pytest.raises(RuntimeError, match="after claim"):
         registry.execute(_context(request), request)
@@ -720,11 +830,7 @@ def test_local_effect_rolls_back_with_terminal_receipt(
     registry = _registry(tmp_path / f"{command_type}.db", port, clock)
     request = _request(command_type)
     context = _context(request)
-    command_store = (
-        registry._store
-        if command_type == "note.add"
-        else registry._decisions._commands
-    )
+    command_store = registry._store if command_type == "note.add" else registry._decisions._commands
     original_finish = command_store.finish_in_transaction
     monkeypatch.setattr(
         command_store,
