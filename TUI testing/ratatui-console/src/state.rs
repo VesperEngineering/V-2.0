@@ -819,6 +819,10 @@ impl AppState {
                     Ok(ReduceOutcome::Ignored)
                 }
             }
+            Message::CommandReceipt(_) => Err(self.fail_closed(
+                "state",
+                "Command receipt arrived before command controls were initialized.",
+            )),
             Message::ClientHello(_)
             | Message::AuthSetup(_)
             | Message::AuthUnlock(_)
@@ -826,6 +830,7 @@ impl AppState {
             | Message::LockRequest(_)
             | Message::SnapshotRequest(_)
             | Message::SearchRequest(_)
+            | Message::Command(_)
             | Message::Ping(_) => {
                 Err(self.fail_closed("direction", "Server message direction is invalid."))
             }

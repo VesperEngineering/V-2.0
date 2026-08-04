@@ -495,13 +495,13 @@ def test_canonical_fixture_and_schema_receipt_have_exact_bytes_and_hashes() -> N
     ).encode("utf-8")
     assert (
         WIRE_SCHEMA_RECEIPT_SHA256
-        == "4023f5c520b999c4d57cbcc2ca51a68d56ce4b7fb1e0f525e15e4fcc9a7ed8b1"
+        == "4b061a0aabb03cc79205a416ca670c38b8105b9488386716d5a5023ed1521c21"
     )
     assert hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest() == WIRE_SCHEMA_RECEIPT_SHA256
 
 
 def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() -> None:
-    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 17
+    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 19
     assert {decode_envelope_json(frame).message_type for frame in CANONICAL_WIRE_FIXTURES} == set(
         MessageType
     )
@@ -513,7 +513,14 @@ def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() ->
     assert descriptor["schema_version"] == 1
     assert set(descriptor["messages"]) == {message.value for message in MessageType}
     assert "snapshot.shell.header.agent_queue_length" in descriptor["nullable_required"]
-    assert descriptor["optional_default"] == ["capability.reason"]
+    assert descriptor["optional_default"] == [
+        "capability.reason",
+        "command.request.confirmation",
+        "command.request.confirmation.first_confirmed",
+        "command.request.confirmation.second_confirmed",
+        "command.request.confirmation.typed_text",
+        "command.request.confirmation.bound_preview_hash",
+    ]
 
 
 @pytest.mark.parametrize("value", [-1, 2**64])

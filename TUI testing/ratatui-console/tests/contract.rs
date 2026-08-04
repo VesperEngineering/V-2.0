@@ -570,7 +570,7 @@ fn decode_base64(value: &str) -> Vec<u8> {
 #[test]
 fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     let bundle = python_contract_bundle();
-    assert_eq!(bundle.fixtures.len(), 17);
+    assert_eq!(bundle.fixtures.len(), 19);
     let mut seen = Vec::new();
     for fixture in bundle.fixtures {
         let envelope: Envelope =
@@ -580,7 +580,7 @@ fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     }
     seen.sort_by_key(|value| value.to_string());
     seen.dedup();
-    assert_eq!(seen.len(), 17);
+    assert_eq!(seen.len(), 19);
     assert_eq!(rust_contract_descriptor(), bundle.descriptor);
 }
 
@@ -589,11 +589,12 @@ fn rust_contract_descriptor() -> Vec<u8> {
         "envelope_required": ["schema_version", "message_id", "sequence", "state_version", "timestamp_utc", "message_type", "payload"],
         "field_catalog_scope": [
             "envelope", "payloads", "shell", "snapshot-observability-metadata",
-            "event-presentation-metadata", "repository-status"
+            "event-presentation-metadata", "repository-status", "governed-command-contracts"
         ],
         "integer_fields": [
             "envelope.sequence",
             "envelope.state_version",
+            "command.request.reviewed_control_version",
             "snapshot.shell.state_version",
             "snapshot.control_version",
             "snapshot.shell.header.agent_queue_length",
@@ -610,6 +611,8 @@ fn rust_contract_descriptor() -> Vec<u8> {
             "auth-setup": ["password", "confirmation"],
             "auth-unlock": ["password"],
             "client-hello": ["client_version", "supported_schema_versions"],
+            "command": ["request"],
+            "command-receipt": ["receipt"],
             "event": ["entity_type", "entity_id", "operation", "entity", "targets", "presentation"],
             "lease-request": ["action"],
             "lease-result": ["status", "reason"],
@@ -627,7 +630,10 @@ fn rust_contract_descriptor() -> Vec<u8> {
         "nullable_required": [
             "auth-result.reason", "lease-result.reason", "search-results.error",
             "search-results.results[].occurred_at_utc",
-            "search-results.results[].context_only", "event.entity", "snapshot.shell.alerts",
+            "search-results.results[].context_only", "command.request.reason",
+            "command-receipt.receipt.accepted_at_utc",
+            "command-receipt.receipt.finished_at_utc",
+            "command-receipt.receipt.result", "event.entity", "snapshot.shell.alerts",
             "alert.resolved_at_utc", "snapshot.shell.header.operating_mode_reason",
             "snapshot.shell.header.data_age_seconds",
             "snapshot.shell.header.regime_confidence",
@@ -671,7 +677,14 @@ fn rust_contract_descriptor() -> Vec<u8> {
             "event.presentation.system.as_of_utc", "event.presentation.system.error",
             "event.presentation.portfolio_rank_source"
         ],
-        "optional_default": ["capability.reason"],
+        "optional_default": [
+            "capability.reason",
+            "command.request.confirmation",
+            "command.request.confirmation.first_confirmed",
+            "command.request.confirmation.second_confirmed",
+            "command.request.confirmation.typed_text",
+            "command.request.confirmation.bound_preview_hash"
+        ],
         "schema_version": 1,
         "shell_required": {
             "alert": ["alert_id", "severity", "summary", "created_at_utc", "resolved_at_utc"],
@@ -964,7 +977,7 @@ fn rejects_wrong_schema_negative_versions_and_invalid_ids() {
 }
 
 #[test]
-fn parses_all_seventeen_strict_payloads() {
+fn parses_all_nineteen_strict_payloads() {
     let snapshot = String::from_utf8(shared_snapshot_fixture()).unwrap();
     let event = serde_json::to_string(&serde_json::json!({
         "entity_type": "alert-row",
@@ -1009,6 +1022,14 @@ fn parses_all_seventeen_strict_payloads() {
         (
             "search-results",
             r#"{"request_id":1,"indexed_state_version":0,"results":[{"kind":"note","record_type":"note","record_id":"note:1","label":"AAPL note","summary":"Review concentration risk.","occurred_at_utc":"2026-08-03T00:00:00Z","source":"operator","screen":"portfolio","context_only":true}],"error":null}"#.to_owned(),
+        ),
+        (
+            "command",
+            r#"{"request":{"command_id":"client:command:1","command_type":"note.add","reviewed_control_version":19,"reviewed_control_hash":"7c222fb2927d828af22f592134e8932480637c0d1a3a6c9f5d6f0f975f6e3f43","reason":null,"confirmation":null,"payload":{"target_type":"stock","target_id":"AAPL","body":"Review concentration.","visibility":"private"}}}"#.to_owned(),
+        ),
+        (
+            "command-receipt",
+            r#"{"receipt":{"command_id":"client:command:1","status":"completed","code":"completed","safe_message":"Note stored.","accepted_at_utc":"2026-08-03T00:00:00Z","finished_at_utc":"2026-08-03T00:00:01Z","result":null}}"#.to_owned(),
         ),
         ("event", event),
         (

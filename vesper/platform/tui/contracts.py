@@ -16,6 +16,10 @@ from pydantic import (
 )
 from typing_extensions import TypeAliasType
 
+from .command_contracts import (
+    CommandMessagePayload,
+    CommandReceiptPayload,
+)
 from .search import SearchFilters, SearchResult
 from .views import (
     AlertView,
@@ -63,6 +67,8 @@ class MessageType(StrEnum):
     SNAPSHOT = "snapshot"
     SEARCH_REQUEST = "search-request"
     SEARCH_RESULTS = "search-results"
+    COMMAND = "command"
+    COMMAND_RECEIPT = "command-receipt"
     EVENT = "event"
     PROTOCOL_ERROR = "protocol-error"
     PING = "ping"
@@ -212,6 +218,8 @@ StrictPayload: TypeAlias = (
     | SnapshotPayload
     | SearchRequestPayload
     | SearchResultsPayload
+    | CommandMessagePayload
+    | CommandReceiptPayload
     | EventPayload
     | ProtocolErrorPayload
     | PingPayload
@@ -233,6 +241,8 @@ PAYLOAD_MODELS: dict[MessageType, PayloadModel] = {
     MessageType.SNAPSHOT: SnapshotPayload,
     MessageType.SEARCH_REQUEST: SearchRequestPayload,
     MessageType.SEARCH_RESULTS: SearchResultsPayload,
+    MessageType.COMMAND: CommandMessagePayload,
+    MessageType.COMMAND_RECEIPT: CommandReceiptPayload,
     MessageType.EVENT: EventPayload,
     MessageType.PROTOCOL_ERROR: ProtocolErrorPayload,
     MessageType.PING: PingPayload,
@@ -537,6 +547,41 @@ _FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
         },
     ),
     (
+        MessageType.COMMAND,
+        {
+            "request": {
+                "command_id": "client:command:1",
+                "command_type": "note.add",
+                "reviewed_control_version": 19,
+                "reviewed_control_hash": (
+                    "7c222fb2927d828af22f592134e8932480637c0d1a3a6c9f5d6f0f975f6e3f43"
+                ),
+                "reason": None,
+                "confirmation": None,
+                "payload": {
+                    "target_type": "stock",
+                    "target_id": "AAPL",
+                    "body": "Review concentration.",
+                    "visibility": "private",
+                },
+            }
+        },
+    ),
+    (
+        MessageType.COMMAND_RECEIPT,
+        {
+            "receipt": {
+                "command_id": "client:command:1",
+                "status": "completed",
+                "code": "completed",
+                "safe_message": "Note stored.",
+                "accepted_at_utc": "2026-08-03T00:00:00Z",
+                "finished_at_utc": "2026-08-03T00:00:01Z",
+                "result": None,
+            }
+        },
+    ),
+    (
         MessageType.EVENT,
         {
             "entity_type": "alert-row",
@@ -640,14 +685,26 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "snapshot-observability-metadata",
             "event-presentation-metadata",
             "repository-status",
+            "governed-command-contracts",
         ],
-        "optional_default": ["capability.reason"],
+        "optional_default": [
+            "capability.reason",
+            "command.request.confirmation",
+            "command.request.confirmation.first_confirmed",
+            "command.request.confirmation.second_confirmed",
+            "command.request.confirmation.typed_text",
+            "command.request.confirmation.bound_preview_hash",
+        ],
         "nullable_required": [
             "auth-result.reason",
             "lease-result.reason",
             "search-results.error",
             "search-results.results[].occurred_at_utc",
             "search-results.results[].context_only",
+            "command.request.reason",
+            "command-receipt.receipt.accepted_at_utc",
+            "command-receipt.receipt.finished_at_utc",
+            "command-receipt.receipt.result",
             "event.entity",
             "snapshot.shell.alerts",
             "alert.resolved_at_utc",
@@ -717,6 +774,7 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
         "integer_fields": [
             "envelope.sequence",
             "envelope.state_version",
+            "command.request.reviewed_control_version",
             "snapshot.shell.state_version",
             "snapshot.control_version",
             "snapshot.shell.header.agent_queue_length",

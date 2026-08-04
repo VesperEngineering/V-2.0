@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::de::DeserializeOwned;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetSystemTime;
@@ -316,6 +317,104 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     {
         let value = String::deserialize(deserializer)?;
         Self::from_input(value).map_err(serde::de::Error::custom)
+    }
+}
+
+macro_rules! bounded_string {
+    ($name:ident, $minimum:expr, $maximum:expr, $error:literal, $trim:expr) => {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(&self.0)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                let checked = if $trim { value.trim() } else { value.as_str() };
+                if ($minimum..=$maximum).contains(&checked.chars().count()) {
+                    Ok(Self(checked.to_owned()))
+                } else {
+                    Err(serde::de::Error::custom($error))
+                }
+            }
+        }
+    };
+}
+
+bounded_string!(
+    LongText,
+    1,
+    8_000,
+    "text must contain 1 to 8000 characters",
+    false
+);
+bounded_string!(
+    WindowsPathText,
+    1,
+    32_767,
+    "path must contain 1 to 32767 characters",
+    false
+);
+bounded_string!(
+    ReasonText,
+    1,
+    2_000,
+    "reason must contain 1 to 2000 characters",
+    true
+);
+bounded_string!(
+    RawConfirmationText,
+    0,
+    512,
+    "confirmation text cannot exceed 512 characters",
+    false
+);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitRevision(String);
+
+impl Serialize for GitRevision {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for GitRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if matches!(value.len(), 40 | 64)
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "Git revision must be 40 or 64 lowercase hexadecimal characters",
+            ))
+        }
     }
 }
 
@@ -645,6 +744,8 @@ pub enum MessageType {
     Snapshot,
     SearchRequest,
     SearchResults,
+    Command,
+    CommandReceipt,
     Event,
     ProtocolError,
     Ping,
@@ -686,6 +787,8 @@ pub enum Message {
     Snapshot(Box<SnapshotPayload>),
     SearchRequest(SearchRequestPayload),
     SearchResults(SearchResultsPayload),
+    Command(CommandMessagePayload),
+    CommandReceipt(CommandReceiptPayload),
     Event(Box<EventPayload>),
     ProtocolError(ProtocolErrorPayload),
     Ping(PingPayload),
@@ -708,6 +811,8 @@ impl Message {
             Self::Snapshot(_) => MessageType::Snapshot,
             Self::SearchRequest(_) => MessageType::SearchRequest,
             Self::SearchResults(_) => MessageType::SearchResults,
+            Self::Command(_) => MessageType::Command,
+            Self::CommandReceipt(_) => MessageType::CommandReceipt,
             Self::Event(_) => MessageType::Event,
             Self::ProtocolError(_) => MessageType::ProtocolError,
             Self::Ping(_) => MessageType::Ping,
@@ -894,6 +999,538 @@ pub struct SearchResultsPayload {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub error: Option<NonEmptyString>,
 }
+
+const MAX_COMMAND_PAYLOAD_BYTES: usize = 64 * 1024;
+const MAX_EVIDENCE_IDS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub enum CommandType {
+    #[serde(rename = "note.add")]
+    NoteAdd,
+    #[serde(rename = "alert.dismiss")]
+    AlertDismiss,
+    #[serde(rename = "layout.reset")]
+    LayoutReset,
+    #[serde(rename = "approval.approve")]
+    ApprovalApprove,
+    #[serde(rename = "approval.hold")]
+    ApprovalHold,
+    #[serde(rename = "approval.reject")]
+    ApprovalReject,
+    #[serde(rename = "approval.rework")]
+    ApprovalRework,
+    #[serde(rename = "agent.send-message")]
+    AgentSendMessage,
+    #[serde(rename = "agent.enqueue")]
+    AgentEnqueue,
+    #[serde(rename = "agent.pause")]
+    AgentPause,
+    #[serde(rename = "agent.stop")]
+    AgentStop,
+    #[serde(rename = "agent.retry")]
+    AgentRetry,
+    #[serde(rename = "agent.set-priority")]
+    AgentSetPriority,
+    #[serde(rename = "risk.propose-limit")]
+    RiskProposeLimit,
+    #[serde(rename = "trading.pause")]
+    TradingPause,
+    #[serde(rename = "trading.emergency-stop")]
+    TradingEmergencyStop,
+    #[serde(rename = "service.pause")]
+    ServicePause,
+    #[serde(rename = "service.restart")]
+    ServiceRestart,
+    #[serde(rename = "runtime.start")]
+    RuntimeStart,
+    #[serde(rename = "runtime.stop-safe")]
+    RuntimeStopSafe,
+    #[serde(rename = "runtime.stop-force")]
+    RuntimeStopForce,
+    #[serde(rename = "runtime.prepare-shutdown")]
+    RuntimePrepareShutdown,
+    #[serde(rename = "mode.switch")]
+    ModeSwitch,
+    #[serde(rename = "mode.leave-live")]
+    ModeLeaveLive,
+    #[serde(rename = "mode.enable-live")]
+    ModeEnableLive,
+    #[serde(rename = "model.request-promotion")]
+    ModelRequestPromotion,
+    #[serde(rename = "model.request-rollback")]
+    ModelRequestRollback,
+    #[serde(rename = "memory.compress-now")]
+    MemoryCompressNow,
+    #[serde(rename = "backup.create")]
+    BackupCreate,
+    #[serde(rename = "backup.restore")]
+    BackupRestore,
+    #[serde(rename = "source-control.push")]
+    SourceControlPush,
+}
+
+impl CommandType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoteAdd => "note.add",
+            Self::AlertDismiss => "alert.dismiss",
+            Self::LayoutReset => "layout.reset",
+            Self::ApprovalApprove => "approval.approve",
+            Self::ApprovalHold => "approval.hold",
+            Self::ApprovalReject => "approval.reject",
+            Self::ApprovalRework => "approval.rework",
+            Self::AgentSendMessage => "agent.send-message",
+            Self::AgentEnqueue => "agent.enqueue",
+            Self::AgentPause => "agent.pause",
+            Self::AgentStop => "agent.stop",
+            Self::AgentRetry => "agent.retry",
+            Self::AgentSetPriority => "agent.set-priority",
+            Self::RiskProposeLimit => "risk.propose-limit",
+            Self::TradingPause => "trading.pause",
+            Self::TradingEmergencyStop => "trading.emergency-stop",
+            Self::ServicePause => "service.pause",
+            Self::ServiceRestart => "service.restart",
+            Self::RuntimeStart => "runtime.start",
+            Self::RuntimeStopSafe => "runtime.stop-safe",
+            Self::RuntimeStopForce => "runtime.stop-force",
+            Self::RuntimePrepareShutdown => "runtime.prepare-shutdown",
+            Self::ModeSwitch => "mode.switch",
+            Self::ModeLeaveLive => "mode.leave-live",
+            Self::ModeEnableLive => "mode.enable-live",
+            Self::ModelRequestPromotion => "model.request-promotion",
+            Self::ModelRequestRollback => "model.request-rollback",
+            Self::MemoryCompressNow => "memory.compress-now",
+            Self::BackupCreate => "backup.create",
+            Self::BackupRestore => "backup.restore",
+            Self::SourceControlPush => "source-control.push",
+        }
+    }
+
+    fn forbids_reason(self) -> bool {
+        matches!(
+            self,
+            Self::NoteAdd
+                | Self::AlertDismiss
+                | Self::LayoutReset
+                | Self::AgentSendMessage
+                | Self::MemoryCompressNow
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreenName {
+    Impact,
+    Portfolio,
+    Orders,
+    Agents,
+    ModelsRegime,
+    Timeline,
+    RiskApprovals,
+    DataEvidence,
+    Memory,
+    System,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoteTargetType {
+    Stock,
+    Order,
+    Approval,
+    AgentEvent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoteVisibility {
+    Private,
+    Shared,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NonLiveMode {
+    Shadow,
+    Paper,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyPayload {}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoteAddPayload {
+    pub target_type: NoteTargetType,
+    pub target_id: SafeId,
+    pub body: LongText,
+    pub visibility: NoteVisibility,
+}
+
+strict_struct!(AlertDismissPayload { alert_id: SafeId });
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutResetPayload {
+    #[serde(default)]
+    pub screen: Option<ScreenName>,
+}
+
+strict_struct!(ApprovalPayload {
+    run_id: SafeId,
+    checkpoint_id: SafeId,
+});
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalReworkPayload {
+    pub run_id: SafeId,
+    pub checkpoint_id: SafeId,
+    #[serde(deserialize_with = "deserialize_evidence_ids")]
+    pub evidence_ids: Vec<SafeId>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMessagePayload {
+    pub agent_id: SafeId,
+    pub text: LongText,
+    #[serde(default)]
+    pub selected_entity_type: Option<NonEmptyString>,
+    #[serde(default)]
+    pub selected_entity_id: Option<SafeId>,
+}
+
+strict_struct!(AgentEnqueuePayload {
+    agent_id: SafeId,
+    title: NonEmptyString,
+    objective: LongText,
+    priority: Priority,
+});
+strict_struct!(AgentWorkPayload { work_id: SafeId });
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStopPayload {
+    pub work_id: SafeId,
+    #[serde(default)]
+    pub workflow_run_id: Option<SafeId>,
+}
+
+strict_struct!(AgentPriorityPayload {
+    work_id: SafeId,
+    priority: Priority,
+});
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiskLimitPayload {
+    pub limit_id: SafeId,
+    pub proposed_value: DecimalString,
+    #[serde(deserialize_with = "deserialize_evidence_ids")]
+    pub evidence_ids: Vec<SafeId>,
+}
+
+strict_struct!(ServicePayload { service_id: SafeId });
+strict_struct!(RuntimeStartPayload {
+    mode: NonLiveMode,
+    activation_receipt_id: SafeId,
+});
+strict_struct!(ModeSwitchPayload {
+    target_mode: NonLiveMode,
+});
+strict_struct!(EnableLivePayload {
+    desired_portfolio_id: SafeId,
+});
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelDecisionPayload {
+    pub candidate_id: SafeId,
+    #[serde(deserialize_with = "deserialize_evidence_ids")]
+    pub evidence_ids: Vec<SafeId>,
+}
+
+strict_struct!(CompressMemoryPayload { agent_id: SafeId });
+strict_struct!(BackupCreatePayload {
+    destination: WindowsPathText,
+});
+strict_struct!(BackupRestorePayload {
+    archive: WindowsPathText,
+    preview_hash: Sha256Hex,
+    safety_backup_receipt_id: SafeId,
+});
+strict_struct!(SourceControlPushPayload {
+    expected_revision: GitRevision,
+});
+
+fn deserialize_evidence_ids<'de, D>(deserializer: D) -> Result<Vec<SafeId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<SafeId>::deserialize(deserializer)?;
+    if values.len() <= MAX_EVIDENCE_IDS {
+        Ok(values)
+    } else {
+        Err(serde::de::Error::custom(
+            "evidence IDs cannot exceed 32 entries",
+        ))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandPayload {
+    NoteAdd(NoteAddPayload),
+    AlertDismiss(AlertDismissPayload),
+    LayoutReset(LayoutResetPayload),
+    Approval(ApprovalPayload),
+    ApprovalRework(ApprovalReworkPayload),
+    AgentMessage(AgentMessagePayload),
+    AgentEnqueue(AgentEnqueuePayload),
+    AgentWork(AgentWorkPayload),
+    AgentStop(AgentStopPayload),
+    AgentPriority(AgentPriorityPayload),
+    RiskLimit(RiskLimitPayload),
+    Empty(EmptyPayload),
+    Service(ServicePayload),
+    RuntimeStart(RuntimeStartPayload),
+    ModeSwitch(ModeSwitchPayload),
+    EnableLive(EnableLivePayload),
+    ModelDecision(ModelDecisionPayload),
+    CompressMemory(CompressMemoryPayload),
+    BackupCreate(BackupCreatePayload),
+    BackupRestore(BackupRestorePayload),
+    SourceControlPush(SourceControlPushPayload),
+}
+
+impl CommandPayload {
+    pub fn model_name(&self) -> &'static str {
+        match self {
+            Self::NoteAdd(_) => "NoteAddPayload",
+            Self::AlertDismiss(_) => "AlertDismissPayload",
+            Self::LayoutReset(_) => "LayoutResetPayload",
+            Self::Approval(_) => "ApprovalPayload",
+            Self::ApprovalRework(_) => "ApprovalReworkPayload",
+            Self::AgentMessage(_) => "AgentMessagePayload",
+            Self::AgentEnqueue(_) => "AgentEnqueuePayload",
+            Self::AgentWork(_) => "AgentWorkPayload",
+            Self::AgentStop(_) => "AgentStopPayload",
+            Self::AgentPriority(_) => "AgentPriorityPayload",
+            Self::RiskLimit(_) => "RiskLimitPayload",
+            Self::Empty(_) => "EmptyPayload",
+            Self::Service(_) => "ServicePayload",
+            Self::RuntimeStart(_) => "RuntimeStartPayload",
+            Self::ModeSwitch(_) => "ModeSwitchPayload",
+            Self::EnableLive(_) => "EnableLivePayload",
+            Self::ModelDecision(_) => "ModelDecisionPayload",
+            Self::CompressMemory(_) => "CompressMemoryPayload",
+            Self::BackupCreate(_) => "BackupCreatePayload",
+            Self::BackupRestore(_) => "BackupRestorePayload",
+            Self::SourceControlPush(_) => "SourceControlPushPayload",
+        }
+    }
+
+    fn from_value(command_type: CommandType, value: serde_json::Value) -> Result<Self, String> {
+        macro_rules! parse {
+            ($variant:ident, $kind:ty) => {
+                serde_json::from_value::<$kind>(value)
+                    .map(Self::$variant)
+                    .map_err(|error| error.to_string())
+            };
+        }
+        match command_type {
+            CommandType::NoteAdd => parse!(NoteAdd, NoteAddPayload),
+            CommandType::AlertDismiss => parse!(AlertDismiss, AlertDismissPayload),
+            CommandType::LayoutReset => parse!(LayoutReset, LayoutResetPayload),
+            CommandType::ApprovalApprove
+            | CommandType::ApprovalHold
+            | CommandType::ApprovalReject => parse!(Approval, ApprovalPayload),
+            CommandType::ApprovalRework => parse!(ApprovalRework, ApprovalReworkPayload),
+            CommandType::AgentSendMessage => parse!(AgentMessage, AgentMessagePayload),
+            CommandType::AgentEnqueue => parse!(AgentEnqueue, AgentEnqueuePayload),
+            CommandType::AgentPause | CommandType::AgentRetry => {
+                parse!(AgentWork, AgentWorkPayload)
+            }
+            CommandType::AgentStop => parse!(AgentStop, AgentStopPayload),
+            CommandType::AgentSetPriority => parse!(AgentPriority, AgentPriorityPayload),
+            CommandType::RiskProposeLimit => parse!(RiskLimit, RiskLimitPayload),
+            CommandType::TradingPause
+            | CommandType::TradingEmergencyStop
+            | CommandType::RuntimeStopSafe
+            | CommandType::RuntimeStopForce
+            | CommandType::RuntimePrepareShutdown => parse!(Empty, EmptyPayload),
+            CommandType::ServicePause | CommandType::ServiceRestart => {
+                parse!(Service, ServicePayload)
+            }
+            CommandType::RuntimeStart => parse!(RuntimeStart, RuntimeStartPayload),
+            CommandType::ModeSwitch | CommandType::ModeLeaveLive => {
+                parse!(ModeSwitch, ModeSwitchPayload)
+            }
+            CommandType::ModeEnableLive => parse!(EnableLive, EnableLivePayload),
+            CommandType::ModelRequestPromotion | CommandType::ModelRequestRollback => {
+                parse!(ModelDecision, ModelDecisionPayload)
+            }
+            CommandType::MemoryCompressNow => parse!(CompressMemory, CompressMemoryPayload),
+            CommandType::BackupCreate => parse!(BackupCreate, BackupCreatePayload),
+            CommandType::BackupRestore => parse!(BackupRestore, BackupRestorePayload),
+            CommandType::SourceControlPush => {
+                parse!(SourceControlPush, SourceControlPushPayload)
+            }
+        }
+    }
+}
+
+impl Serialize for CommandPayload {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::NoteAdd(value) => value.serialize(serializer),
+            Self::AlertDismiss(value) => value.serialize(serializer),
+            Self::LayoutReset(value) => value.serialize(serializer),
+            Self::Approval(value) => value.serialize(serializer),
+            Self::ApprovalRework(value) => value.serialize(serializer),
+            Self::AgentMessage(value) => value.serialize(serializer),
+            Self::AgentEnqueue(value) => value.serialize(serializer),
+            Self::AgentWork(value) => value.serialize(serializer),
+            Self::AgentStop(value) => value.serialize(serializer),
+            Self::AgentPriority(value) => value.serialize(serializer),
+            Self::RiskLimit(value) => value.serialize(serializer),
+            Self::Empty(value) => value.serialize(serializer),
+            Self::Service(value) => value.serialize(serializer),
+            Self::RuntimeStart(value) => value.serialize(serializer),
+            Self::ModeSwitch(value) => value.serialize(serializer),
+            Self::EnableLive(value) => value.serialize(serializer),
+            Self::ModelDecision(value) => value.serialize(serializer),
+            Self::CompressMemory(value) => value.serialize(serializer),
+            Self::BackupCreate(value) => value.serialize(serializer),
+            Self::BackupRestore(value) => value.serialize(serializer),
+            Self::SourceControlPush(value) => value.serialize(serializer),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmationProof {
+    #[serde(default)]
+    pub first_confirmed: bool,
+    #[serde(default)]
+    pub second_confirmed: bool,
+    #[serde(default)]
+    pub typed_text: Option<RawConfirmationText>,
+    #[serde(default)]
+    pub bound_preview_hash: Option<Sha256Hex>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandRequest {
+    pub command_id: SafeId,
+    pub command_type: CommandType,
+    pub reviewed_control_version: u64,
+    pub reviewed_control_hash: Sha256Hex,
+    pub reason: Option<ReasonText>,
+    pub confirmation: Option<ConfirmationProof>,
+    pub payload: CommandPayload,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCommandRequest {
+    command_id: SafeId,
+    command_type: CommandType,
+    reviewed_control_version: u64,
+    reviewed_control_hash: Sha256Hex,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    reason: Option<ReasonText>,
+    #[serde(default)]
+    confirmation: Option<ConfirmationProof>,
+    payload: serde_json::Value,
+}
+
+impl<'de> Deserialize<'de> for CommandRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawCommandRequest::deserialize(deserializer)?;
+        if serde_json::to_vec(&raw.payload)
+            .map_err(serde::de::Error::custom)?
+            .len()
+            > MAX_COMMAND_PAYLOAD_BYTES
+        {
+            return Err(serde::de::Error::custom("payload-too-large"));
+        }
+        if raw.command_type.forbids_reason() && raw.reason.is_some() {
+            return Err(serde::de::Error::custom("reason-forbidden"));
+        }
+        let payload = CommandPayload::from_value(raw.command_type, raw.payload)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            command_id: raw.command_id,
+            command_type: raw.command_type,
+            reviewed_control_version: raw.reviewed_control_version,
+            reviewed_control_hash: raw.reviewed_control_hash,
+            reason: raw.reason,
+            confirmation: raw.confirmation,
+            payload,
+        })
+    }
+}
+
+impl Serialize for CommandRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("CommandRequest", 7)?;
+        state.serialize_field("command_id", &self.command_id)?;
+        state.serialize_field("command_type", &self.command_type)?;
+        state.serialize_field("reviewed_control_version", &self.reviewed_control_version)?;
+        state.serialize_field("reviewed_control_hash", &self.reviewed_control_hash)?;
+        state.serialize_field("reason", &self.reason)?;
+        state.serialize_field("confirmation", &self.confirmation)?;
+        state.serialize_field("payload", &self.payload)?;
+        state.end()
+    }
+}
+
+strict_struct!(CommandMessagePayload {
+    request: CommandRequest,
+});
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReceiptStatus {
+    Accepted,
+    Rejected,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandReceipt {
+    pub command_id: SafeId,
+    pub status: ReceiptStatus,
+    pub code: SafeId,
+    pub safe_message: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub accepted_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub finished_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub result: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+strict_struct!(CommandReceiptPayload {
+    receipt: CommandReceipt,
+});
 
 strict_struct!(ProtocolErrorPayload {
     code: SafeId,
