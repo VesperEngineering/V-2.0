@@ -77,7 +77,9 @@ def test_cache_is_encrypted_and_read_projection_never_authorizes(tmp_path: Path)
     assert cached.label == CACHE_LABEL == "STALE CACHE"
     assert cached.command_specs == ()
     assert all(cap.state is CapabilityState.DISABLED for cap in cached.capabilities)
-    assert all(cap.reason == "Cached state cannot authorize actions." for cap in cached.capabilities)
+    assert all(
+        cap.reason == "Cached state cannot authorize actions." for cap in cached.capabilities
+    )
     assert cached.snapshot.portfolio.freshness is Freshness.STALE
     assert cached.snapshot.portfolio.error == "Cached state; connect for current data."
     assert cached.snapshot.shell.header.qwen_state == CACHE_LABEL
@@ -98,6 +100,15 @@ def test_missing_cache_returns_none(tmp_path: Path) -> None:
     cache = SnapshotCache(tmp_path / "missing.cache", protection=_Protection())
 
     assert cache.read_after_unlock() is None
+
+
+def test_production_gateway_uses_current_user_encrypted_snapshot_cache(tmp_path: Path) -> None:
+    from vesper.platform.tui.cli import _build_gateway
+
+    gateway = _build_gateway(tmp_path)
+
+    assert isinstance(gateway._snapshot_cache, SnapshotCache)
+    assert gateway._snapshot_cache._path == tmp_path / "snapshot-cache.dpapi"
 
 
 def test_wrong_user_and_corruption_fail_closed_without_plaintext(tmp_path: Path) -> None:

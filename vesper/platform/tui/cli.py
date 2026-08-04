@@ -37,6 +37,7 @@ from .projections.repository import RepositoryProjection
 from .projections.windows_system import WindowsSystemProjection
 from .snapshot import SnapshotBuilder
 from .search import GlobalSearchService
+from .snapshot_cache import SnapshotCache
 from .sqlite_ledger import TuiLedger
 from .stream import ProjectionLoop
 from .views import Freshness
@@ -97,6 +98,15 @@ def _serving_state_root(value: Path | None) -> Path:
     if selected != canonical:
         raise ValueError("state root must equal the canonical LocalAppData path")
     return canonical
+
+
+def _build_gateway(state_root: Path) -> Gateway:
+    """Build the production gateway with current-user encrypted startup cache."""
+
+    return Gateway(
+        state_root,
+        snapshot_cache=SnapshotCache(state_root / "snapshot-cache.dpapi"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,7 +497,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         state_root = _serving_state_root(args.state_root)
     except ValueError as error:
         parser.error(str(error))
-    gateway = Gateway(state_root)
+    gateway = _build_gateway(state_root)
     runtime = _build_projection_runtime(state_root, gateway)
     stop_event = threading.Event()
     coordinator: _GatewayCoordinator | None = None
