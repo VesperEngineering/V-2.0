@@ -9,7 +9,8 @@ use serde_json::{Value, json};
 use vesper_ratatui_console::ConsoleSnapshot;
 use vesper_ratatui_console::app::mouse_to_input;
 use vesper_ratatui_console::contract::{
-    Envelope, SearchResultPayload, WireSearchKind, WireSearchRecordType, WireSearchScreen,
+    CommandPayload, Envelope, SearchResultPayload, WireSearchKind, WireSearchRecordType,
+    WireSearchScreen,
 };
 use vesper_ratatui_console::input::InputEvent;
 use vesper_ratatui_console::layout::shell_layout;
@@ -37,6 +38,20 @@ fn snapshot_value() -> Value {
         .expect("read shared snapshot fixture"),
     )
     .expect("strict snapshot JSON")
+}
+
+fn note_enabled_snapshot_value() -> Value {
+    let mut value: Value = serde_json::from_slice(
+        &std::fs::read(repo_root().join("TUI testing/contracts/v1/controls_snapshot.json"))
+            .expect("read shared controls fixture"),
+    )
+    .expect("strict controls snapshot JSON");
+    value["shell"]["capabilities"] = json!([{
+        "capability_id": "note.add",
+        "state": "enabled",
+        "reason": null
+    }]);
+    value
 }
 
 fn snapshot(value: Value) -> ConsoleSnapshot {
@@ -870,7 +885,7 @@ fn active_search_renders_query_type_time_source_and_open_help() {
         "[STOCK]",
         "ENTITY AAPL",
         "Private/Shared",
-        "context only",
+        "stored by the controller",
         "Esc Back",
         "2026-08-02 20:00:00 EDT",
     ] {
@@ -981,7 +996,7 @@ fn invalid_filter_stays_open_and_renders_a_plain_error() {
 }
 
 #[test]
-fn private_or_shared_note_editor_creates_context_only_draft_without_client_action() {
+fn private_or_shared_note_editor_creates_a_governed_note_command() {
     let envelope: Envelope = serde_json::from_value(json!({
         "schema_version": 1,
         "message_id": "server:1",
@@ -989,7 +1004,7 @@ fn private_or_shared_note_editor_creates_context_only_draft_without_client_actio
         "state_version": 0,
         "timestamp_utc": "2026-08-03T00:00:00Z",
         "message_type": "snapshot",
-        "payload": {"snapshot": snapshot_value()},
+        "payload": {"snapshot": note_enabled_snapshot_value()},
     }))
     .unwrap();
     let mut state = AppState::controller();
@@ -1016,13 +1031,23 @@ fn private_or_shared_note_editor_creates_context_only_draft_without_client_actio
         state.handle(InputEvent::Char(character));
     }
     let actions = state.handle(InputEvent::Enter);
-    assert!(actions.is_empty(), "notes must not become client commands");
-    let note = state.pending_note().expect("context note draft");
-    assert_eq!(note.target_type, "stock");
-    assert_eq!(note.target_id, "AAPL");
-    assert_eq!(note.body, "Watch earnings risk");
-    assert_eq!(note.visibility, NoteVisibility::Shared);
-    assert!(note.context_only);
+    let [ClientAction::Command(command)] = actions.as_slice() else {
+        panic!("one governed note command expected")
+    };
+    let CommandPayload::NoteAdd(note) = &command.payload else {
+        panic!("note payload expected")
+    };
+    assert_eq!(
+        note.target_type,
+        vesper_ratatui_console::contract::NoteTargetType::Stock
+    );
+    assert_eq!(note.target_id.as_str(), "AAPL");
+    assert_eq!(note.body.as_str(), "Watch earnings risk");
+    assert_eq!(
+        note.visibility,
+        vesper_ratatui_console::contract::NoteVisibility::Shared
+    );
+    assert!(command.confirmation.is_none());
 }
 
 #[test]
@@ -1187,7 +1212,7 @@ fn browse_mouse_click_opens_the_clicked_agent_card() {
     state.handle(InputEvent::Up);
     assert_eq!(state.screen_state().selected_id.as_deref(), Some("work:1"));
 
-    let area = Rect::new(0, 0, 140, 40);
+    let area = Rect::new(0, 0, 140, 50);
     let body = shell_layout(area, state.display_mode()).body;
     let second_card = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -1366,7 +1391,7 @@ fn mouse_hit_map_covers_filter_note_detail_and_back_controls() {
     let area = Rect::new(0, 0, 120, 36);
     let mut state = AppState::controller();
     state
-        .reduce(snapshot_envelope(1, 0, snapshot_value()))
+        .reduce(snapshot_envelope(1, 0, note_enabled_snapshot_value()))
         .unwrap();
     state.handle(InputEvent::Char('2'));
     state.handle(InputEvent::Up);

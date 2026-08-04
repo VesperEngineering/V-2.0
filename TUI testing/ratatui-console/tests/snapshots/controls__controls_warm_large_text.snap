@@ -1,0 +1,274 @@
+---
+source: tests/controls.rs
+expression: "visual_state_matrix(Theme::WarmWhite, DisplayMode::LargeText, 100, 30)"
+---
+THEME WarmWhite | MODE LargeText
+=== NONE ===
+
+
+     ┌CONFIRM ACTION──────────────────────────────────────────────────────────────────────────┐
+     │Action: note.add                                                                        │
+     │Level: NONE | READY                                                                     │
+     │                                                                                        │
+     │> [CANCEL]   [CONFIRM]                                                                  │
+     │Left/Right select | Enter apply | Esc cancel                                            │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                       [ CANCEL ]                    [ CONTINUE ]                       │
+     └────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+=== CONFIRM ===
+
+
+     ┌CONFIRM ACTION──────────────────────────────────────────────────────────────────────────┐
+     │Action: approval.approve                                                                │
+     │Level: CONFIRM | FIRST STEP                                                             │
+     │                                                                                        │
+     │> [CANCEL]   [CONFIRM]                                                                  │
+     │Left/Right select | Enter apply | Esc cancel                                            │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                       [ CANCEL ]                    [ CONTINUE ]                       │
+     └────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+=== DOUBLE CONFIRM ===
+
+
+     ┌CONFIRM ACTION──────────────────────────────────────────────────────────────────────────┐
+     │Action: trading.emergency-stop                                                          │
+     │Level: DOUBLE CONFIRM | FIRST STEP                                                      │
+     │                                                                                        │
+     │> [CANCEL]   [CONFIRM]                                                                  │
+     │Left/Right select | Enter apply | Esc cancel                                            │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                       [ CANCEL ]                    [ CONTINUE ]                       │
+     └────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+=== TYPED LIVE ===
+
+
+     ┌CONFIRM ACTION──────────────────────────────────────────────────────────────────────────┐
+     │Action: mode.enable-live                                                                │
+     │Level: TYPE ENABLE LIVE | FIRST STEP                                                    │
+     │Type exactly: ENABLE LIVE | Input:                                                      │
+     │                                                                                        │
+     │> [CANCEL]   [CONFIRM]                                                                  │
+     │Left/Right select | Enter apply | Esc cancel                                            │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                       [ CANCEL ]                    [ CONTINUE ]                       │
+     └────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+=== DISABLED REASON ===
+
+
+     ┌CONTROL UNAVAILABLE─────────────────────────────────────────────────────────────────────┐
+     │Restore                                                                                 │
+     │                                                                                        │
+     │Reason: Validated restore preview is unavailable.                                       │
+     │                                                                                        │
+     │Enter or Esc closes                                                                     │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                        [ CLOSE ]                                       │
+     └────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+=== STALE REJECTED ===
+
+
+     ┌CONTROL UNAVAILABLE─────────────────────────────────────────────────────────────────────┐
+     │Controls Updated                                                                        │
+     │                                                                                        │
+     │Reason: Controller controls changed. Review the action again.                           │
+     │                                                                                        │
+     │Enter or Esc closes                                                                     │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                                                                        │
+     │                                        [ CLOSE ]                                       │
+     └────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+=== RECEIPT REJECTED ===
+┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE                                   │
+│TIME 2026-08-02 20:00:00 EDT | MARKET Unavailable                                                 │
+│REGIME Unavailable | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE                               │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                                      │
+│ALERTS NONE / OPEN 0 | AGENT UNAVAILABLE | QWEN Unavailable...                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────────────────────────┐
+│1 Imp | 2 Port | 3 Ord | 4 Agt | 5 Mod | 6 Time | [7 Risk] | 8 Data | 9 Mem | 0 Sys               │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────────────────────────┐
+│[OK] HEALTHY - No active alerts.                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
+│> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Agent input is not connected to the controller yet.                                 │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────┐
+│: Actions | Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+=== RECEIPT RUNNING ===
+┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE                                   │
+│TIME 2026-08-02 20:00:00 EDT | MARKET Unavailable                                                 │
+│REGIME Unavailable | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE                               │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                                      │
+│ALERTS NONE / OPEN 0 | AGENT UNAVAILABLE | QWEN Unavailable...                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────────────────────────┐
+│1 Imp | 2 Port | 3 Ord | 4 Agt | 5 Mod | 6 Time | [7 Risk] | 8 Data | 9 Mem | 0 Sys               │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────────────────────────┐
+│[OK] HEALTHY - No active alerts.                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
+│> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Agent input is not connected to the controller yet.                                 │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────┐
+│: Actions | Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+=== RECEIPT COMPLETED ===
+┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE                                   │
+│TIME 2026-08-02 20:00:00 EDT | MARKET Unavailable                                                 │
+│REGIME Unavailable | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE                               │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                                      │
+│ALERTS NONE / OPEN 0 | AGENT UNAVAILABLE | QWEN Unavailable...                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────────────────────────┐
+│1 Imp | 2 Port | 3 Ord | 4 Agt | 5 Mod | 6 Time | [7 Risk] | 8 Data | 9 Mem | 0 Sys               │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────────────────────────┐
+│[OK] HEALTHY - No active alerts.                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
+│> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Agent input is not connected to the controller yet.                                 │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────┐
+│: Actions | Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+=== RECEIPT FAILED ===
+┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE                                   │
+│TIME 2026-08-02 20:00:00 EDT | MARKET Unavailable                                                 │
+│REGIME Unavailable | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE                               │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                                      │
+│ALERTS NONE / OPEN 0 | AGENT UNAVAILABLE | QWEN Unavailable...                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────────────────────────┐
+│1 Imp | 2 Port | 3 Ord | 4 Agt | 5 Mod | 6 Time | [7 Risk] | 8 Data | 9 Mem | 0 Sys               │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────────────────────────┐
+│[OK] HEALTHY - No active alerts.                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
+│> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Agent input is not connected to the controller yet.                                 │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────┐
+│: Actions | Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+=== VIEWER ===
+┌RUNTIME & MARKET - READ ONLY──────────────────────────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE                                   │
+│TIME 2026-08-02 20:00:00 EDT | MARKET Unavailable                                                 │
+│REGIME Unavailable | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE                               │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                                      │
+│ALERTS NONE / OPEN 0 | AGENT UNAVAILABLE | QWEN Unavailable...                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────────────────────────┐
+│[1 Imp] | 2 Port | 3 Ord | 4 Agt | 5 Mod | 6 Time | 7 Risk | 8 Data | 9 Mem | 0 Sys               │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────────────────────────┐
+│[OK] HEALTHY - No active alerts.                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌HOLDINGS───────────────────────────────────────────────────────┐┌IMPACT FEED──────────────────────┐
+│  Symbol          Current        Proposed        Approved      ││[>] ACTIVE 2026-08-02 20:00:00   │
+│                                                               ││EDT  AAPL review started         │
+│  AAPL            10.00%         11.00%          -             ││                                 │
+│                                                               │└─────────────────────────────────┘
+│                                                               │┌AGENT WORK───────────────────────┐
+│                                                               ││Agent    Task         Stage   P  │
+│                                                               ││                                 │
+└───────────────────────────────────────────────────────────────┘└─────────────────────────────────┘
+┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────┐
+│UNAVAILABLE - Agent input is not connected to the controller yet.                                 │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────┐
+│: Actions | Up/Down Holdings | o Open | q Close | f Filter                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘

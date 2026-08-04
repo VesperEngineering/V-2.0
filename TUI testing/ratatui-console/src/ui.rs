@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use windows_sys::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, FILETIME, SYSTEMTIME};
 use windows_sys::Win32::System::Time::{
@@ -12,8 +12,11 @@ use windows_sys::Win32::System::Time::{
     SystemTimeToTzSpecificLocalTimeEx,
 };
 
-use crate::contract::{AlertSeverity, Freshness, OperatingMode, UtcTimestamp};
-use crate::layout::{ViewportClass, shell_layout};
+use crate::command::TrackedCommandState;
+use crate::confirm::{ConfirmationStep, Selection};
+use crate::contract::{AlertSeverity, ConfirmationLevel, Freshness, OperatingMode, UtcTimestamp};
+use crate::controls::{ButtonState, ControlMenu, ControlMenuEntry, ControlOverlay};
+use crate::layout::{DisplayMode, ViewportClass, shell_layout};
 use crate::screens::agents::render_agents;
 use crate::screens::data::render_data;
 use crate::screens::detail::render_direct_detail;
@@ -33,6 +36,7 @@ const EASTERN_TIME_ZONE: &str = "Eastern Standard Time";
 const AGENT_INPUT_UNAVAILABLE: &str =
     "UNAVAILABLE - Agent input is not connected to the controller yet.";
 static EASTERN_ZONE: OnceLock<Option<DYNAMIC_TIME_ZONE_INFORMATION>> = OnceLock::new();
+pub(crate) const CONTROL_CELL_WIDTH: u16 = 26;
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let palette = state.theme().palette();
@@ -48,14 +52,27 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     render_header(frame, layout.header, state, palette);
     render_navigation(frame, layout.navigation, state, palette);
     render_alerts(frame, layout.alerts, state, palette);
+    let show_action_bar = state.snapshot.is_some()
+        && state.search_detail().is_none()
+        && matches!(
+            state.mode,
+            LocalMode::Browse | LocalMode::Open | LocalMode::Menu
+        );
+    let (body, action_bar) = if show_action_bar {
+        let (body, controls) = split_control_area(layout.body, state.display_mode());
+        (body, Some(controls))
+    } else {
+        (layout.body, None)
+    };
+    let inline_actions = action_bar.is_some_and(|area| area.height == 0);
     if state.mode == LocalMode::Search {
-        render_search(frame, layout.body, state, palette);
+        render_search(frame, body, state, palette);
     } else if state.mode == LocalMode::Filter {
-        render_filter(frame, layout.body, state, palette);
+        render_filter(frame, body, state, palette);
     } else if state.mode == LocalMode::NoteEditor {
-        render_note_editor(frame, layout.body, state, palette);
+        render_note_editor(frame, body, state, palette);
     } else if let Some(result) = state.search_detail() {
-        render_search_detail(frame, layout.body, state, result, palette);
+        render_search_detail(frame, body, state, result, palette);
     } else if state.mode == LocalMode::Open
         && state.screen_state().detail_open
         && matches!(
@@ -69,21 +86,295 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         )
     {
         if let Some(snapshot) = state.snapshot.as_ref() {
-            render_direct_detail(
-                frame,
-                layout.body,
-                snapshot,
-                state.screen,
-                &state.screen_state(),
-            );
+            render_direct_detail(frame, body, snapshot, state.screen, &state.screen_state());
         } else {
-            render_screen(frame, layout.body, layout.viewport, state, palette);
+            render_screen(frame, body, layout.viewport, state, palette);
         }
     } else {
-        render_screen(frame, layout.body, layout.viewport, state, palette);
+        render_screen(frame, body, layout.viewport, state, palette);
+    }
+    if let Some(area) = action_bar
+        && area.height > 0
+    {
+        render_action_bar(frame, area, state, palette);
     }
     render_agent_input(frame, layout.input, palette);
-    render_footer(frame, layout.footer, state, palette);
+    render_footer(frame, layout.footer, state, palette, inline_actions);
+    if let Some(overlay) = state.control_overlay() {
+        render_control_overlay(frame, layout.body, overlay, palette);
+    }
+}
+
+#[doc(hidden)]
+pub fn split_control_area(area: Rect, mode: DisplayMode) -> (Rect, Rect) {
+    let (full_height, compact_height, minimum_body_height) = match mode {
+        DisplayMode::Compact => (6, 3, 9),
+        DisplayMode::Standard => (7, 4, 11),
+        DisplayMode::LargeText => (9, 5, 12),
+    };
+    let height = if area.height >= full_height + minimum_body_height {
+        full_height
+    } else if area.height >= compact_height + minimum_body_height {
+        compact_height
+    } else if mode == DisplayMode::LargeText {
+        0
+    } else {
+        u16::from(area.height > 0)
+    };
+    let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).split(area);
+    (rows[0], rows[1])
+}
+
+#[doc(hidden)]
+pub fn control_overlay_area(area: Rect) -> Rect {
+    let width = area.width.saturating_mul(9) / 10;
+    let height = area.height.saturating_mul(4) / 5;
+    Rect {
+        x: area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        y: area
+            .y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    }
+}
+
+#[doc(hidden)]
+pub fn control_grid_index(area: Rect, column: u16, row: u16, entry_count: usize) -> Option<usize> {
+    let inner_x = area.x.saturating_add(1);
+    let inner_y = area.y.saturating_add(1);
+    if column < inner_x
+        || row < inner_y
+        || column >= area.right().saturating_sub(1)
+        || row >= area.bottom().saturating_sub(1)
+    {
+        return None;
+    }
+    let columns = usize::from(area.width.saturating_sub(2) / CONTROL_CELL_WIDTH).max(1);
+    let column_index = usize::from(column.saturating_sub(inner_x) / CONTROL_CELL_WIDTH);
+    let row_index = usize::from(row.saturating_sub(inner_y));
+    let index = row_index
+        .saturating_mul(columns)
+        .saturating_add(column_index);
+    (index < entry_count).then_some(index)
+}
+
+fn render_action_bar(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+    let Some(menu) = state.visible_control_menu() else {
+        return;
+    };
+    if area.height < 3 {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "CONTROLS: click or : menu | {} actions",
+                menu.entries().len()
+            ))
+            .style(base_style(palette)),
+            area,
+        );
+        return;
+    }
+    let inner_height = usize::from(area.height.saturating_sub(2));
+    let mut lines = control_grid_lines(&menu, area.width.saturating_sub(2), None);
+    if lines.len() < inner_height
+        && let Some(summary) = state.command_summaries().last()
+    {
+        lines.push(Line::from(format!(
+            "Receipt {} {}{} | Timeline: {}",
+            sanitize_text(&summary.command_id),
+            tracked_state(summary.state),
+            summary
+                .safe_message
+                .as_deref()
+                .map(|message| format!(" - {}", sanitize_text(message)))
+                .unwrap_or_default(),
+            sanitize_text(&summary.command_id),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(palette))
+            .block(panel("CONTROLS - click or : menu", palette)),
+        area,
+    );
+}
+
+fn control_grid_lines(
+    menu: &ControlMenu,
+    width: u16,
+    selected: Option<usize>,
+) -> Vec<Line<'static>> {
+    let columns = usize::from(width / CONTROL_CELL_WIDTH).max(1);
+    menu.entries()
+        .chunks(columns)
+        .enumerate()
+        .map(|(row_index, entries)| {
+            let spans = entries
+                .iter()
+                .enumerate()
+                .map(|(column_index, entry)| {
+                    let index = row_index * columns + column_index;
+                    let marker = if selected == Some(index) { ">" } else { " " };
+                    let (status, label) = match entry {
+                        ControlMenuEntry::Command(button) => {
+                            let status = match button.state {
+                                ButtonState::Enabled => "[ ]",
+                                ButtonState::Disabled { .. } => "[x]",
+                                ButtonState::Hidden => "[-]",
+                            };
+                            (status, button.label.as_str())
+                        }
+                        ControlMenuEntry::Local { label, .. } => ("[ ]", *label),
+                    };
+                    let value = bounded_text(
+                        &format!("{marker}{status} {label}"),
+                        usize::from(CONTROL_CELL_WIDTH.saturating_sub(1)),
+                    );
+                    Span::raw(pad_to_width(value, usize::from(CONTROL_CELL_WIDTH)))
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+#[doc(hidden)]
+pub fn render_control_overlay(
+    frame: &mut Frame<'_>,
+    body: Rect,
+    overlay: &ControlOverlay,
+    palette: Palette,
+) {
+    let area = control_overlay_area(body);
+    frame.render_widget(Clear, area);
+    let (title, lines) = match overlay {
+        ControlOverlay::Menu(menu) => {
+            let mut lines =
+                control_grid_lines(menu, area.width.saturating_sub(2), Some(menu.selected()));
+            lines.push(Line::from("Arrows select | Enter open | Esc close"));
+            ("COMMAND MENU", lines)
+        }
+        ControlOverlay::DisabledReason { label, reason } => (
+            "CONTROL UNAVAILABLE",
+            vec![
+                Line::from(sanitize_text(label)),
+                Line::default(),
+                Line::from(format!("Reason: {}", sanitize_text(reason))),
+                Line::default(),
+                Line::from("Enter or Esc closes"),
+            ],
+        ),
+        ControlOverlay::Confirmation { label, state } => {
+            let level = match state.level() {
+                ConfirmationLevel::None => "NONE",
+                ConfirmationLevel::Confirm => "CONFIRM",
+                ConfirmationLevel::DoubleConfirm => "DOUBLE CONFIRM",
+                ConfirmationLevel::TypedLive => "TYPE ENABLE LIVE",
+            };
+            let step = match state.step() {
+                ConfirmationStep::First => "FIRST STEP",
+                ConfirmationStep::Second => "SECOND STEP",
+                ConfirmationStep::Complete => "READY",
+            };
+            let mut lines = vec![
+                Line::from(format!("Action: {}", sanitize_text(label))),
+                Line::from(format!("Level: {level} | {step}")),
+            ];
+            if state.level() == ConfirmationLevel::TypedLive {
+                lines.push(Line::from(format!(
+                    "Type exactly: ENABLE LIVE | Input: {}",
+                    sanitize_text(state.typed_text())
+                )));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(match state.selection() {
+                Selection::Cancel => "> [CANCEL]   [CONFIRM]",
+                Selection::Confirm => "  [CANCEL] > [CONFIRM]",
+            }));
+            lines.push(Line::from("Left/Right select | Enter apply | Esc cancel"));
+            ("CONFIRM ACTION", lines)
+        }
+        ControlOverlay::ReasonForm(form) => {
+            let mut lines = vec![Line::from(format!(
+                "Action: {} | Run {} | Checkpoint {}",
+                sanitize_text(&form.button.label),
+                sanitize_text(&form.run_id),
+                sanitize_text(&form.checkpoint_id)
+            ))];
+            lines.extend(
+                form.quick_reasons
+                    .iter()
+                    .enumerate()
+                    .map(|(index, reason)| {
+                        Line::from(format!(
+                            "{} {}",
+                            if index == form.selected { ">" } else { " " },
+                            sanitize_text(reason)
+                        ))
+                    }),
+            );
+            lines.push(Line::from(format!(
+                "Optional note: {}",
+                sanitize_text(&form.note)
+            )));
+            lines.push(Line::from(
+                "Arrows choose | Type note | Enter continue | Esc cancel",
+            ));
+            ("REVIEW REASON", lines)
+        }
+        ControlOverlay::AgentEnqueueForm(form) => (
+            "ENQUEUE AGENT WORK",
+            vec![
+                Line::from(format!(
+                    "Routed agent: {}",
+                    sanitize_text(form.route.selected_agent())
+                )),
+                Line::from(format!("Why: {}", sanitize_text(form.route.reason()))),
+                Line::from(format!("Title: {}", sanitize_text(&form.title()))),
+                Line::from(format!("Priority: {}", form.priority)),
+                Line::from(format!("Objective: {}", sanitize_text(&form.objective))),
+                Line::from("Left/Right route | Up/Down priority | Enter continue | Esc cancel"),
+            ],
+        ),
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(palette))
+            .wrap(Wrap { trim: true })
+            .block(panel(title, palette)),
+        area,
+    );
+    if !matches!(overlay, ControlOverlay::Menu(_)) && area.height >= 3 {
+        let footer = match overlay {
+            ControlOverlay::DisabledReason { .. } => "[ CLOSE ]",
+            ControlOverlay::Confirmation { .. }
+            | ControlOverlay::ReasonForm(_)
+            | ControlOverlay::AgentEnqueueForm(_) => "[ CANCEL ]                    [ CONTINUE ]",
+            ControlOverlay::Menu(_) => unreachable!("menu footer is handled above"),
+        };
+        frame.render_widget(
+            Paragraph::new(footer).alignment(ratatui::layout::Alignment::Center),
+            Rect {
+                x: area.x.saturating_add(1),
+                y: area.bottom().saturating_sub(2),
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+        );
+    }
+}
+
+fn tracked_state(state: TrackedCommandState) -> &'static str {
+    match state {
+        TrackedCommandState::Prepared => "PREPARED",
+        TrackedCommandState::InFlight => "IN FLIGHT",
+        TrackedCommandState::Accepted => "ACCEPTED",
+        TrackedCommandState::Running => "RUNNING",
+        TrackedCommandState::Completed => "COMPLETED",
+        TrackedCommandState::Rejected => "REJECTED",
+        TrackedCommandState::Failed => "FAILED",
+        TrackedCommandState::Cancelled => "CANCELLED",
+    }
 }
 
 pub fn format_eastern_time(timestamp: &UtcTimestamp) -> String {
@@ -528,12 +819,12 @@ fn render_note_editor(frame: &mut Frame<'_>, area: Rect, state: &AppState, palet
             sanitize_text(target_id)
         )),
         Line::from(format!("Visibility: {}", state.note_visibility().as_str())),
-        Line::from("Shared means agents may read it as context only."),
-        Line::from("This note never becomes an agent command."),
+        Line::from("Shared means agents may read it as context."),
+        Line::from("The controller stores this note after you press Enter."),
         Line::default(),
         Line::from(format!("Note: {}", sanitize_text(state.note_input()))),
         Line::default(),
-        Line::from("Left/Right Private/Shared | Enter Keep Draft | Esc Cancel"),
+        Line::from("Left/Right Private/Shared | Enter Store | Esc Cancel"),
     ];
     frame.render_widget(
         Paragraph::new(lines)
@@ -609,7 +900,7 @@ fn search_detail_lines(
     ];
     if state.note_editor_target().is_some() {
         lines.push(Line::from(
-            "n Add Private/Shared note - context only; never an agent command.",
+            "n Add Private/Shared note - stored by the controller.",
         ));
     }
     if result.context_only {
@@ -641,7 +932,13 @@ fn render_agent_input(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
     );
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+fn render_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    palette: Palette,
+    inline_actions: bool,
+) {
     let text = if state.mode == LocalMode::Search {
         "Search | Type Query | Up/Down Select | Enter Open | Esc Close"
     } else if state.mode == LocalMode::Filter {
@@ -678,6 +975,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: P
         }
     } else {
         "1-9,0 Screens | / Search | q Close TUI only"
+    };
+    let text = if inline_actions {
+        format!(": Actions | {text}")
+    } else {
+        text.to_owned()
     };
     frame.render_widget(
         Paragraph::new(text)

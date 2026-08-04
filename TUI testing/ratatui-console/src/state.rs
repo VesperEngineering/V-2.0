@@ -1,11 +1,19 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Instant;
 
 use ratatui::layout::Rect;
 
+use crate::command::{CommandDraft, CommandTracker, PrepareOutcome, TrackedCommandSummary};
+use crate::confirm::{Selection, begin_confirmation, submit_confirmation};
 use crate::contract::{
-    AccessState as WireAccessState, AgentStage, ConsoleSnapshot, Envelope, Freshness, LeaseStatus,
-    MemoryStatus, Message, PasswordString, SearchRequestPayload,
+    AccessState as WireAccessState, AgentStage, CommandReceipt, CommandRequest, CommandType,
+    ConsoleSnapshot, Envelope, Freshness, LeaseStatus, MemoryStatus, Message, PasswordString,
+    SearchRequestPayload,
+};
+use crate::controls::{
+    AgentEnqueueForm, AgentRouteDraft, ButtonState, ControlButton, ControlContext, ControlMenu,
+    ControlMenuEntry, ControlOverlay, LocalControl, ReasonForm, build_control_menu,
 };
 use crate::detail::detail_area;
 use crate::input::InputEvent;
@@ -98,13 +106,14 @@ pub enum AuthRequest {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum ClientAction {
     Authenticate(AuthRequest),
     RequestLease,
     RequestLock,
     RequestSnapshot,
     Search(SearchRequestPayload),
+    Command(CommandRequest),
     SubmitInput(String),
     CloseTui,
     Reconnect,
@@ -199,6 +208,15 @@ struct ViewKey {
     pending_note: Option<ContextNoteDraft>,
     show_search_detail: bool,
     search_return_screen: Option<Screen>,
+    control_epoch: u64,
+}
+
+struct ReceiptSequenceEvidence(CommandReceipt);
+
+impl fmt::Debug for ReceiptSequenceEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted receipt sequence evidence>")
+    }
 }
 
 #[derive(Debug)]
@@ -232,6 +250,11 @@ pub struct AppState {
     show_search_detail: bool,
     search_return_screen: Option<Screen>,
     detail_viewport: Option<Rect>,
+    control_overlay: Option<ControlOverlay>,
+    note_command: Option<ControlButton>,
+    command_tracker: CommandTracker,
+    receipt_sequence_evidence: BTreeMap<u64, ReceiptSequenceEvidence>,
+    control_epoch: u64,
 }
 
 impl AppState {
@@ -288,6 +311,11 @@ impl AppState {
             show_search_detail: false,
             search_return_screen: None,
             detail_viewport: None,
+            control_overlay: None,
+            note_command: None,
+            command_tracker: CommandTracker::default(),
+            receipt_sequence_evidence: BTreeMap::new(),
+            control_epoch: 0,
         }
     }
 
@@ -331,7 +359,17 @@ impl AppState {
     }
 
     pub fn set_terminal_area(&mut self, area: Rect) {
-        let viewport = shell_layout(area, self.display_mode()).body;
+        let shell_body = shell_layout(area, self.display_mode()).body;
+        let viewport = if self.snapshot.is_some()
+            && self.search_detail().is_none()
+            && matches!(
+                self.mode,
+                LocalMode::Browse | LocalMode::Open | LocalMode::Menu
+            ) {
+            crate::ui::split_control_area(shell_body, self.display_mode()).0
+        } else {
+            shell_body
+        };
         if self.detail_viewport != Some(viewport) {
             self.detail_viewport = Some(viewport);
             if self.mode == LocalMode::Open && self.screen_state.detail_open {
@@ -409,6 +447,32 @@ impl AppState {
 
     pub fn preferences_unavailable(&self) -> bool {
         self.preferences_unavailable
+    }
+
+    pub fn control_overlay(&self) -> Option<&ControlOverlay> {
+        self.control_overlay.as_ref()
+    }
+
+    pub fn control_menu(&self) -> Option<&ControlMenu> {
+        match self.control_overlay.as_ref() {
+            Some(ControlOverlay::Menu(menu)) => Some(menu),
+            _ => None,
+        }
+    }
+
+    pub fn visible_control_menu(&self) -> Option<ControlMenu> {
+        let snapshot = self.snapshot.as_ref()?;
+        Some(build_control_menu(
+            snapshot,
+            self.access,
+            self.screen,
+            self.screen_state.selected_kind,
+            self.screen_state.selected_id.as_deref(),
+        ))
+    }
+
+    pub fn command_summaries(&self) -> Vec<TrackedCommandSummary> {
+        self.command_tracker.summaries()
     }
 
     pub fn apply_loaded_preferences(&mut self, loaded: LoadedPreferences) {
@@ -491,10 +555,27 @@ impl AppState {
         if envelope.sequence == 0 {
             return Err(self.fail_closed("sequence", "Server sequence must start at one."));
         }
+        if let Message::CommandReceipt(payload) = &envelope.message
+            && let Some(previous) = self.receipt_sequence_evidence.get(&envelope.sequence)
+        {
+            if previous.0 == payload.receipt {
+                return Ok(ReduceOutcome::Ignored);
+            }
+            return Err(self.fail_closed(
+                "command-receipt",
+                "Duplicate receipt sequence differs from the reduced receipt.",
+            ));
+        }
         let Some(expected_sequence) = self.last_sequence.checked_add(1) else {
             return Err(self.fail_closed("sequence", "Server sequence is exhausted."));
         };
         if envelope.sequence < expected_sequence {
+            if matches!(&envelope.message, Message::CommandReceipt(_)) {
+                return Err(self.fail_closed(
+                    "command-receipt",
+                    "Duplicate receipt sequence has no exact reduced evidence.",
+                ));
+            }
             return Ok(ReduceOutcome::Ignored);
         }
         if envelope.sequence != expected_sequence {
@@ -520,6 +601,7 @@ impl AppState {
                 | Message::SearchResults(_)
                 | Message::Event(_)
                 | Message::Pong(_) => {
+                    self.cancel_unsent_controls_for_resync();
                     self.awaiting_snapshot = true;
                     self.snapshot = None;
                     self.search_state.clear_results();
@@ -532,6 +614,22 @@ impl AppState {
             };
         }
         self.last_sequence = envelope.sequence;
+
+        if (self.lock_pending || matches!(self.phase, SessionPhase::AwaitingAuth { .. }))
+            && let Message::CommandReceipt(payload) = &envelope.message
+        {
+            let receipt = payload.receipt.clone();
+            if self.command_tracker.apply_receipt(receipt.clone()).is_err() {
+                return Err(self.fail_closed(
+                    "command-receipt",
+                    "Command receipt does not match an in-flight command.",
+                ));
+            }
+            self.receipt_sequence_evidence
+                .insert(envelope.sequence, ReceiptSequenceEvidence(receipt));
+            self.control_epoch = self.control_epoch.saturating_add(1);
+            return Ok(ReduceOutcome::Changed);
+        }
 
         if self.lock_pending {
             return match envelope.message {
@@ -702,6 +800,7 @@ impl AppState {
                 self.state_version = reduced.snapshot.shell.state_version;
                 let snapshot = reduced.snapshot.clone();
                 self.snapshot = Some(snapshot);
+                self.invalidate_stale_control_review();
                 if outcome == SnapshotReduceOutcome::Changed {
                     self.invalidate_search_results();
                 }
@@ -728,6 +827,7 @@ impl AppState {
                         self.state_version = reduced.snapshot.shell.state_version;
                         let snapshot = reduced.snapshot.clone();
                         self.snapshot = Some(snapshot);
+                        self.invalidate_stale_control_review();
                         self.invalidate_search_results();
                         self.show_search_detail = false;
                         self.awaiting_snapshot = false;
@@ -735,6 +835,7 @@ impl AppState {
                     }
                     Ok(SnapshotReduceOutcome::Ignored) => Ok(ReduceOutcome::Ignored),
                     Ok(SnapshotReduceOutcome::ResnapshotRequired) | Err(_) => {
+                        self.cancel_unsent_controls_for_resync();
                         self.snapshot = None;
                         self.search_state.clear_results();
                         self.awaiting_snapshot = true;
@@ -796,6 +897,7 @@ impl AppState {
                 }
                 if payload.indexed_state_version > self.state_version {
                     self.search_state.await_resnapshot(request_id);
+                    self.cancel_unsent_controls_for_resync();
                     self.snapshot = None;
                     self.show_search_detail = false;
                     self.awaiting_snapshot = true;
@@ -826,10 +928,25 @@ impl AppState {
                     Ok(ReduceOutcome::Ignored)
                 }
             }
-            Message::CommandReceipt(_) => Err(self.fail_closed(
-                "state",
-                "Command receipt arrived before command controls were initialized.",
-            )),
+            Message::CommandReceipt(payload) => {
+                if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
+                    return Err(
+                        self.fail_closed("state", "Command receipt arrived before authentication.")
+                    );
+                }
+                self.observe_presentation_sequence(envelope.sequence)?;
+                let receipt = payload.receipt;
+                if self.command_tracker.apply_receipt(receipt.clone()).is_err() {
+                    return Err(self.fail_closed(
+                        "command-receipt",
+                        "Command receipt does not match an in-flight command.",
+                    ));
+                }
+                self.receipt_sequence_evidence
+                    .insert(envelope.sequence, ReceiptSequenceEvidence(receipt));
+                self.control_epoch = self.control_epoch.saturating_add(1);
+                Ok(ReduceOutcome::Changed)
+            }
             Message::ClientHello(_)
             | Message::AuthSetup(_)
             | Message::AuthUnlock(_)
@@ -896,8 +1013,15 @@ impl AppState {
                 Vec::new()
             };
         }
+        if self.control_overlay.is_some() {
+            return self.handle_control_input(event);
+        }
 
         match event {
+            InputEvent::ActivateControl(index) => {
+                self.open_control_menu();
+                return self.activate_control(index);
+            }
             InputEvent::TakeControl
                 if self.access == AccessState::Viewer && !self.lease_pending =>
             {
@@ -925,6 +1049,32 @@ impl AppState {
 
     pub fn fail_connection(&mut self) {
         self.enter_protocol_lockout();
+        self.dirty = true;
+    }
+
+    pub(crate) fn begin_connection(&mut self) {
+        self.access = AccessState::Locked;
+        self.phase = SessionPhase::AwaitingServerHello;
+        self.snapshot = None;
+        self.snapshot_reducer = SnapshotReducer::default();
+        self.search_state = SearchState::default();
+        self.state_version = 0;
+        self.last_sequence = 0;
+        self.receipt_sequence_evidence.clear();
+        self.awaiting_snapshot = false;
+        self.lock_pending = false;
+        self.lease_pending = false;
+        self.mode = LocalMode::Browse;
+        self.clear_auth();
+        self.local_input.clear();
+        self.filter_error = None;
+        self.pending_note = None;
+        self.control_overlay = None;
+        self.note_command = None;
+        self.command_tracker.cancel_prepared_commands();
+        self.show_search_detail = false;
+        self.search_return_screen = None;
+        self.control_epoch = self.control_epoch.saturating_add(1);
         self.dirty = true;
     }
 
@@ -957,6 +1107,7 @@ impl AppState {
             pending_note: self.pending_note.clone(),
             show_search_detail: self.show_search_detail,
             search_return_screen: self.search_return_screen,
+            control_epoch: self.control_epoch,
         }
     }
 
@@ -1025,6 +1176,7 @@ impl AppState {
             if self.mode == LocalMode::NoteEditor {
                 self.mode = LocalMode::Open;
                 self.local_input.clear();
+                self.note_command = None;
             } else if self.mode == LocalMode::Open
                 && let Some(search_screen) = self.search_return_screen.take()
             {
@@ -1086,19 +1238,7 @@ impl AppState {
                     Vec::new()
                 }
                 InputEvent::Enter if self.mode == LocalMode::NoteEditor => {
-                    if !self.local_input.is_empty()
-                        && let Some((target_type, target_id)) = self.current_note_target()
-                    {
-                        self.pending_note = Some(ContextNoteDraft {
-                            target_type,
-                            target_id: target_id.to_owned(),
-                            body: std::mem::take(&mut self.local_input),
-                            visibility: self.note_visibility,
-                            context_only: true,
-                        });
-                        self.mode = LocalMode::Open;
-                    }
-                    Vec::new()
+                    return self.submit_note();
                 }
                 InputEvent::Enter if self.mode == LocalMode::AgentInput => {
                     let input = std::mem::take(&mut self.local_input);
@@ -1183,9 +1323,13 @@ impl AppState {
             'p' if self.screen == Screen::System => self.toggle_account_details_mask(),
             'o' => self.open_selected(),
             'n' if self.mode == LocalMode::Open && self.current_note_target().is_some() => {
-                self.mode = LocalMode::NoteEditor;
-                self.local_input.clear();
-                self.note_visibility = NoteVisibility::Private;
+                self.open_control_menu();
+                if let Some(index) = self
+                    .control_menu()
+                    .and_then(|menu| menu.command_index(CommandType::NoteAdd))
+                {
+                    return self.activate_control(index);
+                }
             }
             'e' if self.screen == Screen::Timeline => {
                 self.screen_state.show_all_events = !self.screen_state.show_all_events;
@@ -1207,7 +1351,7 @@ impl AppState {
                 self.local_input = format_filter_expression(self.search_state.filters(self.screen));
                 self.filter_error = None;
             }
-            ':' => self.mode = LocalMode::Menu,
+            ':' => self.open_control_menu(),
             '?' => self.mode = LocalMode::Help,
             'i' => self.mode = LocalMode::AgentInput,
             'q' => return vec![ClientAction::CloseTui],
@@ -1216,11 +1360,665 @@ impl AppState {
         Vec::new()
     }
 
+    fn open_control_menu(&mut self) {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        self.control_overlay = Some(ControlOverlay::Menu(build_control_menu(
+            snapshot,
+            self.access,
+            self.screen,
+            self.screen_state.selected_kind,
+            self.screen_state.selected_id.as_deref(),
+        )));
+        self.mode = LocalMode::Menu;
+        self.control_epoch = self.control_epoch.saturating_add(1);
+    }
+
+    fn handle_control_input(&mut self, event: InputEvent) -> Vec<ClientAction> {
+        if event == InputEvent::CancelControl {
+            return self.handle_control_input(InputEvent::Escape);
+        }
+        if event == InputEvent::ConfirmControl {
+            return match self.control_overlay.as_ref() {
+                Some(ControlOverlay::Confirmation { .. }) => {
+                    self.select_confirmation(Selection::Confirm);
+                    self.accept_confirmation()
+                }
+                Some(ControlOverlay::ReasonForm(_)) => self.submit_reason_form(),
+                Some(ControlOverlay::AgentEnqueueForm(_)) => self.submit_agent_form(),
+                Some(ControlOverlay::DisabledReason { .. }) => {
+                    self.close_control_overlay();
+                    Vec::new()
+                }
+                Some(ControlOverlay::Menu(_)) | None => Vec::new(),
+            };
+        }
+        match self.control_overlay.clone() {
+            Some(ControlOverlay::Menu(_)) => match event {
+                InputEvent::Escape => self.close_control_overlay(),
+                InputEvent::Up => self.move_control_selection(false),
+                InputEvent::Down => self.move_control_selection(true),
+                InputEvent::ActivateControl(index) => return self.activate_control(index),
+                InputEvent::Enter => {
+                    if let Some(index) = self.control_menu().map(ControlMenu::selected) {
+                        return self.activate_control(index);
+                    }
+                }
+                _ => {}
+            },
+            Some(ControlOverlay::DisabledReason { .. }) => {
+                if matches!(event, InputEvent::Escape | InputEvent::Enter) {
+                    self.close_control_overlay();
+                }
+            }
+            Some(ControlOverlay::ReasonForm(_)) => match event {
+                InputEvent::Escape => self.close_control_overlay(),
+                InputEvent::Up | InputEvent::Left => self.move_reason_selection(false),
+                InputEvent::Down | InputEvent::Right => self.move_reason_selection(true),
+                InputEvent::Char(character) => self.push_reason_note(character),
+                InputEvent::Backspace => self.pop_reason_note(),
+                InputEvent::Enter => return self.submit_reason_form(),
+                _ => {}
+            },
+            Some(ControlOverlay::AgentEnqueueForm(_)) => match event {
+                InputEvent::Escape => self.close_control_overlay(),
+                InputEvent::Left => self.cycle_agent_route(false),
+                InputEvent::Right => self.cycle_agent_route(true),
+                InputEvent::Up => self.change_agent_priority(true),
+                InputEvent::Down => self.change_agent_priority(false),
+                InputEvent::Char(character) => self.push_agent_objective(character),
+                InputEvent::Backspace => self.pop_agent_objective(),
+                InputEvent::Enter => return self.submit_agent_form(),
+                _ => {}
+            },
+            Some(ControlOverlay::Confirmation { .. }) => match event {
+                InputEvent::Escape => {
+                    if let Some(ControlOverlay::Confirmation { state, .. }) =
+                        self.control_overlay.as_ref()
+                    {
+                        let command_id = state.pending().request().command_id.as_str().to_owned();
+                        self.command_tracker.cancel_prepared(&command_id);
+                    }
+                    self.close_control_overlay();
+                }
+                InputEvent::Left => self.select_confirmation(Selection::Cancel),
+                InputEvent::Right => self.select_confirmation(Selection::Confirm),
+                InputEvent::Char(character) => {
+                    if let Some(ControlOverlay::Confirmation { state, .. }) =
+                        self.control_overlay.as_mut()
+                    {
+                        state.push_typed_character(character);
+                        self.control_epoch = self.control_epoch.saturating_add(1);
+                    }
+                }
+                InputEvent::Backspace => {
+                    if let Some(ControlOverlay::Confirmation { state, .. }) =
+                        self.control_overlay.as_mut()
+                    {
+                        state.pop_typed_character();
+                        self.control_epoch = self.control_epoch.saturating_add(1);
+                    }
+                }
+                InputEvent::Enter => return self.accept_confirmation(),
+                _ => {}
+            },
+            None => {}
+        }
+        Vec::new()
+    }
+
+    fn close_control_overlay(&mut self) {
+        self.control_overlay = None;
+        if self.mode == LocalMode::Menu {
+            self.mode = LocalMode::Browse;
+        }
+        self.control_epoch = self.control_epoch.saturating_add(1);
+    }
+
+    fn move_control_selection(&mut self, forward: bool) {
+        if let Some(ControlOverlay::Menu(menu)) = self.control_overlay.as_mut() {
+            menu.move_selection(forward);
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn select_confirmation(&mut self, selection: Selection) {
+        if let Some(ControlOverlay::Confirmation { state, .. }) = self.control_overlay.as_mut() {
+            state.select(selection);
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn activate_control(&mut self, index: usize) -> Vec<ClientAction> {
+        let Some(ControlOverlay::Menu(menu)) = self.control_overlay.as_mut() else {
+            return Vec::new();
+        };
+        menu.select(index);
+        let Some(entry) = menu.selected_entry().cloned() else {
+            return Vec::new();
+        };
+        match entry {
+            ControlMenuEntry::Local { control, .. } => self.activate_local_control(control),
+            ControlMenuEntry::Command(button) => match button.state {
+                ButtonState::Disabled { reason } => {
+                    self.control_overlay = Some(ControlOverlay::DisabledReason {
+                        label: button.label,
+                        reason,
+                    });
+                    self.control_epoch = self.control_epoch.saturating_add(1);
+                    Vec::new()
+                }
+                ButtonState::Hidden => Vec::new(),
+                ButtonState::Enabled => self.begin_command(button),
+            },
+        }
+    }
+
+    fn activate_local_control(&mut self, control: LocalControl) -> Vec<ClientAction> {
+        match control {
+            LocalControl::TakeControl
+                if self.access == AccessState::Viewer && !self.lease_pending =>
+            {
+                self.close_control_overlay();
+                self.lease_pending = true;
+                vec![ClientAction::RequestLease]
+            }
+            LocalControl::LockTui if !self.lock_pending => {
+                self.begin_manual_lock();
+                vec![ClientAction::RequestLock]
+            }
+            LocalControl::ToggleAccountPrivacy => {
+                self.close_control_overlay();
+                self.toggle_account_details_mask();
+                Vec::new()
+            }
+            LocalControl::OpenCandidateDetail => {
+                self.close_control_overlay();
+                self.open_selected();
+                Vec::new()
+            }
+            LocalControl::TakeControl | LocalControl::LockTui => Vec::new(),
+        }
+    }
+
+    fn begin_command(&mut self, button: crate::controls::ControlButton) -> Vec<ClientAction> {
+        if button.command_type == CommandType::NoteAdd {
+            if !matches!(button.context.as_ref(), Some(ControlContext::Note { .. })) {
+                self.control_overlay = Some(ControlOverlay::DisabledReason {
+                    label: button.label,
+                    reason: "Select an exact stock, order, approval, or timeline event first."
+                        .to_owned(),
+                });
+                self.control_epoch = self.control_epoch.saturating_add(1);
+                return Vec::new();
+            }
+            if !self.control_pair_matches(&button) {
+                return self.reject_stale_control(button.label);
+            }
+            self.close_control_overlay();
+            self.note_command = Some(button);
+            self.mode = LocalMode::NoteEditor;
+            self.local_input.clear();
+            self.note_visibility = NoteVisibility::Private;
+            return Vec::new();
+        }
+        if !self.control_pair_matches(&button) {
+            return self.reject_stale_control(button.label);
+        }
+        if matches!(
+            button.command_type,
+            CommandType::ApprovalHold | CommandType::ApprovalReject
+        ) {
+            return self.open_reason_form(button);
+        }
+        if button.command_type == CommandType::AgentEnqueue {
+            self.control_overlay = Some(ControlOverlay::AgentEnqueueForm(AgentEnqueueForm {
+                button,
+                route: AgentRouteDraft::for_screen(self.screen),
+                objective: String::new(),
+                priority: 50,
+            }));
+            self.control_epoch = self.control_epoch.saturating_add(1);
+            return Vec::new();
+        }
+        let draft = match self.command_draft(&button) {
+            Ok(draft) => draft,
+            Err(reason) => {
+                self.control_overlay = Some(ControlOverlay::DisabledReason {
+                    label: button.label,
+                    reason,
+                });
+                self.control_epoch = self.control_epoch.saturating_add(1);
+                return Vec::new();
+            }
+        };
+        self.start_draft(button, draft)
+    }
+
+    fn start_draft(&mut self, button: ControlButton, draft: CommandDraft) -> Vec<ClientAction> {
+        if !self.control_pair_matches(&button) {
+            return self.reject_stale_control(button.label);
+        }
+        let Some(spec) = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .command_specs
+                .iter()
+                .find(|spec| spec.command_type.as_str() == button.command_type.as_str())
+                .cloned()
+        }) else {
+            return self.show_control_reason(
+                button.label,
+                "Controller command spec is unavailable.".to_owned(),
+            );
+        };
+        let pending = match self.command_tracker.prepare(
+            draft,
+            button.reviewed_control_version,
+            button.reviewed_control_hash.clone(),
+        ) {
+            Ok(PrepareOutcome::New(pending)) => *pending,
+            Ok(PrepareOutcome::Existing(_)) => {
+                self.control_overlay = Some(ControlOverlay::DisabledReason {
+                    label: button.label,
+                    reason: "This action is already awaiting a receipt.".to_owned(),
+                });
+                self.control_epoch = self.control_epoch.saturating_add(1);
+                return Vec::new();
+            }
+            Err(_) => {
+                self.control_overlay = Some(ControlOverlay::DisabledReason {
+                    label: button.label,
+                    reason: "The command request could not be built safely.".to_owned(),
+                });
+                self.control_epoch = self.control_epoch.saturating_add(1);
+                return Vec::new();
+            }
+        };
+        let confirmation = begin_confirmation(&spec, pending);
+        if button.confirmation_level == Some(crate::contract::ConfirmationLevel::None) {
+            return self.submit_confirmed(confirmation);
+        }
+        self.control_overlay = Some(ControlOverlay::Confirmation {
+            label: button.label,
+            state: Box::new(confirmation),
+        });
+        self.control_epoch = self.control_epoch.saturating_add(1);
+        Vec::new()
+    }
+
+    fn open_reason_form(&mut self, button: ControlButton) -> Vec<ClientAction> {
+        let Some(ControlContext::Approval {
+            run_id,
+            checkpoint_id,
+            ..
+        }) = button.context.as_ref()
+        else {
+            return self
+                .show_control_reason(button.label, "Select an exact approval first.".to_owned());
+        };
+        let run_id = run_id.clone();
+        let checkpoint_id = checkpoint_id.clone();
+        let quick_reasons = if button.command_type == CommandType::ApprovalHold {
+            ["Need more evidence", "Waiting for data", "Review later"]
+        } else {
+            [
+                "Evidence does not support",
+                "Risk is too high",
+                "Request is invalid",
+            ]
+        };
+        self.control_overlay = Some(ControlOverlay::ReasonForm(ReasonForm {
+            button,
+            run_id,
+            checkpoint_id,
+            quick_reasons,
+            selected: 0,
+            note: String::new(),
+        }));
+        self.control_epoch = self.control_epoch.saturating_add(1);
+        Vec::new()
+    }
+
+    fn move_reason_selection(&mut self, forward: bool) {
+        if let Some(ControlOverlay::ReasonForm(form)) = self.control_overlay.as_mut() {
+            form.move_selection(forward);
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn push_reason_note(&mut self, character: char) {
+        if let Some(ControlOverlay::ReasonForm(form)) = self.control_overlay.as_mut() {
+            form.push(character);
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn pop_reason_note(&mut self) {
+        if let Some(ControlOverlay::ReasonForm(form)) = self.control_overlay.as_mut() {
+            form.pop();
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn submit_reason_form(&mut self) -> Vec<ClientAction> {
+        let Some(ControlOverlay::ReasonForm(form)) = self.control_overlay.clone() else {
+            return Vec::new();
+        };
+        let reason = form.reason();
+        let draft = CommandDraft::new(
+            form.button.command_type,
+            serde_json::json!({
+                "run_id": form.run_id,
+                "checkpoint_id": form.checkpoint_id,
+            }),
+            Some(reason),
+            format!(
+                "{}:{}:{}",
+                form.button.command_type.as_str(),
+                form.run_id,
+                form.checkpoint_id
+            ),
+        );
+        self.start_draft(form.button, draft)
+    }
+
+    fn cycle_agent_route(&mut self, forward: bool) {
+        if let Some(ControlOverlay::AgentEnqueueForm(form)) = self.control_overlay.as_mut() {
+            form.route.cycle_override(forward);
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn change_agent_priority(&mut self, increase: bool) {
+        if let Some(ControlOverlay::AgentEnqueueForm(form)) = self.control_overlay.as_mut() {
+            form.change_priority(increase);
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn push_agent_objective(&mut self, character: char) {
+        if let Some(ControlOverlay::AgentEnqueueForm(form)) = self.control_overlay.as_mut() {
+            form.push(character);
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn pop_agent_objective(&mut self) {
+        if let Some(ControlOverlay::AgentEnqueueForm(form)) = self.control_overlay.as_mut() {
+            form.pop();
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn submit_agent_form(&mut self) -> Vec<ClientAction> {
+        let Some(ControlOverlay::AgentEnqueueForm(form)) = self.control_overlay.clone() else {
+            return Vec::new();
+        };
+        if form.objective.trim().is_empty() {
+            return Vec::new();
+        }
+        let title = form.title();
+        let draft = CommandDraft::new(
+            CommandType::AgentEnqueue,
+            serde_json::json!({
+                "agent_id": form.route.selected_agent(),
+                "title": title,
+                "objective": form.objective,
+                "priority": form.priority,
+            }),
+            Some(form.reason()),
+            format!("agent.enqueue:{}:{title}", form.route.selected_agent()),
+        );
+        self.start_draft(form.button, draft)
+    }
+
+    fn accept_confirmation(&mut self) -> Vec<ClientAction> {
+        if matches!(
+            self.control_overlay.as_ref(),
+            Some(ControlOverlay::Confirmation { state, .. })
+                if state.selection() == Selection::Cancel
+        ) {
+            if let Some(ControlOverlay::Confirmation { state, .. }) = self.control_overlay.as_ref()
+            {
+                let command_id = state.pending().request().command_id.as_str().to_owned();
+                self.command_tracker.cancel_prepared(&command_id);
+            }
+            self.close_control_overlay();
+            return Vec::new();
+        }
+        let Some(ControlOverlay::Confirmation { state, .. }) = self.control_overlay.as_mut() else {
+            return Vec::new();
+        };
+        state.accept_current();
+        let confirmation = (**state).clone();
+        self.control_epoch = self.control_epoch.saturating_add(1);
+        self.submit_confirmed(confirmation)
+    }
+
+    fn submit_confirmed(
+        &mut self,
+        confirmation: crate::confirm::ConfirmationState,
+    ) -> Vec<ClientAction> {
+        let Ok(request) = submit_confirmation(&confirmation) else {
+            return Vec::new();
+        };
+        let pair_matches = !self.awaiting_snapshot
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.control_version == request.reviewed_control_version
+                    && snapshot.control_hash == request.reviewed_control_hash
+            });
+        if !pair_matches {
+            self.command_tracker
+                .cancel_prepared(request.command_id.as_str());
+            return self.show_control_reason(
+                "Controls Updated".to_owned(),
+                "Controller controls changed. Review the action again.".to_owned(),
+            );
+        }
+        let Some(request) = self.command_tracker.mark_confirmed_sent(request) else {
+            self.control_overlay = Some(ControlOverlay::DisabledReason {
+                label: "Command".to_owned(),
+                reason: "The command is already in flight.".to_owned(),
+            });
+            self.control_epoch = self.control_epoch.saturating_add(1);
+            return Vec::new();
+        };
+        self.close_control_overlay();
+        vec![ClientAction::Command(request)]
+    }
+
+    fn cancel_unsent_controls_for_resync(&mut self) {
+        self.command_tracker.cancel_prepared_commands();
+        self.control_overlay = None;
+        self.note_command = None;
+        self.pending_note = None;
+        self.local_input.clear();
+        if matches!(self.mode, LocalMode::Menu | LocalMode::NoteEditor) {
+            self.mode = LocalMode::Browse;
+        }
+        self.control_epoch = self.control_epoch.saturating_add(1);
+    }
+
+    fn command_draft(&self, button: &ControlButton) -> Result<CommandDraft, String> {
+        match button.command_type {
+            CommandType::ApprovalApprove => {
+                let Some(ControlContext::Approval {
+                    run_id,
+                    checkpoint_id,
+                    ..
+                }) = button.context.as_ref()
+                else {
+                    return Err("Select an exact approval first.".to_owned());
+                };
+                Ok(CommandDraft::new(
+                    button.command_type,
+                    serde_json::json!({
+                        "run_id": run_id,
+                        "checkpoint_id": checkpoint_id,
+                    }),
+                    None,
+                    format!("approval.approve:{run_id}:{checkpoint_id}"),
+                ))
+            }
+            _ => Err("This control needs a reviewed input form before it can run.".to_owned()),
+        }
+    }
+
+    fn submit_note(&mut self) -> Vec<ClientAction> {
+        if self.local_input.trim().is_empty() {
+            return Vec::new();
+        }
+        let Some(button) = self.note_command.clone() else {
+            return Vec::new();
+        };
+        if !self.control_pair_matches(&button) {
+            self.note_command = None;
+            self.local_input.clear();
+            return self.reject_stale_control(button.label);
+        }
+        let Some(ControlContext::Note {
+            target_type,
+            target_id,
+        }) = button.context.as_ref()
+        else {
+            self.note_command = None;
+            self.local_input.clear();
+            self.mode = LocalMode::Browse;
+            return Vec::new();
+        };
+        let target_type = *target_type;
+        let target_id = target_id.clone();
+        let visibility = match self.note_visibility {
+            NoteVisibility::Private => "private",
+            NoteVisibility::Shared => "shared",
+        };
+        let body = std::mem::take(&mut self.local_input);
+        let draft = CommandDraft::new(
+            CommandType::NoteAdd,
+            serde_json::json!({
+                "target_type": target_type,
+                "target_id": target_id,
+                "body": body,
+                "visibility": visibility,
+            }),
+            None,
+            format!("note.add:{target_type}:{target_id}"),
+        );
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Vec::new();
+        };
+        let Some(spec) = snapshot
+            .command_specs
+            .iter()
+            .find(|spec| spec.command_type.as_str() == CommandType::NoteAdd.as_str())
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let pending = match self.command_tracker.prepare(
+            draft,
+            button.reviewed_control_version,
+            button.reviewed_control_hash,
+        ) {
+            Ok(PrepareOutcome::New(pending)) => *pending,
+            Ok(PrepareOutcome::Existing(_)) => {
+                return self.show_control_reason(
+                    "Add Note".to_owned(),
+                    "This note is already awaiting a receipt.".to_owned(),
+                );
+            }
+            Err(_) => {
+                return self.show_control_reason(
+                    "Add Note".to_owned(),
+                    "The note command could not be built safely.".to_owned(),
+                );
+            }
+        };
+        self.note_command = None;
+        self.mode = LocalMode::Browse;
+        self.submit_confirmed(begin_confirmation(&spec, pending))
+    }
+
+    fn control_pair_matches(&self, button: &ControlButton) -> bool {
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.control_version == button.reviewed_control_version
+                && snapshot.control_hash == button.reviewed_control_hash
+        })
+    }
+
+    fn invalidate_stale_control_review(&mut self) {
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return;
+        };
+        let current_version = snapshot.control_version;
+        let current_hash = snapshot.control_hash.clone();
+        let reviewed_pair = match self.control_overlay.as_ref() {
+            Some(ControlOverlay::Menu(menu)) => {
+                let (version, hash) = menu.reviewed_control_pair();
+                Some((version, hash.clone()))
+            }
+            Some(ControlOverlay::Confirmation { state, .. }) => Some((
+                state.pending().request().reviewed_control_version,
+                state.pending().request().reviewed_control_hash.clone(),
+            )),
+            Some(ControlOverlay::ReasonForm(form)) => Some((
+                form.button.reviewed_control_version,
+                form.button.reviewed_control_hash.clone(),
+            )),
+            Some(ControlOverlay::AgentEnqueueForm(form)) => Some((
+                form.button.reviewed_control_version,
+                form.button.reviewed_control_hash.clone(),
+            )),
+            Some(ControlOverlay::DisabledReason { .. }) | None => {
+                self.note_command.as_ref().map(|button| {
+                    (
+                        button.reviewed_control_version,
+                        button.reviewed_control_hash.clone(),
+                    )
+                })
+            }
+        };
+        if reviewed_pair
+            .is_some_and(|(version, hash)| version != current_version || hash != current_hash)
+        {
+            if let Some(ControlOverlay::Confirmation { state, .. }) = self.control_overlay.as_ref()
+            {
+                let command_id = state.pending().request().command_id.as_str().to_owned();
+                self.command_tracker.cancel_prepared(&command_id);
+            }
+            self.note_command = None;
+            self.local_input.clear();
+            self.mode = LocalMode::Menu;
+            self.control_overlay = Some(ControlOverlay::DisabledReason {
+                label: "Controls Updated".to_owned(),
+                reason: "Controller controls changed. Review the action again.".to_owned(),
+            });
+            self.control_epoch = self.control_epoch.saturating_add(1);
+        }
+    }
+
+    fn reject_stale_control(&mut self, label: String) -> Vec<ClientAction> {
+        self.show_control_reason(
+            label,
+            "Controller controls changed. Review the action again.".to_owned(),
+        )
+    }
+
+    fn show_control_reason(&mut self, label: String, reason: String) -> Vec<ClientAction> {
+        self.control_overlay = Some(ControlOverlay::DisabledReason { label, reason });
+        self.mode = LocalMode::Menu;
+        self.control_epoch = self.control_epoch.saturating_add(1);
+        Vec::new()
+    }
+
     fn select_screen(&mut self, screen: Screen) {
         if self.screen == screen {
             return;
         }
         self.screen = screen;
+        self.control_overlay = None;
+        self.note_command = None;
         self.mode = LocalMode::Browse;
         self.screen_state.scroll_offset = 0;
         self.screen_state.selected_id = None;
@@ -1879,8 +2677,9 @@ impl AppState {
             DetailKind::Stock => "stock",
             DetailKind::Order => "order",
             DetailKind::Approval => "approval",
-            DetailKind::Agent | DetailKind::Event => "agent-event",
-            DetailKind::Fill
+            DetailKind::Event => "agent-event",
+            DetailKind::Agent
+            | DetailKind::Fill
             | DetailKind::ModelOpinion
             | DetailKind::ModelCandidate
             | DetailKind::Metric
@@ -1926,6 +2725,9 @@ impl AppState {
         self.local_input.clear();
         self.filter_error = None;
         self.pending_note = None;
+        self.control_overlay = None;
+        self.note_command = None;
+        self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
         self.search_return_screen = None;
         self.lock_pending = true;
@@ -1942,6 +2744,9 @@ impl AppState {
         self.local_input.clear();
         self.filter_error = None;
         self.pending_note = None;
+        self.control_overlay = None;
+        self.note_command = None;
+        self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
         self.search_return_screen = None;
         self.awaiting_snapshot = false;
@@ -1960,6 +2765,9 @@ impl AppState {
         self.local_input.clear();
         self.filter_error = None;
         self.pending_note = None;
+        self.control_overlay = None;
+        self.note_command = None;
+        self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
         self.search_return_screen = None;
         self.awaiting_snapshot = false;

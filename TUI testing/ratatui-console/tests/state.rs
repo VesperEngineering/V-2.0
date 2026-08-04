@@ -40,6 +40,23 @@ fn snapshot(sequence: u64, state_version: u64, regime: &str) -> Envelope {
     )
 }
 
+fn snapshot_with_note_control(sequence: u64, state_version: u64, regime: &str) -> Envelope {
+    let mut value = serde_json::to_value(snapshot(sequence, state_version, regime)).unwrap();
+    value["payload"]["snapshot"]["command_specs"] = json!([{
+        "command_type": "note.add",
+        "payload_model": "NoteAddPayload",
+        "capability_id": "note.add",
+        "reason_rule": "forbidden",
+        "confirmation_level": "none"
+    }]);
+    value["payload"]["snapshot"]["shell"]["capabilities"] = json!([{
+        "capability_id": "note.add",
+        "state": "enabled",
+        "reason": null
+    }]);
+    serde_json::from_value(value).unwrap()
+}
+
 fn rendered_text(state: &AppState, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -596,6 +613,11 @@ fn task7_keys_reach_agent_detail_model_panels_and_all_timeline_events() {
     let detail = rendered_text(&state, 120, 36);
     assert!(detail.contains("EVENT DETAIL"));
     assert!(detail.contains("EVENT ID: event:1"));
+    state.set_terminal_area(Rect::new(0, 0, 120, 36));
+    for _ in 0..100 {
+        state.handle(InputEvent::Down);
+    }
+    let detail = rendered_text(&state, 120, 36);
     assert!(detail.contains("SOURCE: fixture"));
     state.handle(InputEvent::Escape);
     state.handle(InputEvent::Char('e'));
@@ -705,7 +727,9 @@ fn only_supported_direct_detail_targets_offer_context_notes() {
         (3, None),
     ] {
         let mut state = AppState::controller();
-        state.reduce(snapshot(1, 1, "Current")).unwrap();
+        state
+            .reduce(snapshot_with_note_control(1, 1, "Current"))
+            .unwrap();
         state.handle(InputEvent::Char('7'));
         for _ in 0..panel {
             state.handle(InputEvent::Right);

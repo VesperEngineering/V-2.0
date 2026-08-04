@@ -1,5 +1,8 @@
 pub mod app;
+pub mod command;
+pub mod confirm;
 pub mod contract;
+pub mod controls;
 pub mod detail;
 pub mod input;
 pub mod launcher;

@@ -16,18 +16,17 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::contract::{
-    AuthSetupPayload, AuthUnlockPayload, ClientHelloPayload, Envelope, LeaseRequestPayload,
-    LockAction, LockRequestPayload, Message, NonEmptyString, SnapshotRequestPayload,
-    TakeControlAction, UtcTimestamp,
+    AuthSetupPayload, AuthUnlockPayload, ClientHelloPayload, CommandMessagePayload, Envelope,
+    LeaseRequestPayload, LockAction, LockRequestPayload, Message, NonEmptyString,
+    SnapshotRequestPayload, TakeControlAction, UtcTimestamp,
 };
 use crate::input::InputEvent;
 use crate::launcher::{GatewayLauncher, LaunchError};
 use crate::layout::shell_layout;
-use crate::preferences::{
-    LoadedPreferences, load_preferences, preferences_path, save_preferences_to,
-};
+use crate::preferences::{load_preferences, preferences_path, save_preferences_to};
 use crate::state::{AccessState, AppState, ClientAction, ProtocolError, ReduceOutcome};
 use crate::transport::{PipeTransport, TransportError};
+use crate::ui::{control_grid_index, control_overlay_area, split_control_area};
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub const SEND_TIMEOUT: Duration = Duration::from_millis(50);
@@ -38,15 +37,50 @@ const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
     "vesper/__init__.py",
     "vesper/platform/__init__.py",
     "vesper/platform/agent_profiles.py",
+    "vesper/platform/agent_queue.py",
+    "vesper/platform/agent_runner.py",
+    "vesper/platform/agent_tools.py",
+    "vesper/platform/authority.py",
+    "vesper/platform/codex.py",
+    "vesper/platform/codex_sandbox.py",
+    "vesper/platform/composition.py",
+    "vesper/platform/context_budget.py",
     "vesper/platform/contracts.py",
+    "vesper/platform/control.py",
+    "vesper/platform/evidence.py",
+    "vesper/platform/journals.py",
+    "vesper/platform/knowledge.py",
+    "vesper/platform/memory.py",
+    "vesper/platform/ollama.py",
+    "vesper/platform/opencode.py",
+    "vesper/platform/persistence.py",
+    "vesper/platform/profiles.py",
+    "vesper/platform/quant_agents.py",
+    "vesper/platform/qwen_runtime.py",
+    "vesper/platform/research.py",
+    "vesper/platform/review.py",
+    "vesper/platform/runtime_env.py",
+    "vesper/platform/sandbox_runtime.py",
+    "vesper/platform/service.py",
+    "vesper/platform/validation.py",
+    "vesper/platform/workflow.py",
+    "vesper/platform/worktree.py",
     "vesper/platform/tui/__init__.py",
     "vesper/platform/tui/auth.py",
     "vesper/platform/tui/cli.py",
+    "vesper/platform/tui/command_contracts.py",
+    "vesper/platform/tui/command_policy.py",
+    "vesper/platform/tui/command_ports.py",
+    "vesper/platform/tui/command_registry.py",
+    "vesper/platform/tui/command_store.py",
+    "vesper/platform/tui/compression.py",
+    "vesper/platform/tui/conversations.py",
     "vesper/platform/tui/contracts.py",
     "vesper/platform/tui/event_store.py",
     "vesper/platform/tui/gateway.py",
     "vesper/platform/tui/live_readiness.py",
     "vesper/platform/tui/notes.py",
+    "vesper/platform/tui/operator_decisions.py",
     "vesper/platform/tui/outbox.py",
     "vesper/platform/tui/pipe_security.py",
     "vesper/platform/tui/pipe_server.py",
@@ -61,10 +95,16 @@ const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
     "vesper/platform/tui/projections/__init__.py",
     "vesper/platform/tui/projections/legacy_state.py",
     "vesper/platform/tui/projections/native_platform.py",
+    "vesper/platform/tui/projections/platform_runtime.py",
     "vesper/platform/tui/projections/repository.py",
     "vesper/platform/tui/projections/timeline.py",
     "vesper/platform/tui/projections/windows_system.py",
 ];
+
+#[doc(hidden)]
+pub fn required_gateway_runtime_files() -> &'static [&'static str] {
+    REQUIRED_GATEWAY_RUNTIME_FILES
+}
 
 pub fn key_to_input(key: KeyEvent) -> Option<InputEvent> {
     if key.kind != KeyEventKind::Press {
@@ -102,7 +142,66 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
         _ => return None,
     }
     let layout = shell_layout(area, state.display_mode());
+    if let Some(overlay) = state.control_overlay() {
+        let modal = control_overlay_area(layout.body);
+        return match overlay {
+            crate::controls::ControlOverlay::Menu(menu) => {
+                control_grid_index(modal, mouse.column, mouse.row, menu.entries().len())
+                    .map(InputEvent::ActivateControl)
+            }
+            crate::controls::ControlOverlay::Confirmation { .. }
+            | crate::controls::ControlOverlay::ReasonForm(_)
+            | crate::controls::ControlOverlay::AgentEnqueueForm(_) => {
+                if mouse.row == modal.bottom().saturating_sub(2)
+                    && contains(modal, mouse.column, mouse.row)
+                {
+                    Some(if mouse.column < modal.x.saturating_add(modal.width / 2) {
+                        InputEvent::CancelControl
+                    } else {
+                        InputEvent::ConfirmControl
+                    })
+                } else {
+                    None
+                }
+            }
+            crate::controls::ControlOverlay::DisabledReason { .. } => (mouse.row
+                == modal.bottom().saturating_sub(2)
+                && contains(modal, mouse.column, mouse.row))
+            .then_some(InputEvent::ConfirmControl),
+        };
+    }
+    let (control_body, action_bar) = if state.snapshot.is_some()
+        && state.search_detail().is_none()
+        && matches!(
+            state.mode,
+            crate::state::LocalMode::Browse
+                | crate::state::LocalMode::Open
+                | crate::state::LocalMode::Menu
+        ) {
+        let (body, controls) = split_control_area(layout.body, state.display_mode());
+        (body, Some(controls))
+    } else {
+        (layout.body, None)
+    };
+    let inline_actions = action_bar.is_some_and(|area| area.height == 0);
+    if let Some(action_bar) = action_bar
+        && contains(action_bar, mouse.column, mouse.row)
+        && let Some(menu) = state.visible_control_menu()
+    {
+        if action_bar.height < 3 {
+            return Some(InputEvent::Char(':'));
+        }
+        return control_grid_index(action_bar, mouse.column, mouse.row, menu.entries().len())
+            .map(InputEvent::ActivateControl);
+    }
     if contains(layout.footer, mouse.column, mouse.row) {
+        if inline_actions
+            && mouse.row == layout.footer.y.saturating_add(1)
+            && mouse.column > layout.footer.x
+            && mouse.column < layout.footer.x.saturating_add(12)
+        {
+            return Some(InputEvent::Char(':'));
+        }
         let left_half = mouse.column < layout.footer.x.saturating_add(layout.footer.width / 2);
         match state.mode {
             crate::state::LocalMode::Filter | crate::state::LocalMode::NoteEditor => {
@@ -128,11 +227,11 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
         }
     }
     if state.mode == crate::state::LocalMode::NoteEditor
-        && mouse.row == layout.body.y.saturating_add(2)
-        && contains(layout.body, mouse.column, mouse.row)
+        && mouse.row == control_body.y.saturating_add(2)
+        && contains(control_body, mouse.column, mouse.row)
     {
         return Some(
-            if mouse.column < layout.body.x.saturating_add(layout.body.width / 2) {
+            if mouse.column < control_body.x.saturating_add(control_body.width / 2) {
                 InputEvent::Left
             } else {
                 InputEvent::Right
@@ -140,13 +239,13 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
         );
     }
     if state.mode == crate::state::LocalMode::Search
-        && contains(layout.body, mouse.column, mouse.row)
+        && contains(control_body, mouse.column, mouse.row)
     {
-        let first_result_row = layout.body.y.saturating_add(3);
+        let first_result_row = control_body.y.saturating_add(3);
         if mouse.row < first_result_row {
             return None;
         }
-        let available_rows = usize::from(layout.body.height.saturating_sub(6)).max(1);
+        let available_rows = usize::from(control_body.height.saturating_sub(6)).max(1);
         let search = state.search_state();
         let start = search
             .selected_index()
@@ -156,9 +255,9 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
         return (index < search.results().len()).then_some(InputEvent::OpenSearchResult(index));
     }
     if state.mode == crate::state::LocalMode::Browse
-        && contains(layout.body, mouse.column, mouse.row)
+        && contains(control_body, mouse.column, mouse.row)
     {
-        return browse_click_to_input(mouse.column, mouse.row, layout.body, state);
+        return browse_click_to_input(mouse.column, mouse.row, control_body, state);
     }
     if mouse.row == layout.navigation.y.saturating_add(1)
         && contains(layout.navigation, mouse.column, mouse.row)
@@ -847,7 +946,7 @@ impl MouseCaptureTracker {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct LoopEffect {
     pub exit: bool,
     pub foundation_actions: Vec<ClientAction>,
@@ -1042,6 +1141,13 @@ impl FoundationClient {
         self.app.state.fail_connection();
     }
 
+    #[doc(hidden)]
+    pub fn begin_connection(&mut self) {
+        self.next_sequence = 0;
+        self.connection_failed = false;
+        self.app.state.begin_connection();
+    }
+
     pub async fn start<S: FoundationSession>(
         &mut self,
         session: &mut S,
@@ -1142,6 +1248,7 @@ impl FoundationClient {
             }),
             ClientAction::RequestSnapshot => Message::SnapshotRequest(SnapshotRequestPayload {}),
             ClientAction::Search(payload) => Message::SearchRequest(payload),
+            ClientAction::Command(request) => Message::Command(CommandMessagePayload { request }),
             ClientAction::Reconnect => return Ok(SessionStep::Reconnect),
             ClientAction::CloseTui => return Ok(SessionStep::Exit),
             ClientAction::SubmitInput(_) => return Ok(SessionStep::Continue),
@@ -1446,6 +1553,9 @@ fn has_exact_declaration(document: &str, section: &str, declaration: &str) -> bo
 
 pub async fn run_terminal_loop(terminal: &mut DefaultTerminal, repo_root: &Path) -> io::Result<()> {
     let mut connector = LauncherConnector;
+    let mut state = AppState::locked();
+    state.apply_loaded_preferences(load_preferences());
+    let mut client = FoundationClient::from_app(App::new(state));
     loop {
         let transport = {
             let mut control = TerminalConnectionControl::new(terminal);
@@ -1456,8 +1566,8 @@ pub async fn run_terminal_loop(terminal: &mut DefaultTerminal, repo_root: &Path)
             };
             transport
         };
-        let loaded_preferences = load_preferences();
-        match run_connected_loop(terminal, transport, loaded_preferences).await? {
+        client.begin_connection();
+        match run_connected_loop(terminal, transport, &mut client).await? {
             SessionStep::Exit => return Ok(()),
             SessionStep::Reconnect => {
                 let mut control = TerminalConnectionControl::new(terminal);
@@ -1474,26 +1584,23 @@ pub async fn run_terminal_loop(terminal: &mut DefaultTerminal, repo_root: &Path)
 async fn run_connected_loop<S: FoundationSession>(
     terminal: &mut DefaultTerminal,
     mut session: S,
-    loaded_preferences: LoadedPreferences,
+    client: &mut FoundationClient,
 ) -> io::Result<SessionStep> {
-    let mut state = AppState::locked();
-    state.apply_loaded_preferences(loaded_preferences);
-    let mut client = FoundationClient::from_app(App::new(state));
     let mut mouse = TerminalMouseCapture::new();
     if client.start(&mut session).await.is_err() {
-        prepare_reconnect(terminal, &mut client, &mut mouse)?;
+        prepare_reconnect(terminal, client, &mut mouse)?;
         return Ok(SessionStep::Reconnect);
     }
     let mut input_poll = tokio::time::interval(POLL_INTERVAL);
     input_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        refresh_terminal(terminal, &mut client, &mut mouse)?;
+        refresh_terminal(terminal, client, &mut mouse)?;
 
         let step = tokio::select! {
             biased;
             _ = input_poll.tick() => {
-                drain_terminal_events(terminal, &mut client, &mut mouse, &mut session).await?
+                drain_terminal_events(terminal, client, &mut mouse, &mut session).await?
             }
             inbound = session.recv() => {
                 match inbound {
@@ -1508,7 +1615,7 @@ async fn run_connected_loop<S: FoundationSession>(
         };
         if step != SessionStep::Continue {
             if step == SessionStep::Reconnect {
-                prepare_reconnect(terminal, &mut client, &mut mouse)?;
+                prepare_reconnect(terminal, client, &mut mouse)?;
             }
             return Ok(step);
         }

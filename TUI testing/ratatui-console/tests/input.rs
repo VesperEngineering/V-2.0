@@ -19,7 +19,7 @@ use vesper_ratatui_console::app::{
     App, ConnectionControl, FoundationClient, FoundationSession, GatewayConnector,
     MAX_EVENTS_PER_TICK, MouseCaptureChange, MouseCaptureTracker, POLL_INTERVAL, SEND_TIMEOUT,
     SessionError, SessionStep, connect_with_retry, key_to_input, mouse_to_input,
-    process_input_batch, resolve_repo_root_from, with_restore,
+    process_input_batch, required_gateway_runtime_files, resolve_repo_root_from, with_restore,
 };
 use vesper_ratatui_console::contract::{Envelope, Message, MessageType, UtcTimestamp};
 use vesper_ratatui_console::input::InputEvent;
@@ -27,6 +27,7 @@ use vesper_ratatui_console::layout::shell_layout;
 use vesper_ratatui_console::state::{
     AccessState, AppState, AuthRequest, AuthStage, ClientAction, LocalMode, ReduceOutcome, Screen,
 };
+use vesper_ratatui_console::ui::split_control_area;
 
 fn receive_server_hello(state: &mut AppState, requires_setup: bool) {
     let envelope = server_hello_envelope(requires_setup);
@@ -208,38 +209,7 @@ impl TempCheckout {
         )
         .unwrap();
         fs::write(root.join("uv.lock"), "version = 1\n").unwrap();
-        let required_runtime_files = [
-            "vesper/__init__.py",
-            "vesper/platform/__init__.py",
-            "vesper/platform/agent_profiles.py",
-            "vesper/platform/contracts.py",
-            "vesper/platform/tui/__init__.py",
-            "vesper/platform/tui/auth.py",
-            "vesper/platform/tui/cli.py",
-            "vesper/platform/tui/contracts.py",
-            "vesper/platform/tui/event_store.py",
-            "vesper/platform/tui/gateway.py",
-            "vesper/platform/tui/live_readiness.py",
-            "vesper/platform/tui/notes.py",
-            "vesper/platform/tui/outbox.py",
-            "vesper/platform/tui/pipe_security.py",
-            "vesper/platform/tui/pipe_server.py",
-            "vesper/platform/tui/ports.py",
-            "vesper/platform/tui/process_capture.py",
-            "vesper/platform/tui/protocol.py",
-            "vesper/platform/tui/search.py",
-            "vesper/platform/tui/snapshot.py",
-            "vesper/platform/tui/sqlite_ledger.py",
-            "vesper/platform/tui/stream.py",
-            "vesper/platform/tui/views.py",
-            "vesper/platform/tui/projections/__init__.py",
-            "vesper/platform/tui/projections/legacy_state.py",
-            "vesper/platform/tui/projections/native_platform.py",
-            "vesper/platform/tui/projections/repository.py",
-            "vesper/platform/tui/projections/timeline.py",
-            "vesper/platform/tui/projections/windows_system.py",
-        ];
-        for file in required_runtime_files {
+        for file in required_gateway_runtime_files() {
             let path = root.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, "# test module\n").unwrap();
@@ -357,6 +327,7 @@ fn viewer_take_control_emits_the_foundation_lease_request() {
 #[test]
 fn local_modes_follow_global_keys_and_escape_returns_to_browse() {
     let mut state = AppState::controller();
+    state.reduce(snapshot_envelope(1)).unwrap();
 
     for (key, expected) in [
         ('o', LocalMode::Open),
@@ -592,7 +563,11 @@ fn models_header_click_without_typed_selection_does_not_open_a_detail() {
     assert!(state.screen_state().selected_kind.is_none());
 
     let area = Rect::new(0, 0, 140, 40);
-    let body = shell_layout(area, state.display_mode()).body;
+    let body = split_control_area(
+        shell_layout(area, state.display_mode()).body,
+        state.display_mode(),
+    )
+    .0;
     let opinion_header = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: body.x + 2,
@@ -610,7 +585,11 @@ fn system_mouse_boundary_matches_the_rendered_source_and_live_panel_split() {
     state.reduce(snapshot_envelope(1)).unwrap();
     state.handle(InputEvent::Char('0'));
     let area = Rect::new(0, 0, 140, 40);
-    let body = shell_layout(area, state.display_mode()).body;
+    let body = split_control_area(
+        shell_layout(area, state.display_mode()).body,
+        state.display_mode(),
+    )
+    .0;
     let rows =
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(body);
     let bottom =
@@ -656,7 +635,11 @@ fn system_live_panel_background_click_then_mouse_wheel_reaches_the_final_order()
     state.handle(InputEvent::Char('0'));
 
     let area = Rect::new(0, 0, 140, 40);
-    let body = shell_layout(area, state.display_mode()).body;
+    let body = split_control_area(
+        shell_layout(area, state.display_mode()).body,
+        state.display_mode(),
+    )
+    .0;
     let rows =
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(body);
     let bottom =
@@ -813,19 +796,10 @@ fn repository_root_rejects_marker_only_or_incomplete_lookalikes() {
 }
 
 #[test]
-fn repository_root_rejects_missing_live_projection_dependencies() {
+fn repository_root_rejects_every_missing_gateway_runtime_dependency() {
     let fallback = TempCheckout::new("dependency-missing-fallback", false);
-    for (index, required) in [
-        "vesper/platform/agent_profiles.py",
-        "vesper/platform/tui/live_readiness.py",
-        "vesper/platform/tui/snapshot.py",
-        "vesper/platform/tui/process_capture.py",
-        "vesper/platform/tui/projections/windows_system.py",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let checkout = TempCheckout::new(&format!("dependency-missing-{index}"), true);
+    let checkout = TempCheckout::new("dependency-missing", true);
+    for required in required_gateway_runtime_files() {
         fs::remove_file(checkout.root.join(required)).unwrap();
         assert!(
             resolve_repo_root_from(
@@ -835,7 +809,15 @@ fn repository_root_rejects_missing_live_projection_dependencies() {
             .is_err(),
             "accepted checkout missing {required}"
         );
+        fs::write(checkout.root.join(required), "# test module\n").unwrap();
     }
+}
+
+#[test]
+fn gateway_runtime_dependency_closure_includes_conversations_and_compression() {
+    let required = required_gateway_runtime_files();
+    assert!(required.contains(&"vesper/platform/tui/conversations.py"));
+    assert!(required.contains(&"vesper/platform/tui/compression.py"));
 }
 
 #[test]

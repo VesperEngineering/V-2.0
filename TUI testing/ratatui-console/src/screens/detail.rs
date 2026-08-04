@@ -481,10 +481,7 @@ fn approval_body(row: &ApprovalRow) -> DetailBody {
         vec![
             format!("APPROVAL ID: {}", safe_text(row.approval_id.as_str())),
             format!("RUN ID: {}", safe_text(row.run_id.as_str())),
-            format!(
-                "CHECKPOINT ID: {}",
-                safe_text(row.checkpoint_id.as_str())
-            ),
+            format!("CHECKPOINT ID: {}", safe_text(row.checkpoint_id.as_str())),
             format!("STATE: {}", approval_state_label(row.state)),
             format!(
                 "REASON: {}",
