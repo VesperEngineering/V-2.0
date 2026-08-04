@@ -25,6 +25,7 @@ from vesper.platform.ops.training import (
     UnavailableCandidateTrainingApprovalStore,
     UnavailableTrainingPort,
     WorkItem,
+    validate_work_item,
 )
 from vesper.platform.tui.views import CapabilityState, CapabilityView
 
@@ -167,8 +168,14 @@ class OperationsPolicy:
             if quiet
             else self._budget.normal_gpu_budget_percent
         )
+        try:
+            work_items = tuple(validate_work_item(item) for item in state.work_items)
+            work_validation_failed = False
+        except (TypeError, ValueError):
+            work_items = ()
+            work_validation_failed = True
 
-        incident_items = tuple(item for item in state.work_items if item.kind == "incident")
+        incident_items = tuple(item for item in work_items if item.kind == "incident")
         if state.has_incident or incident_items:
             incident_id = state.incident_id
             if incident_id is None and incident_items:
@@ -211,7 +218,7 @@ class OperationsPolicy:
         )
         if continuous.enabled and resource_reason is None:
             urgent = tuple(
-                item for item in state.work_items if item.kind in {"approval", "portfolio"}
+                item for item in work_items if item.kind in {"approval", "portfolio"}
             )
             if urgent:
                 qwen_reason = self._adapter_blocker(self._qwen_port, "ops.qwen-work")
@@ -232,6 +239,8 @@ class OperationsPolicy:
                 pause_seconds=pause,
                 gpu_budget_percent=gpu_budget,
             )
+        if work_validation_failed:
+            return self._rest("Queued work failed strict validation.", pause)
         if not continuous.enabled:
             return self._rest("Continuous work is not activated.", pause)
         if resource_reason is not None:
@@ -248,10 +257,10 @@ class OperationsPolicy:
                 pause_seconds=pause,
                 gpu_budget_percent=gpu_budget,
             )
-        if not state.work_items:
+        if not work_items:
             return self._rest("No work is queued.", pause)
 
-        item = min(state.work_items, key=lambda value: (_PRIORITY[value.kind], value.work_id))
+        item = min(work_items, key=lambda value: (_PRIORITY[value.kind], value.work_id))
         if item.kind == "candidate":
             training = self._validated_grant(ActivationCapability.CANDIDATE_TRAINING)
             if training is None:
@@ -357,8 +366,7 @@ class BoundedWorkQueue:
         self._dedup: dict[str, str] = {}
 
     def enqueue(self, item: WorkItem) -> WorkItem:
-        if type(item) is not WorkItem:
-            raise TypeError("item must be WorkItem")
+        item = validate_work_item(item)
         existing_item = self._items.get(item.work_id)
         if existing_item is not None:
             if existing_item == item:

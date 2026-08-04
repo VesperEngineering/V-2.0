@@ -379,6 +379,14 @@ def test_candidate_training_binds_request_and_needs_both_grants() -> None:
     assert rejected.kind == "rest"
     assert rejected.reason == "Candidate training request is not exactly approved."
 
+    invalid_item = item.model_copy(update={"work_id": "candidate-2"})
+    invalid = policy(
+        activation_store(continuous, training),
+        approved_requests=(request,),
+    ).next_action(state(invalid_item), now)
+    assert invalid.kind == "rest"
+    assert invalid.reason == "Queued work failed strict validation."
+
 
 def test_queue_caps_duplicates_and_reconciliation_are_idempotent() -> None:
     queue = BoundedWorkQueue(global_cap=3, per_agent_cap=2)

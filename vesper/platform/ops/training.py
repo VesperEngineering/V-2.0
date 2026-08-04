@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal, Protocol, Self
 
 from pydantic import field_validator, model_validator
@@ -51,9 +51,23 @@ class CandidateTrainingRequest(StrictModel):
             raise ValueError("artifact root must be relative")
         if ".." in windows.parts or ".." in posix.parts:
             raise ValueError("artifact root cannot traverse parent directories")
+        if any(":" in part for part in windows.parts):
+            raise ValueError("artifact root cannot contain Windows drive or stream markers")
+        if any(PureWindowsPath(part).is_reserved() for part in windows.parts):
+            raise ValueError("artifact root cannot contain a reserved Windows name")
         if len(windows.parts) < 2 or windows.parts[0].casefold() != "candidates":
             raise ValueError("artifact root must stay below the approved candidates root")
         return value
+
+    def resolve_artifact_path(self, approved_root: Path) -> Path:
+        if not isinstance(approved_root, Path):
+            raise TypeError("approved_root must be Path")
+        root = approved_root.resolve(strict=False)
+        relative = Path(*PureWindowsPath(self.artifact_root).parts)
+        candidate = (root / relative).resolve(strict=False)
+        if not candidate.is_relative_to(root):
+            raise ValueError("artifact root resolves outside the approved root")
+        return candidate
 
 
 def canonical_training_request_sha256(request: CandidateTrainingRequest) -> str:
@@ -108,6 +122,12 @@ class WorkItem(StrictModel):
         ):
             raise ValueError("candidate request ID must match work ID")
         return self
+
+
+def validate_work_item(item: WorkItem) -> WorkItem:
+    if type(item) is not WorkItem:
+        raise TypeError("item must be WorkItem")
+    return WorkItem.model_validate_json(item.model_dump_json(), strict=True)
 
 
 class WorkReceipt(StrictModel):

@@ -115,7 +115,14 @@ def test_candidate_work_id_must_match_its_approved_request() -> None:
 
 @pytest.mark.parametrize(
     "artifact_root",
-    ["C:outside", "\\outside", "outside/candidate-1", "vesper/data/model_research"],
+    [
+        "C:outside",
+        "\\outside",
+        "outside/candidate-1",
+        "vesper/data/model_research",
+        "candidates/C:outside",
+        "candidates/file:stream",
+    ],
 )
 def test_candidate_artifact_root_stays_below_candidate_root(artifact_root) -> None:
     with pytest.raises(ValueError, match="artifact root"):
@@ -128,3 +135,20 @@ def test_candidate_artifact_root_stays_below_candidate_root(artifact_root) -> No
             evaluation_contract="evaluation-1",
             artifact_root=artifact_root,
         )
+
+
+def test_candidate_artifact_path_resolves_below_approved_root(tmp_path) -> None:
+    request = CandidateTrainingRequest(
+        request_id="candidate-1",
+        model_family="approved-family",
+        strategy="ml_model",
+        feature_set_id="features-1",
+        data_identity="massive-snapshot-1",
+        evaluation_contract="evaluation-1",
+        artifact_root="candidates/candidate-1",
+    )
+    approved_root = tmp_path / "approved"
+
+    resolved = request.resolve_artifact_path(approved_root)
+
+    assert resolved.is_relative_to(approved_root.resolve(strict=False))
