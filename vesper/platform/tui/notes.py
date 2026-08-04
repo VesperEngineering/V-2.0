@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -12,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, StringConstraints, ValidationError
+from pydantic import Field, StringConstraints, TypeAdapter, ValidationError
 
 from vesper.platform.tui.sqlite_ledger import (
     LedgerClosedError,
@@ -26,6 +27,11 @@ NoteBody = Annotated[str, StringConstraints(min_length=1, max_length=8_000)]
 NoteRevision = Annotated[int, Field(ge=1, le=2**63 - 1)]
 NoteTargetType = Literal["stock", "order", "approval", "agent-event"]
 _SEARCH_TOKEN = re.compile(r"\w+", re.UNICODE)
+_SAFE_ID = TypeAdapter(SafeId)
+
+
+class NoteConflictError(RuntimeError):
+    """Raised when a deterministic note ID points at different content."""
 
 
 class NoteVisibility(StrEnum):
@@ -141,7 +147,7 @@ class NoteStore:
         self._validate_target(target)
         self._validate_draft(body, visibility, author)
         with self._ledger.transaction() as connection:
-            return self._add_in_transaction(
+            return self.add_in_transaction(
                 connection,
                 target,
                 body,
@@ -149,13 +155,15 @@ class NoteStore:
                 author,
             )
 
-    def _add_in_transaction(
+    def add_in_transaction(
         self,
         connection: sqlite3.Connection,
         target: NoteTarget,
         body: str,
         visibility: NoteVisibility,
         author: str,
+        *,
+        note_id: str | None = None,
     ) -> NoteView:
         """Add a note inside the caller's active ledger transaction."""
 
@@ -164,9 +172,10 @@ class NoteStore:
         draft = self._validate_draft(body, visibility, author)
         self._ledger.require_transaction(connection)
         now = self._clock()
+        selected_note_id = self._id_factory() if note_id is None else note_id
         note = NoteView.model_validate(
             {
-                "note_id": self._id_factory(),
+                "note_id": selected_note_id,
                 "target": target,
                 "body": draft.body,
                 "visibility": draft.visibility,
@@ -178,6 +187,20 @@ class NoteStore:
             },
             strict=True,
         )
+        existing_row = connection.execute(
+            "SELECT * FROM notes WHERE note_id = ?",
+            (note.note_id,),
+        ).fetchone()
+        if existing_row is not None:
+            existing = self._decode_row(existing_row)
+            if (
+                existing.target == note.target
+                and existing.body == note.body
+                and existing.visibility is note.visibility
+                and existing.author == note.author
+            ):
+                return existing
+            raise NoteConflictError(f"note ID {note.note_id} has conflicting content")
         values = note.model_dump(mode="json")
         payload_json = _canonical_note_json(note)
         cursor = connection.execute(
@@ -233,6 +256,28 @@ class NoteStore:
             ),
         )
         return note
+
+    def add_for_command_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        command_id: str,
+        target: NoteTarget,
+        body: str,
+        visibility: NoteVisibility,
+        author: str,
+    ) -> NoteView:
+        """Add or replay the one deterministic note owned by a command."""
+
+        checked_command_id = _SAFE_ID.validate_python(command_id, strict=True)
+        digest = hashlib.sha256(checked_command_id.encode("ascii")).hexdigest()
+        return self.add_in_transaction(
+            connection,
+            target,
+            body,
+            visibility,
+            author,
+            note_id=f"note:command:{digest}",
+        )
 
     def list(self, target: NoteTarget) -> tuple[NoteView, ...]:
         """List one target's notes, newest database admission first."""

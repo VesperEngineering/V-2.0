@@ -9,7 +9,12 @@ from pydantic import ValidationError
 
 from vesper.platform.tui import notes as notes_module
 from vesper.platform.tui.event_store import EventStore
-from vesper.platform.tui.notes import NoteStore, NoteTarget, NoteVisibility
+from vesper.platform.tui.notes import (
+    NoteConflictError,
+    NoteStore,
+    NoteTarget,
+    NoteVisibility,
+)
 from vesper.platform.tui.sqlite_ledger import (
     LedgerClosedError,
     LedgerTransactionError,
@@ -123,7 +128,7 @@ def test_note_transaction_helper_rolls_back_with_its_future_receipt_transaction(
     )
     with pytest.raises(RuntimeError, match="receipt failed"):
         with ledger.transaction() as connection:
-            store._add_in_transaction(
+            store.add_in_transaction(
                 connection,
                 _target(),
                 "context",
@@ -133,6 +138,46 @@ def test_note_transaction_helper_rolls_back_with_its_future_receipt_transaction(
             raise RuntimeError("receipt failed")
     assert store.list(_target()) == ()
     assert store.search("context", notes_module.NoteFilters(), 10) == ()
+    ledger.close()
+
+
+def test_note_transaction_helper_accepts_explicit_id_and_replays_exact_content(
+    tmp_path,
+) -> None:
+    ledger = TuiLedger(tmp_path / "events.db")
+    store = NoteStore(ledger, clock=lambda: NOW)
+    with ledger.transaction() as connection:
+        note = store.add_in_transaction(
+            connection,
+            _target(),
+            "context",
+            NoteVisibility.PRIVATE,
+            "operator",
+            note_id="note:explicit",
+        )
+    with ledger.transaction() as connection:
+        assert (
+            store.add_in_transaction(
+                connection,
+                _target(),
+                "context",
+                NoteVisibility.PRIVATE,
+                "operator",
+                note_id="note:explicit",
+            )
+            == note
+        )
+    with pytest.raises(NoteConflictError, match="conflicting content"):
+        with ledger.transaction() as connection:
+            store.add_in_transaction(
+                connection,
+                _target(),
+                "different",
+                NoteVisibility.PRIVATE,
+                "operator",
+                note_id="note:explicit",
+            )
+    assert store.list(_target()) == (note,)
     ledger.close()
 
 
@@ -160,7 +205,7 @@ def test_event_and_note_effects_share_one_rollback_boundary(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="receipt failed"):
         with ledger.transaction() as connection:
             events._append_in_transaction(connection, event)
-            notes._add_in_transaction(
+            notes.add_in_transaction(
                 connection,
                 _target(),
                 "context",
@@ -400,7 +445,7 @@ def test_note_transaction_helper_requires_its_own_active_ledger_transaction(tmp_
     store = NoteStore(ledger, clock=lambda: NOW, id_factory=lambda: "note:guard")
     with ledger.read() as connection:
         with pytest.raises(LedgerTransactionError):
-            store._add_in_transaction(
+            store.add_in_transaction(
                 connection,
                 _target(),
                 "context",
@@ -409,7 +454,7 @@ def test_note_transaction_helper_requires_its_own_active_ledger_transaction(tmp_
             )
     with other_ledger.transaction() as connection:
         with pytest.raises(LedgerTransactionError):
-            store._add_in_transaction(
+            store.add_in_transaction(
                 connection,
                 _target(),
                 "context",

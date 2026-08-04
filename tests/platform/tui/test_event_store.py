@@ -113,6 +113,18 @@ BEGIN
 END;
 """
 
+_NOTE_SEARCH_SCHEMA = """
+CREATE VIRTUAL TABLE note_search USING fts5(
+    note_id,
+    target_type,
+    target_id,
+    body,
+    visibility,
+    author,
+    tokenize='unicode61'
+);
+"""
+
 
 def _create_v1_database(path, *, with_note: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +178,24 @@ def _create_v1_database(path, *, with_note: bool = False) -> None:
             )
 
 
+def _create_v2_database(path, *, with_note: bool = False) -> None:
+    _create_v1_database(path, with_note=with_note)
+    with sqlite3.connect(path) as connection:
+        connection.execute(_NOTE_SEARCH_SCHEMA)
+        connection.execute(
+            """
+            INSERT INTO note_search (
+                rowid, note_id, target_type, target_id, body, visibility, author
+            )
+            SELECT
+                note_sequence, note_id, target_type, target_id, body, visibility, author
+            FROM notes
+            ORDER BY note_sequence
+            """
+        )
+        connection.execute("PRAGMA user_version = 2")
+
+
 def _event(index: int, **changes: object) -> EventInput:
     values: dict[str, object] = {
         "event_id": f"event:{index}",
@@ -193,7 +223,7 @@ def test_ledger_migrates_reopens_and_configures_required_pragmas(tmp_path) -> No
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
         assert connection.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         tables = {
             row[0]
             for row in connection.execute(
@@ -202,7 +232,15 @@ def test_ledger_migrates_reopens_and_configures_required_pragmas(tmp_path) -> No
         }
     ledger.close()
 
-    assert {"events", "event_search", "notes", "note_history", "note_search"} <= tables
+    assert {
+        "events",
+        "event_search",
+        "notes",
+        "note_history",
+        "note_search",
+        "commands",
+        "command_receipt_events",
+    } <= tables
     reopened = TuiLedger(database)
     reopened.close()
 
@@ -211,13 +249,13 @@ def test_ledger_rejects_future_wrong_and_corrupt_databases(tmp_path) -> None:
     future = tmp_path / "future.db"
     TuiLedger(future).close()
     with sqlite3.connect(future) as connection:
-        connection.execute("PRAGMA user_version = 3")
+        connection.execute("PRAGMA user_version = 4")
     future_before = future.read_bytes()
     with pytest.raises(LedgerSchemaError, match="newer"):
         TuiLedger(future)
     assert future.read_bytes() == future_before
     with sqlite3.connect(future) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
     wrong = tmp_path / "wrong.db"
     with sqlite3.connect(wrong) as connection:
@@ -263,7 +301,7 @@ def test_ledger_migrates_exact_v1_data_and_backfills_note_search(tmp_path) -> No
 
     ledger = TuiLedger(database)
     with ledger.read() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
         row = connection.execute(
             "SELECT note_id, body FROM note_search WHERE note_search MATCH ?",
             ('"legacy"*',),
@@ -286,6 +324,42 @@ def test_ledger_migrates_exact_v1_data_and_backfills_note_search(tmp_path) -> No
 
     assert tuple(row) == ("note:legacy", "legacy risk context")
     assert parity == note_count == 1
+
+
+def test_ledger_migrates_exact_v2_data_and_adds_empty_command_ledger(tmp_path) -> None:
+    database = tmp_path / "legacy-v2.db"
+    _create_v2_database(database, with_note=True)
+
+    ledger = TuiLedger(database)
+    with ledger.read() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM note_search").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM commands").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM command_receipt_events"
+        ).fetchone()[0] == 0
+    ledger.close()
+
+
+def test_ledger_rejects_corrupt_v2_before_v3_migration_without_partial_schema(
+    tmp_path,
+) -> None:
+    database = tmp_path / "corrupt-v2.db"
+    _create_v2_database(database, with_note=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM note_search")
+    before = database.read_bytes()
+
+    with pytest.raises(LedgerCorruptionError, match="note search"):
+        TuiLedger(database)
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'commands'"
+        ).fetchone()[0] == 0
 
 
 def test_ledger_rejects_semantically_corrupt_v1_note_without_modification(tmp_path) -> None:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime
 from functools import lru_cache
@@ -14,7 +16,15 @@ from typing import Iterator
 
 
 APPLICATION_ID = 0x56323054
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+_COMMAND_STATUS_MESSAGES = {
+    "accepted": ("accepted", "Command accepted."),
+    "running": ("running", "Command is running."),
+    "completed": ("completed", "Command completed."),
+    "failed": ("failed", "Command failed."),
+    "cancelled": ("cancelled", "Command cancelled."),
+}
 
 _SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _UTC_TIMESTAMP_PATTERN = re.compile(
@@ -197,9 +207,259 @@ CREATE VIRTUAL TABLE note_search USING fts5(
 );
 """
 
+_COMMAND_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE commands (
+        command_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        command_id TEXT NOT NULL UNIQUE,
+        command_type TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL CHECK (
+            length(request_sha256) = 64
+            AND request_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        operator_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        reviewed_control_version TEXT NOT NULL CHECK (
+            reviewed_control_version = '0'
+            OR (
+                reviewed_control_version NOT LIKE '0%'
+                AND reviewed_control_version NOT GLOB '*[^0-9]*'
+                AND (
+                    length(reviewed_control_version) < 20
+                    OR (
+                        length(reviewed_control_version) = 20
+                        AND reviewed_control_version <= '18446744073709551615'
+                    )
+                )
+            )
+        ),
+        reviewed_control_hash TEXT NOT NULL CHECK (
+            length(reviewed_control_hash) = 64
+            AND reviewed_control_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        handler_key TEXT,
+        accepted_request_json TEXT CHECK (
+            accepted_request_json IS NULL OR json_valid(accepted_request_json)
+        ),
+        status TEXT NOT NULL CHECK (
+            status IN (
+                'accepted', 'rejected', 'running', 'completed', 'failed', 'cancelled'
+            )
+        ),
+        code TEXT NOT NULL,
+        safe_message TEXT NOT NULL CHECK (length(trim(safe_message)) BETWEEN 1 AND 512),
+        admitted_at_utc TEXT NOT NULL,
+        accepted_at_utc TEXT,
+        finished_at_utc TEXT,
+        result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+        claim_worker_id TEXT,
+        claim_token_sha256 TEXT CHECK (
+            claim_token_sha256 IS NULL
+            OR (
+                length(claim_token_sha256) = 64
+                AND claim_token_sha256 NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        claimed_at_utc TEXT,
+        claim_expires_at_utc TEXT,
+        CHECK (
+            (
+                status = 'rejected'
+                AND handler_key IS NULL
+                AND accepted_request_json IS NULL
+                AND accepted_at_utc IS NULL
+                AND finished_at_utc IS NOT NULL
+                AND result_json IS NULL
+                AND claim_worker_id IS NULL
+                AND claim_token_sha256 IS NULL
+                AND claimed_at_utc IS NULL
+                AND claim_expires_at_utc IS NULL
+            )
+            OR (
+                status = 'accepted'
+                AND handler_key IS NOT NULL
+                AND accepted_request_json IS NOT NULL
+                AND accepted_at_utc IS NOT NULL
+                AND finished_at_utc IS NULL
+                AND result_json IS NULL
+                AND claim_worker_id IS NULL
+                AND claim_token_sha256 IS NULL
+                AND claimed_at_utc IS NULL
+                AND claim_expires_at_utc IS NULL
+            )
+            OR (
+                status = 'running'
+                AND handler_key IS NOT NULL
+                AND accepted_request_json IS NOT NULL
+                AND accepted_at_utc IS NOT NULL
+                AND finished_at_utc IS NULL
+                AND result_json IS NULL
+                AND claim_worker_id IS NOT NULL
+                AND claim_token_sha256 IS NOT NULL
+                AND claimed_at_utc IS NOT NULL
+                AND claim_expires_at_utc IS NOT NULL
+            )
+            OR (
+                status IN ('completed', 'failed', 'cancelled')
+                AND handler_key IS NOT NULL
+                AND accepted_request_json IS NOT NULL
+                AND accepted_at_utc IS NOT NULL
+                AND finished_at_utc IS NOT NULL
+                AND claim_worker_id IS NOT NULL
+                AND claim_token_sha256 IS NOT NULL
+                AND claimed_at_utc IS NOT NULL
+                AND claim_expires_at_utc IS NOT NULL
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX commands_status_expiry
+    ON commands(status, claim_expires_at_utc, command_sequence)
+    """,
+    """
+    CREATE TABLE command_receipt_events (
+        event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        command_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+            status IN (
+                'accepted', 'rejected', 'running', 'completed', 'failed', 'cancelled'
+            )
+        ),
+        code TEXT NOT NULL,
+        safe_message TEXT NOT NULL CHECK (length(trim(safe_message)) BETWEEN 1 AND 512),
+        occurred_at_utc TEXT NOT NULL,
+        worker_id TEXT,
+        result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+        FOREIGN KEY(command_id) REFERENCES commands(command_id) ON DELETE RESTRICT,
+        CHECK (
+            (status IN ('accepted', 'rejected') AND worker_id IS NULL AND result_json IS NULL)
+            OR (status = 'running' AND worker_id IS NOT NULL AND result_json IS NULL)
+            OR (status IN ('completed', 'failed', 'cancelled') AND worker_id IS NOT NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX command_receipt_events_command_order
+    ON command_receipt_events(command_id, event_sequence)
+    """,
+    """
+    CREATE TRIGGER command_receipt_events_no_update
+    BEFORE UPDATE ON command_receipt_events
+    BEGIN
+        SELECT RAISE(ABORT, 'command receipt events are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER command_receipt_events_no_delete
+    BEFORE DELETE ON command_receipt_events
+    BEGIN
+        SELECT RAISE(ABORT, 'command receipt events are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER commands_no_delete
+    BEFORE DELETE ON commands
+    BEGIN
+        SELECT RAISE(ABORT, 'commands cannot be deleted');
+    END
+    """,
+    """
+    CREATE TRIGGER commands_admission_immutable
+    BEFORE UPDATE ON commands
+    WHEN NEW.command_sequence IS NOT OLD.command_sequence
+      OR NEW.command_id IS NOT OLD.command_id
+      OR NEW.command_type IS NOT OLD.command_type
+      OR NEW.request_sha256 IS NOT OLD.request_sha256
+      OR NEW.operator_id IS NOT OLD.operator_id
+      OR NEW.client_id IS NOT OLD.client_id
+      OR NEW.reviewed_control_version IS NOT OLD.reviewed_control_version
+      OR NEW.reviewed_control_hash IS NOT OLD.reviewed_control_hash
+      OR NEW.handler_key IS NOT OLD.handler_key
+      OR NEW.accepted_request_json IS NOT OLD.accepted_request_json
+      OR NEW.admitted_at_utc IS NOT OLD.admitted_at_utc
+      OR NEW.accepted_at_utc IS NOT OLD.accepted_at_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'command admission is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER commands_terminal_immutable
+    BEFORE UPDATE ON commands
+    WHEN OLD.status IN ('rejected', 'completed', 'failed', 'cancelled')
+    BEGIN
+        SELECT RAISE(ABORT, 'terminal command receipt is immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER commands_status_transition
+    BEFORE UPDATE ON commands
+    WHEN (
+        NEW.status IS NOT OLD.status
+        OR NEW.code IS NOT OLD.code
+        OR NEW.safe_message IS NOT OLD.safe_message
+        OR NEW.finished_at_utc IS NOT OLD.finished_at_utc
+        OR NEW.result_json IS NOT OLD.result_json
+        OR NEW.claim_worker_id IS NOT OLD.claim_worker_id
+        OR NEW.claim_token_sha256 IS NOT OLD.claim_token_sha256
+        OR NEW.claimed_at_utc IS NOT OLD.claimed_at_utc
+        OR NEW.claim_expires_at_utc IS NOT OLD.claim_expires_at_utc
+    )
+    AND NOT (
+        (OLD.status = 'accepted' AND NEW.status = 'running')
+        OR (
+            OLD.status = 'running'
+            AND NEW.status = 'running'
+            AND (
+                CASE
+                    WHEN instr(NEW.claimed_at_utc, '.') = 0
+                    THEN substr(NEW.claimed_at_utc, 1, 19) || '.000000Z'
+                    ELSE substr(NEW.claimed_at_utc, 1, 20)
+                         || substr(
+                             substr(
+                                 NEW.claimed_at_utc,
+                                 21,
+                                 length(NEW.claimed_at_utc) - 21
+                             ) || '000000',
+                             1,
+                             6
+                         ) || 'Z'
+                END
+            ) >= (
+                CASE
+                    WHEN instr(OLD.claim_expires_at_utc, '.') = 0
+                    THEN substr(OLD.claim_expires_at_utc, 1, 19) || '.000000Z'
+                    ELSE substr(OLD.claim_expires_at_utc, 1, 20)
+                         || substr(
+                             substr(
+                                 OLD.claim_expires_at_utc,
+                                 21,
+                                 length(OLD.claim_expires_at_utc) - 21
+                             ) || '000000',
+                             1,
+                             6
+                         ) || 'Z'
+                END
+            )
+            AND NEW.claim_token_sha256 IS NOT OLD.claim_token_sha256
+        )
+        OR (
+            OLD.status = 'running'
+            AND NEW.status IN ('completed', 'failed', 'cancelled')
+        )
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid command status transition');
+    END
+    """,
+)
+
+_COMMAND_SCHEMA = ";\n".join(statement.strip() for statement in _COMMAND_SCHEMA_STATEMENTS) + ";\n"
+
 _SCHEMAS = {
     1: _SCHEMA_V1,
     2: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA,
+    3: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA + _COMMAND_SCHEMA,
 }
 _REQUIRED_COLUMNS = {
     1: _REQUIRED_COLUMNS_V1,
@@ -212,6 +472,50 @@ _REQUIRED_COLUMNS = {
             "body",
             "visibility",
             "author",
+        ),
+    },
+    3: {
+        **_REQUIRED_COLUMNS_V1,
+        "note_search": (
+            "note_id",
+            "target_type",
+            "target_id",
+            "body",
+            "visibility",
+            "author",
+        ),
+        "commands": (
+            "command_sequence",
+            "command_id",
+            "command_type",
+            "request_sha256",
+            "operator_id",
+            "client_id",
+            "reviewed_control_version",
+            "reviewed_control_hash",
+            "handler_key",
+            "accepted_request_json",
+            "status",
+            "code",
+            "safe_message",
+            "admitted_at_utc",
+            "accepted_at_utc",
+            "finished_at_utc",
+            "result_json",
+            "claim_worker_id",
+            "claim_token_sha256",
+            "claimed_at_utc",
+            "claim_expires_at_utc",
+        ),
+        "command_receipt_events": (
+            "event_sequence",
+            "command_id",
+            "status",
+            "code",
+            "safe_message",
+            "occurred_at_utc",
+            "worker_id",
+            "result_json",
         ),
     },
 }
@@ -246,8 +550,72 @@ def _invalid_note_content() -> LedgerCorruptionError:
     return LedgerCorruptionError("TUI ledger note content is invalid")
 
 
+def _invalid_command_content() -> LedgerCorruptionError:
+    return LedgerCorruptionError("TUI ledger command content is invalid")
+
+
 def _is_safe_id(value: object) -> bool:
     return type(value) is str and _SAFE_ID_PATTERN.fullmatch(value) is not None
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_wire_uint_text(value: object) -> bool:
+    return (
+        type(value) is str
+        and value.isascii()
+        and value.isdecimal()
+        and (value == "0" or not value.startswith("0"))
+        and int(value) <= 2**64 - 1
+    )
+
+
+def _decode_canonical_object(value: object) -> dict[str, object]:
+    if type(value) is not str:
+        raise _invalid_command_content()
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise _invalid_command_content() from exc
+    if type(decoded) is not dict:
+        raise _invalid_command_content()
+    try:
+        canonical = json.dumps(
+            decoded,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _invalid_command_content() from exc
+    if canonical != value:
+        raise _invalid_command_content()
+    return decoded
+
+
+def _contains_sensitive_key(value: object) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = "".join(
+                character
+                for character in unicodedata.normalize("NFKC", key).casefold()
+                if character.isalnum()
+            )
+            if any(
+                marker in normalized
+                for marker in ("secret", "token", "password", "credential", "apikey")
+            ) or _contains_sensitive_key(child):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_sensitive_key(child) for child in value)
+    return False
 
 
 def _parse_canonical_utc(value: object) -> datetime | None:
@@ -349,6 +717,7 @@ class TuiLedger:
                 self._configure(connection)
                 self._initialize_schema(connection)
             self._validate_owned_schema(connection, expected_version=SCHEMA_VERSION)
+            self._validate_note_search_parity(connection, check_index=True)
         except LedgerSchemaError:
             self._close_after_failed_open()
             raise
@@ -490,25 +859,29 @@ class TuiLedger:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection, version: int) -> None:
-        if version != 1:
+        if version not in (1, 2):
             raise LedgerSchemaError("unsupported TUI ledger schema version")
         try:
             connection.execute("BEGIN IMMEDIATE")
             TuiLedger._validate_v1_note_content(connection)
-            connection.execute(_NOTE_SEARCH_SCHEMA)
-            connection.execute(
-                """
-                INSERT INTO note_search (
-                    rowid, note_id, target_type, target_id, body, visibility, author
+            if version == 1:
+                connection.execute(_NOTE_SEARCH_SCHEMA)
+                connection.execute(
+                    """
+                    INSERT INTO note_search (
+                        rowid, note_id, target_type, target_id, body, visibility, author
+                    )
+                    SELECT
+                        note_sequence, note_id, target_type, target_id, body, visibility, author
+                    FROM notes
+                    ORDER BY note_sequence
+                    """
                 )
-                SELECT
-                    note_sequence, note_id, target_type, target_id, body, visibility, author
-                FROM notes
-                ORDER BY note_sequence
-                """
-            )
+            TuiLedger._validate_note_search_parity(connection, check_index=True)
+            for statement in _COMMAND_SCHEMA_STATEMENTS:
+                connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-            TuiLedger._validate_note_search_parity(connection)
+            TuiLedger._validate_command_content(connection)
             TuiLedger._validate_owned_schema(
                 connection,
                 expected_version=SCHEMA_VERSION,
@@ -587,7 +960,11 @@ class TuiLedger:
                 previous_updated = updated
 
     @staticmethod
-    def _validate_note_search_parity(connection: sqlite3.Connection) -> None:
+    def _validate_note_search_parity(
+        connection: sqlite3.Connection,
+        *,
+        check_index: bool,
+    ) -> None:
         note_count = int(connection.execute("SELECT COUNT(*) FROM notes").fetchone()[0])
         search_count = int(
             connection.execute("SELECT COUNT(*) FROM note_search").fetchone()[0]
@@ -609,7 +986,306 @@ class TuiLedger:
         )
         if search_count != note_count or parity_count != note_count:
             raise LedgerCorruptionError("TUI ledger note search content is invalid")
-        connection.execute("INSERT INTO note_search(note_search) VALUES ('integrity-check')")
+        if check_index:
+            connection.execute("INSERT INTO note_search(note_search) VALUES ('integrity-check')")
+
+    @staticmethod
+    def _validate_command_content(connection: sqlite3.Connection) -> None:
+        from .command_contracts import (
+            PAYLOAD_MODELS,
+            CommandReceipt,
+            CommandRequest,
+            ReceiptStatus,
+        )
+        from .command_policy import AuthorizationDecision
+
+        commands: dict[str, sqlite3.Row] = {}
+        for row in connection.execute("SELECT * FROM commands ORDER BY command_sequence"):
+            command_id = row["command_id"]
+            request_sha256 = row["request_sha256"]
+            control_version = row["reviewed_control_version"]
+            control_hash = row["reviewed_control_hash"]
+            admitted_at = _parse_canonical_utc(row["admitted_at_utc"])
+            accepted_at = (
+                None
+                if row["accepted_at_utc"] is None
+                else _parse_canonical_utc(row["accepted_at_utc"])
+            )
+            finished_at = (
+                None
+                if row["finished_at_utc"] is None
+                else _parse_canonical_utc(row["finished_at_utc"])
+            )
+            claimed_at = (
+                None
+                if row["claimed_at_utc"] is None
+                else _parse_canonical_utc(row["claimed_at_utc"])
+            )
+            claim_expires_at = (
+                None
+                if row["claim_expires_at_utc"] is None
+                else _parse_canonical_utc(row["claim_expires_at_utc"])
+            )
+            if (
+                not _is_safe_id(command_id)
+                or not _is_safe_id(row["command_type"])
+                or row["command_type"] not in PAYLOAD_MODELS
+                or not _is_safe_id(row["operator_id"])
+                or not _is_safe_id(row["client_id"])
+                or not _is_sha256(request_sha256)
+                or not _is_wire_uint_text(control_version)
+                or not _is_sha256(control_hash)
+                or not _is_safe_id(row["code"])
+                or type(row["safe_message"]) is not str
+                or not 1 <= len(row["safe_message"].strip()) <= 512
+                or admitted_at is None
+                or (
+                    row["claim_worker_id"] is not None
+                    and not _is_safe_id(row["claim_worker_id"])
+                )
+                or (
+                    row["claim_token_sha256"] is not None
+                    and not _is_sha256(row["claim_token_sha256"])
+                )
+            ):
+                raise _invalid_command_content()
+            status = row["status"]
+            request_json = row["accepted_request_json"]
+            result_json = row["result_json"]
+            if status in _COMMAND_STATUS_MESSAGES and (
+                row["code"],
+                row["safe_message"],
+            ) != _COMMAND_STATUS_MESSAGES[status]:
+                raise _invalid_command_content()
+            if request_json is not None:
+                request = _decode_canonical_object(request_json)
+                try:
+                    typed_request = CommandRequest.model_validate_json(
+                        request_json,
+                        strict=True,
+                    )
+                    typed_canonical = json.dumps(
+                        typed_request.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                        allow_nan=False,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise _invalid_command_content() from exc
+                if (
+                    set(request)
+                    != {
+                        "command_id",
+                        "command_type",
+                        "confirmation",
+                        "payload",
+                        "reason",
+                        "reviewed_control_hash",
+                        "reviewed_control_version",
+                    }
+                    or request["command_id"] != command_id
+                    or request["command_type"] != row["command_type"]
+                    or request["reviewed_control_version"] != int(control_version)
+                    or request["reviewed_control_hash"] != control_hash
+                    or typed_canonical != request_json
+                    or hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+                    != request_sha256
+                ):
+                    raise _invalid_command_content()
+            if result_json is not None:
+                result = _decode_canonical_object(result_json)
+                if _contains_sensitive_key(result):
+                    raise _invalid_command_content()
+            else:
+                result = None
+            try:
+                CommandReceipt(
+                    command_id=command_id,
+                    status=ReceiptStatus(status),
+                    code=row["code"],
+                    safe_message=row["safe_message"],
+                    accepted_at_utc=row["accepted_at_utc"],
+                    finished_at_utc=row["finished_at_utc"],
+                    result=result,
+                )
+            except (TypeError, ValueError) as exc:
+                raise _invalid_command_content() from exc
+            if (
+                (accepted_at is not None and accepted_at < admitted_at)
+                or (finished_at is not None and finished_at < admitted_at)
+                or (claimed_at is not None and accepted_at is not None and claimed_at < accepted_at)
+                or (
+                    claim_expires_at is not None
+                    and claimed_at is not None
+                    and claim_expires_at <= claimed_at
+                )
+            ):
+                raise _invalid_command_content()
+            if status == "rejected":
+                try:
+                    AuthorizationDecision(
+                        allowed=False,
+                        code=row["code"],
+                        safe_message=row["safe_message"],
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise _invalid_command_content() from exc
+                if (
+                    request_json is not None
+                    or accepted_at is not None
+                    or finished_at is None
+                    or finished_at != admitted_at
+                ):
+                    raise _invalid_command_content()
+            elif status in {"accepted", "running", "completed", "failed", "cancelled"}:
+                if (
+                    request_json is None
+                    or accepted_at is None
+                    or not _is_safe_id(row["handler_key"])
+                    or accepted_at != admitted_at
+                ):
+                    raise _invalid_command_content()
+                if status in {"completed", "failed", "cancelled"} and (
+                    finished_at is None
+                    or claimed_at is None
+                    or claim_expires_at is None
+                    or finished_at < claimed_at
+                    or finished_at >= claim_expires_at
+                ):
+                    raise _invalid_command_content()
+            else:
+                raise _invalid_command_content()
+            commands[str(command_id)] = row
+
+        events: dict[str, list[sqlite3.Row]] = {}
+        for row in connection.execute(
+            "SELECT * FROM command_receipt_events ORDER BY event_sequence"
+        ):
+            command_id = row["command_id"]
+            if (
+                command_id not in commands
+                or not _is_safe_id(row["code"])
+                or type(row["safe_message"]) is not str
+                or not 1 <= len(row["safe_message"].strip()) <= 512
+                or _parse_canonical_utc(row["occurred_at_utc"]) is None
+                or (row["worker_id"] is not None and not _is_safe_id(row["worker_id"]))
+            ):
+                raise _invalid_command_content()
+            if (
+                row["status"] in {"accepted", "rejected"}
+                and (row["worker_id"] is not None or row["result_json"] is not None)
+            ) or (
+                row["status"] == "running"
+                and (row["worker_id"] is None or row["result_json"] is not None)
+            ) or (
+                row["status"] in {"completed", "failed", "cancelled"}
+                and row["worker_id"] is None
+            ):
+                raise _invalid_command_content()
+            if row["status"] in _COMMAND_STATUS_MESSAGES and (
+                row["code"],
+                row["safe_message"],
+            ) != _COMMAND_STATUS_MESSAGES[row["status"]]:
+                raise _invalid_command_content()
+            if row["result_json"] is not None:
+                result = _decode_canonical_object(row["result_json"])
+                if _contains_sensitive_key(result):
+                    raise _invalid_command_content()
+            else:
+                result = None
+            try:
+                CommandReceipt(
+                    command_id=command_id,
+                    status=ReceiptStatus(row["status"]),
+                    code=row["code"],
+                    safe_message=row["safe_message"],
+                    accepted_at_utc=None,
+                    finished_at_utc=None,
+                    result=result,
+                )
+            except (TypeError, ValueError) as exc:
+                raise _invalid_command_content() from exc
+            events.setdefault(str(command_id), []).append(row)
+
+        if set(events) != set(commands):
+            raise _invalid_command_content()
+        terminal = {"rejected", "completed", "failed", "cancelled"}
+        for command_id, command_events in events.items():
+            statuses = [str(event["status"]) for event in command_events]
+            event_times = [
+                _parse_canonical_utc(event["occurred_at_utc"])
+                for event in command_events
+            ]
+            previous_event_time: datetime | None = None
+            previous_running_time: datetime | None = None
+            for event_status, event_time in zip(statuses, event_times, strict=True):
+                if event_time is None or (
+                    previous_event_time is not None
+                    and event_time < previous_event_time
+                ):
+                    raise _invalid_command_content()
+                if event_status == "running":
+                    if (
+                        previous_running_time is not None
+                        and event_time <= previous_running_time
+                    ):
+                        raise _invalid_command_content()
+                    previous_running_time = event_time
+                previous_event_time = event_time
+            first = statuses[0]
+            if first not in {"accepted", "rejected"}:
+                raise _invalid_command_content()
+            if first == "rejected" and len(statuses) != 1:
+                raise _invalid_command_content()
+            if first == "accepted":
+                seen_running = False
+                seen_terminal = False
+                for index, status in enumerate(statuses[1:], start=1):
+                    if status == "running" and not seen_terminal:
+                        seen_running = True
+                        continue
+                    if status in {"completed", "failed", "cancelled"} and seen_running:
+                        if seen_terminal or index != len(statuses) - 1:
+                            raise _invalid_command_content()
+                        seen_terminal = True
+                        continue
+                    raise _invalid_command_content()
+            current = commands[command_id]
+            latest = command_events[-1]
+            first_event = command_events[0]
+            running_events = [
+                event for event in command_events if event["status"] == "running"
+            ]
+            if (
+                first == "accepted"
+                and first_event["occurred_at_utc"] != current["accepted_at_utc"]
+            ):
+                raise _invalid_command_content()
+            if running_events:
+                latest_running = running_events[-1]
+                if (
+                    latest_running["occurred_at_utc"] != current["claimed_at_utc"]
+                    or latest_running["worker_id"] != current["claim_worker_id"]
+                ):
+                    raise _invalid_command_content()
+            expected_latest_time = {
+                "accepted": current["accepted_at_utc"],
+                "rejected": current["finished_at_utc"],
+                "running": current["claimed_at_utc"],
+                "completed": current["finished_at_utc"],
+                "failed": current["finished_at_utc"],
+                "cancelled": current["finished_at_utc"],
+            }[str(current["status"])]
+            if (
+                latest["status"] != current["status"]
+                or latest["code"] != current["code"]
+                or latest["safe_message"] != current["safe_message"]
+                or latest["result_json"] != current["result_json"]
+                or latest["worker_id"] != current["claim_worker_id"]
+                or latest["occurred_at_utc"] != expected_latest_time
+            ):
+                raise _invalid_command_content()
 
     @staticmethod
     def _is_unclaimed_empty(connection: sqlite3.Connection) -> bool:
@@ -661,6 +1337,11 @@ class TuiLedger:
             )
             if actual_columns != expected_columns:
                 raise LedgerSchemaError("TUI ledger schema columns are incomplete or damaged")
+        TuiLedger._validate_v1_note_content(connection)
+        if version >= 2:
+            TuiLedger._validate_note_search_parity(connection, check_index=False)
+        if version >= 3:
+            TuiLedger._validate_command_content(connection)
         quick_check = tuple(
             str(row[0]) for row in connection.execute("PRAGMA quick_check")
         )
