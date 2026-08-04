@@ -40,6 +40,9 @@ from .contracts import (
     AuthUnlockPayload,
     CapabilityState,
     CapabilityView,
+    ChatEventPayload,
+    ChatHistoryRequestPayload,
+    ChatHistoryResultPayload,
     ClientHelloPayload,
     Freshness,
     HeaderView,
@@ -59,6 +62,7 @@ from .contracts import (
     WireEnvelope,
     decode_payload,
 )
+from .conversations import ConversationStore
 from .outbox import OutboundQueue
 from .pipe_security import current_logon_sid
 from .search import GlobalSearchService
@@ -189,6 +193,7 @@ class Gateway:
         platform_runtime_reader: _PlatformRuntimeReadPort | None = None,
         recovery_service: RecoveryService | None = None,
         snapshot_cache: SnapshotCache | None = None,
+        conversation_store: ConversationStore | None = None,
         logon_sid_provider: Callable[[], str] = current_logon_sid,
     ) -> None:
         if not callable(logon_sid_provider):
@@ -197,6 +202,8 @@ class Gateway:
             raise TypeError("recovery_service must be a RecoveryService")
         if snapshot_cache is not None and type(snapshot_cache) is not SnapshotCache:
             raise TypeError("snapshot_cache must be a SnapshotCache")
+        if conversation_store is not None and type(conversation_store) is not ConversationStore:
+            raise TypeError("conversation_store must be a ConversationStore")
         self._verifier_path = Path(state_root) / "password-verifier.json"
         self._password_store = PasswordStore(self._verifier_path)
         self._lease = ControlLease()
@@ -214,6 +221,7 @@ class Gateway:
         self._platform_runtime_sample = self._unavailable_platform_runtime_sample()
         self._recovery_service = recovery_service
         self._snapshot_cache = snapshot_cache
+        self._conversation_store = conversation_store
         self._cached_snapshot: CachedSnapshot | None = None
         self._snapshot_cache_unavailable = False
         self._logon_sid_provider = logon_sid_provider
@@ -283,6 +291,18 @@ class Gateway:
                 raise RuntimeError("search service is already attached")
             service.update_snapshot(self._snapshot)
             self._search_service = service
+
+    def attach_conversation_store(self, store: ConversationStore) -> None:
+        """Attach the one controller-owned durable agent-chat store."""
+
+        if type(store) is not ConversationStore:
+            raise TypeError("store must be a ConversationStore")
+        with self._publication_lock:
+            if self._conversation_store is store:
+                return
+            if self._conversation_store is not None:
+                raise RuntimeError("conversation store is already attached")
+            self._conversation_store = store
 
     def attach_platform_runtime_reader(
         self,
@@ -448,6 +468,23 @@ class Gateway:
                 state_version=self._snapshot.shell.state_version,
             )
 
+    def publish_chat_event(self, event: ChatEventPayload) -> None:
+        """Publish one validated agent-chat event to subscribed sessions."""
+
+        if type(event) is not ChatEventPayload:
+            raise TypeError("event must be a ChatEventPayload")
+        validated = ChatEventPayload.model_validate(
+            event.model_dump(mode="python"),
+            strict=True,
+        )
+        with self._publication_lock:
+            self._publish_to_subscribers(
+                MessageType.CHAT_EVENT,
+                validated,
+                state_version=self._snapshot.shell.state_version,
+                replace_key=None,
+            )
+
     def _publish_event_to_subscribers(
         self,
         event: EventPayload,
@@ -535,6 +572,55 @@ class Gateway:
 
             if not session._authenticated:
                 return (self._error(session, "locked", "Console session is locked."),)
+
+            if envelope.message_type is MessageType.CHAT_HISTORY_REQUEST:
+                payload = self._payload(envelope, ChatHistoryRequestPayload, session)
+                if isinstance(payload, WireEnvelope):
+                    return (payload,)
+                assert isinstance(payload, ChatHistoryRequestPayload)
+                store = self._conversation_store
+                if store is None:
+                    return (
+                        self._error(
+                            session,
+                            "chat-unavailable",
+                            "Chat history is unavailable.",
+                        ),
+                    )
+                try:
+                    page = store.export_history(payload.agent_id, payload.limit, payload.cursor)
+                except Exception:
+                    return (
+                        self._error(
+                            session,
+                            "chat-unavailable",
+                            "Chat history is unavailable.",
+                        ),
+                    )
+                responses: list[WireEnvelope] = []
+                for event in page.events:
+                    response = self._emit(
+                        session,
+                        MessageType.CHAT_EVENT,
+                        event,
+                        state_version=self._snapshot.shell.state_version,
+                    )
+                    if response.message_type is MessageType.PROTOCOL_ERROR:
+                        return (response,)
+                    responses.append(response)
+                result = self._emit(
+                    session,
+                    MessageType.CHAT_HISTORY_RESULT,
+                    ChatHistoryResultPayload(
+                        agent_id=page.agent_id,
+                        next_cursor=page.next_cursor,
+                    ),
+                    state_version=self._snapshot.shell.state_version,
+                )
+                if result.message_type is MessageType.PROTOCOL_ERROR:
+                    return (result,)
+                responses.append(result)
+                return tuple(responses)
 
             if envelope.message_type is MessageType.COMMAND:
                 registry = self._command_registry

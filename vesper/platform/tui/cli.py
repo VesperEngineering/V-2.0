@@ -20,6 +20,7 @@ from vesper.platform.service import LocalPlatformService
 from .command_ports import LocalPlatformCommandPort
 from .command_registry import CommandRegistry
 from .contracts import SafeId, WireEnvelope
+from .conversations import ConversationStore
 from .event_store import EventStore
 from .gateway import Gateway
 from .notes import NoteStore
@@ -107,6 +108,7 @@ class _ProjectionRuntime:
     search_service: GlobalSearchService
     platform_runtime_reader: PlatformRuntimeProjection
     command_registry: CommandRegistry | None
+    conversation_store: ConversationStore | None
 
     def close(self) -> None:
         self.search_service.close()
@@ -116,6 +118,8 @@ class _ProjectionRuntime:
             self.event_store.close()
         if self.note_store is not None:
             self.note_store.close()
+        if self.conversation_store is not None:
+            self.conversation_store.close()
         if self.ledger is not None:
             self.ledger.close()
 
@@ -127,15 +131,14 @@ def _build_projection_runtime(
     platform_paths: PlatformPaths | None = None,
 ) -> _ProjectionRuntime:
     repository_root = Path(__file__).resolve().parents[3]
-    selected_platform_paths = (
-        default_platform_paths() if platform_paths is None else platform_paths
-    )
+    selected_platform_paths = default_platform_paths() if platform_paths is None else platform_paths
     platform_runtime_reader = PlatformRuntimeProjection(selected_platform_paths)
     gateway.attach_platform_runtime_reader(platform_runtime_reader)
     ledger: TuiLedger | None = None
     event_store: EventStore | None = None
     note_store: NoteStore | None = None
     command_registry: CommandRegistry | None = None
+    conversation_store: ConversationStore | None = None
     search_service: GlobalSearchService | None = None
     persistent_search_error: str | None = None
     try:
@@ -154,6 +157,14 @@ def _build_projection_runtime(
                 ledger.close()
                 ledger = None
             persistent_search_error = "Persisted search history is unavailable."
+
+        try:
+            conversation_store = ConversationStore(state_root / "conversations.sqlite3")
+            gateway.attach_conversation_store(conversation_store)
+        except _OPERATIONAL_ADAPTER_ERRORS:
+            if conversation_store is not None:
+                conversation_store.close()
+                conversation_store = None
 
         try:
             native = NativePlatformProjection(repository_root)
@@ -269,6 +280,8 @@ def _build_projection_runtime(
             event_store.close()
         if note_store is not None:
             note_store.close()
+        if conversation_store is not None:
+            conversation_store.close()
         if ledger is not None:
             ledger.close()
         raise
@@ -280,6 +293,7 @@ def _build_projection_runtime(
         search_service=search_service,
         platform_runtime_reader=platform_runtime_reader,
         command_registry=command_registry,
+        conversation_store=conversation_store,
     )
 
 
@@ -383,8 +397,8 @@ class _GatewayConnection:
     def __call__(self, body: bytes) -> bytes | None:
         envelope = WireEnvelope.model_validate_json(body)
         responses = self._coordinator.handle(self._client_id, envelope)
-        if len(responses) != 1:
-            raise RuntimeError("gateway emitted an invalid response count")
+        if not responses:
+            raise RuntimeError("gateway emitted no response")
         return self.poll()
 
     def poll(self) -> bytes | None:
