@@ -9,12 +9,16 @@ from enum import StrEnum
 from typing import Annotated, Literal, TypeAlias, cast
 
 from pydantic import (
+    AfterValidator,
     Field,
     StringConstraints,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from typing_extensions import TypeAliasType
+
+from vesper.platform.contracts import AgentRole
 
 from .command_contracts import (
     CommandMessagePayload,
@@ -53,6 +57,8 @@ JsonValue = TypeAliasType(
     "JsonValue",
     JsonScalar | list["JsonValue"] | dict[str, "JsonValue"],
 )
+
+
 class MessageType(StrEnum):
     CLIENT_HELLO = "client-hello"
     SERVER_HELLO = "server-hello"
@@ -67,12 +73,16 @@ class MessageType(StrEnum):
     SNAPSHOT = "snapshot"
     SEARCH_REQUEST = "search-request"
     SEARCH_RESULTS = "search-results"
+    CHAT_HISTORY_REQUEST = "chat-history-request"
+    CHAT_EVENT = "chat-event"
+    CHAT_HISTORY_RESULT = "chat-history-result"
     COMMAND = "command"
     COMMAND_RECEIPT = "command-receipt"
     EVENT = "event"
     PROTOCOL_ERROR = "protocol-error"
     PING = "ping"
     PONG = "pong"
+
 
 def _canonical_json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -161,6 +171,21 @@ SearchQuery = Annotated[
 ]
 SearchLimit = Annotated[int, Field(ge=1, le=100)]
 SearchRequestId = Annotated[int, Field(ge=1, le=2**64 - 1)]
+ChatHistoryLimit = Annotated[int, Field(ge=1, le=20)]
+ChatChunkSequence = Annotated[int, Field(ge=1, le=2**63 - 1)]
+ChatTokenCount = Annotated[int, Field(ge=0, le=2**63 - 1)]
+ChatText = Annotated[str, StringConstraints(min_length=1, max_length=64 * 1024)]
+
+
+def _require_approved_agent_id(value: str) -> str:
+    try:
+        AgentRole(value)
+    except ValueError as exc:
+        raise ValueError("agent_id must name an approved V20 agent") from exc
+    return value
+
+
+ApprovedAgentId = Annotated[SafeId, AfterValidator(_require_approved_agent_id)]
 
 
 class SearchRequestPayload(StrictModel):
@@ -175,6 +200,65 @@ class SearchResultsPayload(StrictModel):
     indexed_state_version: WireUInt
     results: Annotated[tuple[SearchResult, ...], Field(max_length=100)]
     error: NonEmptyStr | None
+
+
+class ChatHistoryRequestPayload(StrictModel):
+    agent_id: ApprovedAgentId
+    limit: ChatHistoryLimit
+    cursor: SafeId | None
+
+
+class ChatEventPayload(StrictModel):
+    event_id: SafeId
+    agent_id: ApprovedAgentId
+    message_id: SafeId
+    role: Literal["human", "agent"]
+    operation: Literal["chunk", "complete", "interrupted"]
+    chunk_sequence: ChatChunkSequence | None
+    text: ChatText | None
+    token_count: ChatTokenCount | None
+    message_created_at_utc: UtcDateTime
+    occurred_at_utc: UtcDateTime | None
+    validation_receipt_id: SafeId | None
+    raw_text_sha256: Sha256Hex | None
+
+    @field_validator("text")
+    @classmethod
+    def bound_text_bytes(cls, value: str | None) -> str | None:
+        if value is not None and len(value.encode("utf-8")) > 64 * 1024:
+            raise ValueError("chat chunk text exceeds the 64 KiB UTF-8 limit")
+        return value
+
+    @model_validator(mode="after")
+    def validate_operation_fields(self) -> ChatEventPayload:
+        if self.operation == "chunk":
+            if self.chunk_sequence is None or self.text is None:
+                raise ValueError("chunk events require chunk_sequence and text")
+            if any(
+                value is not None
+                for value in (
+                    self.occurred_at_utc,
+                    self.validation_receipt_id,
+                    self.raw_text_sha256,
+                )
+            ):
+                raise ValueError("chunk events cannot contain terminal fields")
+            return self
+        if any(value is not None for value in (self.chunk_sequence, self.text, self.token_count)):
+            raise ValueError("terminal events cannot contain chunk fields")
+        if self.occurred_at_utc is None:
+            raise ValueError("terminal events require occurred_at_utc")
+        if self.operation == "complete":
+            if self.validation_receipt_id is None or self.raw_text_sha256 is None:
+                raise ValueError("complete events require validation and raw-text bindings")
+        elif self.validation_receipt_id is not None or self.raw_text_sha256 is not None:
+            raise ValueError("interrupted events cannot contain completion bindings")
+        return self
+
+
+class ChatHistoryResultPayload(StrictModel):
+    agent_id: ApprovedAgentId
+    next_cursor: SafeId | None
 
 
 class ProtocolErrorPayload(StrictModel):
@@ -218,6 +302,9 @@ StrictPayload: TypeAlias = (
     | SnapshotPayload
     | SearchRequestPayload
     | SearchResultsPayload
+    | ChatHistoryRequestPayload
+    | ChatEventPayload
+    | ChatHistoryResultPayload
     | CommandMessagePayload
     | CommandReceiptPayload
     | EventPayload
@@ -241,6 +328,9 @@ PAYLOAD_MODELS: dict[MessageType, PayloadModel] = {
     MessageType.SNAPSHOT: SnapshotPayload,
     MessageType.SEARCH_REQUEST: SearchRequestPayload,
     MessageType.SEARCH_RESULTS: SearchResultsPayload,
+    MessageType.CHAT_HISTORY_REQUEST: ChatHistoryRequestPayload,
+    MessageType.CHAT_EVENT: ChatEventPayload,
+    MessageType.CHAT_HISTORY_RESULT: ChatHistoryResultPayload,
     MessageType.COMMAND: CommandMessagePayload,
     MessageType.COMMAND_RECEIPT: CommandReceiptPayload,
     MessageType.EVENT: EventPayload,
@@ -569,6 +659,31 @@ _FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
         },
     ),
     (
+        MessageType.CHAT_HISTORY_REQUEST,
+        {"agent_id": "v20-risk-review", "limit": 20, "cursor": None},
+    ),
+    (
+        MessageType.CHAT_EVENT,
+        {
+            "event_id": "chat:event:1",
+            "agent_id": "v20-risk-review",
+            "message_id": "message:1",
+            "role": "agent",
+            "operation": "chunk",
+            "chunk_sequence": 1,
+            "text": "Reviewing risk.",
+            "token_count": None,
+            "message_created_at_utc": "2026-08-03T00:00:00Z",
+            "occurred_at_utc": None,
+            "validation_receipt_id": None,
+            "raw_text_sha256": None,
+        },
+    ),
+    (
+        MessageType.CHAT_HISTORY_RESULT,
+        {"agent_id": "v20-risk-review", "next_cursor": None},
+    ),
+    (
         MessageType.COMMAND,
         {
             "request": {
@@ -709,6 +824,7 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "repository-status",
             "governed-command-contracts",
             "live-readiness",
+            "agent-chat",
         ],
         "optional_default": [
             "capability.reason",
@@ -724,6 +840,14 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "search-results.error",
             "search-results.results[].occurred_at_utc",
             "search-results.results[].context_only",
+            "chat-history-request.cursor",
+            "chat-history-result.next_cursor",
+            "chat-event.chunk_sequence",
+            "chat-event.text",
+            "chat-event.token_count",
+            "chat-event.occurred_at_utc",
+            "chat-event.validation_receipt_id",
+            "chat-event.raw_text_sha256",
             "command.request.reason",
             "command-receipt.receipt.accepted_at_utc",
             "command-receipt.receipt.finished_at_utc",
@@ -810,6 +934,9 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "event.presentation.timeline_hidden_event_count",
             "event.presentation.window_omissions[].omitted_count",
             "repository.unpushed_commit_count",
+            "chat-history-request.limit",
+            "chat-event.chunk_sequence",
+            "chat-event.token_count",
         ],
     }
 )

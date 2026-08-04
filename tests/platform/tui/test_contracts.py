@@ -17,6 +17,9 @@ from vesper.platform.tui.contracts import (
     CANONICAL_WIRE_FIXTURE,
     CANONICAL_WIRE_FIXTURE_SHA256,
     CANONICAL_WIRE_FIXTURES,
+    ChatEventPayload,
+    ChatHistoryRequestPayload,
+    ChatHistoryResultPayload,
     ClientHelloPayload,
     Freshness,
     HeaderView,
@@ -87,6 +90,147 @@ def test_envelope_round_trips_and_rejects_unknown_fields() -> None:
     assert WireEnvelope.model_validate_json(value.model_dump_json()) == value
     with pytest.raises(ValidationError):
         WireEnvelope.model_validate({**value.model_dump(), "secret": "x"})
+
+
+def test_chat_history_request_is_strict_and_agent_scoped() -> None:
+    payload = ChatHistoryRequestPayload.model_validate_json(
+        '{"agent_id":"v20-risk-review","limit":20,"cursor":null}'
+    )
+
+    assert payload.agent_id == "v20-risk-review"
+    assert payload.limit == 20
+    assert payload.cursor is None
+    for agent_id in ("AAPL", "", "v20-risk-review "):
+        with pytest.raises(ValidationError):
+            ChatHistoryRequestPayload.model_validate(
+                {"agent_id": agent_id, "limit": 1, "cursor": None}
+            )
+    for limit in (0, 21, True):
+        with pytest.raises(ValidationError):
+            ChatHistoryRequestPayload.model_validate(
+                {"agent_id": "v20-risk-review", "limit": limit, "cursor": None}
+            )
+    with pytest.raises(ValidationError):
+        ChatHistoryRequestPayload.model_validate(
+            {
+                "agent_id": "v20-risk-review",
+                "limit": 1,
+                "cursor": None,
+                "extra": "forbidden",
+            }
+        )
+
+
+def test_chat_event_enforces_chunk_and_terminal_shapes() -> None:
+    chunk = ChatEventPayload.model_validate(
+        {
+            "event_id": "chat:event:1",
+            "agent_id": "v20-risk-review",
+            "message_id": "message:1",
+            "role": "agent",
+            "operation": "chunk",
+            "chunk_sequence": 1,
+            "text": "raw output",
+            "token_count": None,
+            "message_created_at_utc": datetime(2026, 8, 4, tzinfo=timezone.utc),
+            "occurred_at_utc": None,
+            "validation_receipt_id": None,
+            "raw_text_sha256": None,
+        }
+    )
+    complete = ChatEventPayload.model_validate(
+        {
+            "event_id": "chat:event:2",
+            "agent_id": "v20-risk-review",
+            "message_id": "message:1",
+            "role": "agent",
+            "operation": "complete",
+            "chunk_sequence": None,
+            "text": None,
+            "token_count": None,
+            "message_created_at_utc": datetime(2026, 8, 4, tzinfo=timezone.utc),
+            "occurred_at_utc": datetime(2026, 8, 4, 0, 0, 1, tzinfo=timezone.utc),
+            "validation_receipt_id": "validation:1",
+            "raw_text_sha256": "a" * 64,
+        }
+    )
+    interrupted = complete.model_copy(
+        update={
+            "event_id": "chat:event:3",
+            "operation": "interrupted",
+            "validation_receipt_id": None,
+            "raw_text_sha256": None,
+        }
+    )
+
+    assert chunk.operation == "chunk"
+    assert complete.operation == "complete"
+    assert ChatEventPayload.model_validate(interrupted.model_dump()).operation == "interrupted"
+
+    invalid_updates = (
+        {"chunk_sequence": None},
+        {"text": None},
+        {"text": ""},
+        {"occurred_at_utc": datetime(2026, 8, 4, tzinfo=timezone.utc)},
+        {"validation_receipt_id": "validation:unexpected"},
+        {"raw_text_sha256": "b" * 64},
+    )
+    for update in invalid_updates:
+        with pytest.raises(ValidationError):
+            ChatEventPayload.model_validate({**chunk.model_dump(), **update})
+
+    for update in (
+        {"occurred_at_utc": None},
+        {"validation_receipt_id": None},
+        {"raw_text_sha256": None},
+        {"chunk_sequence": 1},
+        {"text": "not-terminal"},
+        {"token_count": 1},
+    ):
+        with pytest.raises(ValidationError):
+            ChatEventPayload.model_validate({**complete.model_dump(), **update})
+
+    with pytest.raises(ValidationError):
+        ChatEventPayload.model_validate(
+            {**interrupted.model_dump(), "validation_receipt_id": "validation:unexpected"}
+        )
+
+
+def test_chat_event_text_limit_is_measured_in_utf8_bytes() -> None:
+    values = {
+        "event_id": "chat:event:utf8",
+        "agent_id": "v20-product",
+        "message_id": "message:utf8",
+        "role": "human",
+        "operation": "chunk",
+        "chunk_sequence": 1,
+        "token_count": 1,
+        "message_created_at_utc": datetime(2026, 8, 4, tzinfo=timezone.utc),
+        "occurred_at_utc": None,
+        "validation_receipt_id": None,
+        "raw_text_sha256": None,
+    }
+
+    assert (
+        len(ChatEventPayload.model_validate({**values, "text": "🚀" * 16_384}).text.encode())
+        == 65_536
+    )
+    with pytest.raises(ValidationError):
+        ChatEventPayload.model_validate({**values, "text": "🚀" * 16_385})
+    with pytest.raises(ValidationError):
+        ChatEventPayload.model_validate({**values, "text": "\ud800"})
+
+
+def test_chat_history_result_has_only_agent_and_cursor() -> None:
+    result = ChatHistoryResultPayload.model_validate(
+        {"agent_id": "v20-development", "next_cursor": "message:older"}
+    )
+
+    assert result.next_cursor == "message:older"
+    with pytest.raises(ValidationError):
+        ChatHistoryResultPayload.model_validate(
+            {"agent_id": "v20-development", "next_cursor": None, "events": []}
+        )
 
 
 @pytest.mark.parametrize(
@@ -495,13 +639,13 @@ def test_canonical_fixture_and_schema_receipt_have_exact_bytes_and_hashes() -> N
     ).encode("utf-8")
     assert (
         WIRE_SCHEMA_RECEIPT_SHA256
-        == "4b061a0aabb03cc79205a416ca670c38b8105b9488386716d5a5023ed1521c21"
+        == "db14610b3d3724c029dd56eab065fa2cca784b89622cd2409c140b221e1bc24c"
     )
     assert hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest() == WIRE_SCHEMA_RECEIPT_SHA256
 
 
 def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() -> None:
-    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 19
+    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 22
     assert {decode_envelope_json(frame).message_type for frame in CANONICAL_WIRE_FIXTURES} == set(
         MessageType
     )
@@ -516,6 +660,8 @@ def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() ->
     assert "snapshot.system.live_account" in descriptor["nullable_required"]
     assert "snapshot.system.live_transition_plan" in descriptor["nullable_required"]
     assert "live-readiness" in descriptor["field_catalog_scope"]
+    assert "agent-chat" in descriptor["field_catalog_scope"]
+    assert "chat-event.raw_text_sha256" in descriptor["nullable_required"]
     assert descriptor["optional_default"] == [
         "capability.reason",
         "command.request.confirmation",

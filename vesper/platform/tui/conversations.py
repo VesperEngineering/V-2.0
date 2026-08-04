@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -19,6 +20,7 @@ from pydantic import Field, StringConstraints, TypeAdapter, ValidationError
 
 from vesper.platform.contracts import AgentRole
 
+from .contracts import ApprovedAgentId, ChatEventPayload
 from .views import SafeId, Sha256Hex, StrictModel, UtcDateTime
 
 
@@ -27,6 +29,7 @@ _SCHEMA_VERSION = 1
 _MAX_CHUNK_BYTES = 64 * 1024
 _MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 _MAX_HISTORY_LIMIT = 100
+MAX_CHAT_HISTORY_EVENTS = 128
 _SAFE_ID = TypeAdapter(SafeId)
 _UTC = TypeAdapter(UtcDateTime)
 _MessageText = Annotated[str, StringConstraints(max_length=_MAX_MESSAGE_BYTES)]
@@ -165,6 +168,12 @@ class MessageView(StrictModel):
     context_summary_ids: tuple[SafeId, ...]
 
 
+class ConversationHistoryPage(StrictModel):
+    agent_id: ApprovedAgentId
+    events: Annotated[tuple[ChatEventPayload, ...], Field(max_length=MAX_CHAT_HISTORY_EVENTS)]
+    next_cursor: SafeId | None
+
+
 class _MessageDraft(StrictModel):
     message_id: SafeId
     agent_id: SafeId
@@ -183,6 +192,23 @@ def _utc_text(value: datetime) -> str:
 
 def _utc_value(value: str) -> datetime:
     return _UTC.validate_python(value, strict=True)
+
+
+def _chat_event(values: dict[str, object]) -> ChatEventPayload:
+    try:
+        digest = hashlib.sha256(
+            json.dumps(
+                values,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        return ChatEventPayload.model_validate({"event_id": f"chat:{digest}", **values})
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ConversationCorruptionError(
+            "stored conversation cannot form a valid wire event"
+        ) from exc
 
 
 def _require_plain_int(
@@ -531,6 +557,103 @@ class ConversationStore:
                     (checked_agent, before_sequence, checked_limit),
                 ).fetchall()
             return tuple(self._decode_message(connection, row) for row in rows)
+
+    def export_history(
+        self,
+        agent_id: SafeId,
+        limit: int,
+        cursor: SafeId | None,
+    ) -> ConversationHistoryPage:
+        """Export one newest-message page as exact chronological wire events."""
+
+        self._require_open()
+        checked_agent = _require_agent_id(agent_id)
+        checked_limit = _require_plain_int(
+            limit,
+            name="limit",
+            minimum=1,
+            maximum=20,
+        )
+        with self._read() as connection:
+            selected = self.history(checked_agent, checked_limit + 1, cursor)
+            messages = selected[:checked_limit]
+            events: list[ChatEventPayload] = []
+            for selected_message in reversed(messages):
+                message = self._require_message(connection, selected_message.message_id)
+                decoded = self._decode_message(connection, message)
+                chunks = connection.execute(
+                    """
+                    SELECT chunk_sequence, text, token_count
+                    FROM conversation_chunks
+                    WHERE message_id = ? ORDER BY chunk_sequence
+                    """,
+                    (decoded.message_id,),
+                ).fetchall()
+                for chunk in chunks:
+                    events.append(
+                        _chat_event(
+                            {
+                                "agent_id": decoded.agent_id,
+                                "message_id": decoded.message_id,
+                                "role": decoded.role,
+                                "operation": "chunk",
+                                "chunk_sequence": chunk["chunk_sequence"],
+                                "text": chunk["text"],
+                                "token_count": chunk["token_count"],
+                                "message_created_at_utc": _utc_text(decoded.created_at_utc),
+                                "occurred_at_utc": None,
+                                "validation_receipt_id": None,
+                                "raw_text_sha256": None,
+                            }
+                        )
+                    )
+                if decoded.status != "draft":
+                    occurred_at_utc = (
+                        decoded.completed_at_utc
+                        if decoded.status == "complete"
+                        else decoded.interrupted_at_utc
+                    )
+                    if occurred_at_utc is None:
+                        raise ConversationCorruptionError("stored conversation terminal is invalid")
+                    events.append(
+                        _chat_event(
+                            {
+                                "agent_id": decoded.agent_id,
+                                "message_id": decoded.message_id,
+                                "role": decoded.role,
+                                "operation": decoded.status,
+                                "chunk_sequence": None,
+                                "text": None,
+                                "token_count": None,
+                                "message_created_at_utc": _utc_text(decoded.created_at_utc),
+                                "occurred_at_utc": _utc_text(occurred_at_utc),
+                                "validation_receipt_id": decoded.validation_receipt_id,
+                                "raw_text_sha256": (
+                                    hashlib.sha256(decoded.text.encode("utf-8")).hexdigest()
+                                    if decoded.status == "complete"
+                                    else None
+                                ),
+                            }
+                        )
+                    )
+                if len(events) > MAX_CHAT_HISTORY_EVENTS:
+                    raise ConversationStateError(
+                        f"conversation history page exceeds {MAX_CHAT_HISTORY_EVENTS} events"
+                    )
+            event_ids = {event.event_id for event in events}
+            if len(event_ids) != len(events):
+                raise ConversationCorruptionError("conversation event IDs are not unique")
+            return ConversationHistoryPage.model_validate(
+                {
+                    "agent_id": checked_agent,
+                    "events": tuple(events),
+                    "next_cursor": (
+                        messages[-1].message_id
+                        if len(selected) > checked_limit and messages
+                        else None
+                    ),
+                }
+            )
 
     def record_context_summary(
         self,
