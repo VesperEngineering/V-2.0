@@ -9,6 +9,8 @@ from typing import Callable, Mapping, Protocol
 
 import typer
 
+from .paths import default_platform_root
+
 _DEFAULT_RESEARCH_DATA_ROOT = Path(__file__).resolve().parents[2] / "vesper" / "data" / "massive"
 
 
@@ -94,8 +96,6 @@ class PlatformRuntimeUnavailable(RuntimeError):
 
 
 def _default_platform_root() -> Path:
-    from .persistence import default_platform_root
-
     return default_platform_root()
 
 

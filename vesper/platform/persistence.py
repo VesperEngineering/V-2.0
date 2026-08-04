@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -12,6 +11,7 @@ from typing import Iterator, Mapping
 
 from .evidence import FilesystemEvidenceStore
 from .knowledge import SqliteKnowledgeIndex
+from .paths import default_platform_root
 from .runtime_env import enforce_offline_runtime_environment
 
 enforce_offline_runtime_environment()
@@ -38,15 +38,6 @@ class PlatformPaths:
             knowledge_index_db=resolved / "knowledge-index.sqlite3",
             evidence_root=resolved / "evidence",
         )
-
-
-def default_platform_root() -> Path:
-    """Return the one local Windows platform root without creating it."""
-
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if not local_appdata:
-        raise RuntimeError("LOCALAPPDATA is unavailable")
-    return (Path(local_appdata) / "V20" / "agent-platform").resolve()
 
 
 def default_platform_paths() -> PlatformPaths:
