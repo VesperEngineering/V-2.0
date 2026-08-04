@@ -10,9 +10,15 @@ import stat
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Sequence
 
+from vesper.platform.persistence import PlatformPaths, default_platform_paths
+from vesper.platform.service import LocalPlatformService
+
+from .command_ports import LocalPlatformCommandPort
+from .command_registry import CommandRegistry
 from .contracts import SafeId, WireEnvelope
 from .event_store import EventStore
 from .gateway import Gateway
@@ -20,13 +26,19 @@ from .notes import NoteStore
 from .pipe_security import current_logon_sid, pipe_name
 from .pipe_server import ConnectionFactory, WindowsPipeServer
 from .ports import UnavailablePort
-from .projections import EventTimelineProjection, LegacyStateProjection, NativePlatformProjection
+from .projections import (
+    EventTimelineProjection,
+    LegacyStateProjection,
+    NativePlatformProjection,
+    PlatformRuntimeProjection,
+)
 from .projections.repository import RepositoryProjection
 from .projections.windows_system import WindowsSystemProjection
 from .snapshot import SnapshotBuilder
 from .search import GlobalSearchService
 from .sqlite_ledger import TuiLedger
 from .stream import ProjectionLoop
+from .views import Freshness
 
 _PARENT_IDLE_SECONDS = 30.0
 _COORDINATOR_WAIT_SECONDS = 10.0
@@ -93,9 +105,13 @@ class _ProjectionRuntime:
     event_store: EventStore | None
     note_store: NoteStore | None
     search_service: GlobalSearchService
+    platform_runtime_reader: PlatformRuntimeProjection
+    command_registry: CommandRegistry | None
 
     def close(self) -> None:
         self.search_service.close()
+        if self.command_registry is not None:
+            self.command_registry.close()
         if self.event_store is not None:
             self.event_store.close()
         if self.note_store is not None:
@@ -104,11 +120,22 @@ class _ProjectionRuntime:
             self.ledger.close()
 
 
-def _build_projection_runtime(state_root: Path, gateway: Gateway) -> _ProjectionRuntime:
+def _build_projection_runtime(
+    state_root: Path,
+    gateway: Gateway,
+    *,
+    platform_paths: PlatformPaths | None = None,
+) -> _ProjectionRuntime:
     repository_root = Path(__file__).resolve().parents[3]
+    selected_platform_paths = (
+        default_platform_paths() if platform_paths is None else platform_paths
+    )
+    platform_runtime_reader = PlatformRuntimeProjection(selected_platform_paths)
+    gateway.attach_platform_runtime_reader(platform_runtime_reader)
     ledger: TuiLedger | None = None
     event_store: EventStore | None = None
     note_store: NoteStore | None = None
+    command_registry: CommandRegistry | None = None
     search_service: GlobalSearchService | None = None
     persistent_search_error: str | None = None
     try:
@@ -196,6 +223,7 @@ def _build_projection_runtime(state_root: Path, gateway: Gateway) -> _Projection
                 "No controller-owned typed memory-status source is configured.",
                 source="native platform",
             ),
+            "platform.runtime": platform_runtime_reader,
             "repository.system": repository,
             "windows.system": windows,
             "events.timeline": timeline,
@@ -212,7 +240,29 @@ def _build_projection_runtime(state_root: Path, gateway: Gateway) -> _Projection
             persistent_error=persistent_search_error,
         )
         gateway.attach_search_service(search_service)
+
+        if ledger is not None:
+            try:
+                service = LocalPlatformService(
+                    selected_platform_paths,
+                    profiles_root=repository_root / "profiles" / "native",
+                )
+                port = LocalPlatformCommandPort(
+                    service,
+                    operator_id=gateway.operator_id,
+                )
+                command_registry = CommandRegistry(ledger, port)
+                initial_runtime = platform_runtime_reader.read()
+                if initial_runtime.freshness is Freshness.FRESH:
+                    command_registry.recover_running(datetime.now(timezone.utc))
+                gateway.attach_command_registry(command_registry)
+            except _OPERATIONAL_ADAPTER_ERRORS:
+                if command_registry is not None:
+                    command_registry.close()
+                    command_registry = None
     except BaseException:
+        if command_registry is not None:
+            command_registry.close()
         if search_service is not None:
             search_service.close()
         if event_store is not None:
@@ -228,6 +278,8 @@ def _build_projection_runtime(state_root: Path, gateway: Gateway) -> _Projection
         event_store=event_store,
         note_store=note_store,
         search_service=search_service,
+        platform_runtime_reader=platform_runtime_reader,
+        command_registry=command_registry,
     )
 
 

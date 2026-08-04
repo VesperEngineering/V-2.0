@@ -2043,6 +2043,8 @@ pub enum ApprovalState {
 #[serde(deny_unknown_fields)]
 pub struct ApprovalRow {
     pub approval_id: SafeId,
+    pub run_id: SafeId,
+    pub checkpoint_id: SafeId,
     pub state: ApprovalState,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub reason: Option<String>,

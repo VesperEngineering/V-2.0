@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -37,6 +38,21 @@ class PlatformPaths:
             knowledge_index_db=resolved / "knowledge-index.sqlite3",
             evidence_root=resolved / "evidence",
         )
+
+
+def default_platform_root() -> Path:
+    """Return the one local Windows platform root without creating it."""
+
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if not local_appdata:
+        raise RuntimeError("LOCALAPPDATA is unavailable")
+    return (Path(local_appdata) / "V20" / "agent-platform").resolve()
+
+
+def default_platform_paths() -> PlatformPaths:
+    """Return canonical local platform paths without creating them."""
+
+    return PlatformPaths.below(default_platform_root())
 
 
 class LangGraphStoreAdapter:

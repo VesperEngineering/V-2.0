@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -96,10 +94,9 @@ class PlatformRuntimeUnavailable(RuntimeError):
 
 
 def _default_platform_root() -> Path:
-    base = os.environ.get("LOCALAPPDATA")
-    if not base:
-        base = tempfile.gettempdir()
-    return Path(base) / "V20" / "agent-platform"
+    from .persistence import default_platform_root
+
+    return default_platform_root()
 
 
 @dataclass(frozen=True, slots=True)

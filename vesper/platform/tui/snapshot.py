@@ -18,6 +18,7 @@ from vesper.platform.tui.ports import (
     MemoryFacts,
     ModelFacts,
     OrderFacts,
+    PlatformRuntimeFacts,
     PortfolioFacts,
     RiskFacts,
     SourceSample,
@@ -78,6 +79,7 @@ MEMORY_SOURCE_ID: Final = "native.memory"
 REPOSITORY_SYSTEM_SOURCE_ID: Final = "repository.system"
 WINDOWS_SYSTEM_SOURCE_ID: Final = "windows.system"
 TIMELINE_SOURCE_ID: Final = "events.timeline"
+PLATFORM_RUNTIME_SOURCE_ID: Final = "platform.runtime"
 
 SOURCE_IDS: Final = frozenset(
     {
@@ -91,6 +93,7 @@ SOURCE_IDS: Final = frozenset(
         REPOSITORY_SYSTEM_SOURCE_ID,
         WINDOWS_SYSTEM_SOURCE_ID,
         TIMELINE_SOURCE_ID,
+        PLATFORM_RUNTIME_SOURCE_ID,
     }
 )
 
@@ -105,6 +108,7 @@ _EXPECTED_FACT_TYPES: Final = {
     REPOSITORY_SYSTEM_SOURCE_ID: SystemFacts,
     WINDOWS_SYSTEM_SOURCE_ID: SystemFacts,
     TIMELINE_SOURCE_ID: TimelineFacts,
+    PLATFORM_RUNTIME_SOURCE_ID: PlatformRuntimeFacts,
 }
 
 _ACTION_CAPABILITY_IDS: Final = (
@@ -422,6 +426,9 @@ def _project(
             ("memory", MEMORY_SOURCE_ID),
         )
     }
+    runtime_sample = samples.get(PLATFORM_RUNTIME_SOURCE_ID)
+    if runtime_sample is not None:
+        metadata["agents"] = _sample_metadata(runtime_sample, "agents")
     windows: dict[str, tuple[object, ...]] = {target: () for target in _TARGET_ORDER}
     source_omissions: dict[str, int] = {}
 
@@ -449,8 +456,16 @@ def _project(
 
     agent_sample = samples.get(AGENT_SOURCE_ID)
     agent_facts = _facts(agent_sample, AgentFacts)
+    runtime_facts = _facts(runtime_sample, PlatformRuntimeFacts)
     active_agents: tuple[AgentCard, ...] = ()
-    if agent_facts is not None:
+    if runtime_sample is not None:
+        if runtime_facts is not None:
+            if _has_duplicate_id(runtime_facts.active_work, "work_id"):
+                metadata["agents"] = _duplicate_metadata(runtime_sample, "agent work IDs")
+            else:
+                active_agents = runtime_facts.active_work
+                windows["agents.rows"] = active_agents
+    elif agent_facts is not None:
         if agent_facts.active_work is None:
             metadata["agents"] = _ViewMetadata(
                 freshness=Freshness.UNAVAILABLE,
@@ -518,7 +533,8 @@ def _project(
     else:
         metadata.setdefault("impact", _unavailable_metadata("impact"))
 
-    risk_facts = _facts(samples.get(RISK_SOURCE_ID), RiskFacts)
+    risk_sample = samples.get(RISK_SOURCE_ID)
+    risk_facts = _facts(risk_sample, RiskFacts)
     if risk_facts is not None:
         risk_metadata = metadata["risk"]
         if not risk_facts.broker_reconciled:
@@ -540,6 +556,82 @@ def _project(
             metadata["risk"] = risk_metadata
         windows["risk.limits"] = _risk_limits(risk_facts)
         windows["risk.metrics"] = _risk_metrics(risk_facts, risk_metadata)
+
+    if runtime_facts is not None:
+        if _has_duplicate_id(runtime_facts.pending_approvals, "approval_id"):
+            metadata["risk"] = _duplicate_metadata(runtime_sample, "approval IDs")
+        else:
+            windows["risk.approvals"] = runtime_facts.pending_approvals
+            if risk_facts is None:
+                metadata["risk"] = _ViewMetadata(
+                    freshness=Freshness.STALE,
+                    as_of_utc=runtime_sample.observed_at_utc,
+                    source=runtime_sample.source,
+                    error=_join_reasons(
+                        tuple(
+                            reason
+                            for reason in (
+                                (
+                                    "Pending approvals are current; risk limits are unavailable."
+                                    if runtime_sample.freshness is Freshness.FRESH
+                                    else "Pending approvals are retained from a stale runtime read; "
+                                    "risk limits are unavailable."
+                                ),
+                                runtime_sample.error,
+                            )
+                            if reason is not None
+                        )
+                    ),
+                )
+            elif runtime_sample.freshness is not Freshness.FRESH:
+                risk_metadata = metadata["risk"]
+                metadata["risk"] = _ViewMetadata(
+                    freshness=Freshness.STALE,
+                    as_of_utc=risk_metadata.as_of_utc,
+                    source=risk_metadata.source,
+                    error=_join_reasons(
+                        tuple(
+                            reason
+                            for reason in (risk_metadata.error, runtime_sample.error)
+                            if reason is not None
+                        )
+                    ),
+                )
+    elif runtime_sample is not None:
+        if risk_facts is None:
+            metadata["risk"] = _ViewMetadata(
+                freshness=Freshness.UNAVAILABLE,
+                as_of_utc=None,
+                source=runtime_sample.source,
+                error=_join_reasons(
+                    tuple(
+                        reason
+                        for reason in (
+                            "Pending approvals are unavailable; risk limits are unavailable.",
+                            runtime_sample.error,
+                        )
+                        if reason is not None
+                    )
+                ),
+            )
+        else:
+            risk_metadata = metadata["risk"]
+            metadata["risk"] = _ViewMetadata(
+                freshness=Freshness.STALE,
+                as_of_utc=risk_metadata.as_of_utc,
+                source=risk_metadata.source,
+                error=_join_reasons(
+                    tuple(
+                        reason
+                        for reason in (
+                            risk_metadata.error,
+                            "Pending approvals are unavailable.",
+                            runtime_sample.error,
+                        )
+                        if reason is not None
+                    )
+                ),
+            )
 
     data_sample = samples.get(DATA_SOURCE_ID)
     data_facts = _facts(data_sample, DataFacts)
@@ -1027,7 +1119,7 @@ def _control_facts(samples: Mapping[str, SourceSample[object]]) -> dict[str, obj
     sources = cast(dict[str, object], facts["sources"])
     for source_id in sorted(SOURCE_IDS):
         sample = samples.get(source_id)
-        if source_id in {AGENT_SOURCE_ID, MEMORY_SOURCE_ID}:
+        if source_id in {AGENT_SOURCE_ID, MEMORY_SOURCE_ID, PLATFORM_RUNTIME_SOURCE_ID}:
             continue
         if sample is None or sample.value is None:
             sources[source_id] = {

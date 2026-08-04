@@ -156,6 +156,11 @@ class CommandRegistry:
         self._require_open()
         return self._ledger
 
+    @property
+    def specs(self) -> tuple[CommandSpecView, ...]:
+        self._require_open()
+        return tuple(self._specs.values())
+
     def __enter__(self) -> CommandRegistry:
         self._require_open()
         return self

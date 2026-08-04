@@ -588,7 +588,7 @@ fn fixture() -> ConsoleSnapshot {
             {"limit_id":"limit:drawdown","current_value":"0.08","proposed_value":null,"status":"violated"}
         ],
         "approvals": [
-            {"approval_id":"approval:stale","state":"stale","reason":"Approval\u{202e}reason","evidence_ids":["evidence:1"],"requested_at_utc":"2026-01-15T12:34:56Z"}
+            {"approval_id":"approval:stale","run_id":"run:stale","checkpoint_id":"checkpoint:stale","state":"stale","reason":"Approval\u{202e}reason","evidence_ids":["evidence:1"],"requested_at_utc":"2026-01-15T12:34:56Z"}
         ],
         "alerts": [
             {"alert_id":"alert:resolved","severity":"resolved","summary":"Mismatch repaired","created_at_utc":"2026-01-15T12:00:00Z","resolved_at_utc":"2026-01-15T12:34:56Z"}

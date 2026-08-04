@@ -9,10 +9,31 @@ import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
+from vesper.platform.agent_profiles import AUTONOMOUS_AGENT_ROLES
+from vesper.platform.contracts import AgentRole
+
 from .auth import ControlLease, LeaseStatus, PasswordStore
+from .command_contracts import (
+    COMMAND_SPECS,
+    AgentEnqueuePayload,
+    ApprovalPayload,
+    CommandMessagePayload,
+    CommandReceiptPayload,
+    CommandRequest,
+    NoteAddPayload,
+)
+from .command_policy import (
+    CommandContext,
+    EvaluatedPrerequisites,
+    PrerequisiteCheck,
+    canonical_request_hash,
+)
+from .command_ports import DISABLED_COMMAND_REASONS
+from .command_registry import CommandRegistry
 from .contracts import (
     AuthResultPayload,
     AuthSetupPayload,
@@ -39,9 +60,12 @@ from .contracts import (
     decode_payload,
 )
 from .outbox import OutboundQueue
+from .pipe_security import current_logon_sid
 from .search import GlobalSearchService
 from .live_readiness import unavailable_live_readiness
 from .snapshot import diff_snapshots, requires_full_snapshot
+from .ports import PlatformRuntimeFacts, SourceSample
+from .projections.platform_runtime import platform_runtime_control_binding
 from .views import (
     AgentsView,
     ConsoleSnapshot,
@@ -95,6 +119,23 @@ _ACTION_CAPABILITIES = (
     "source-control.push",
 )
 _SAFE_ID_ADAPTER = TypeAdapter(SafeId)
+_HANDLED_COMMANDS = frozenset(
+    {
+        "note.add",
+        "approval.approve",
+        "approval.hold",
+        "approval.reject",
+        "agent.enqueue",
+    }
+)
+_RUNTIME_GOVERNED_COMMANDS = _HANDLED_COMMANDS - {"note.add"}
+_RUNTIME_UNAVAILABLE_REASON = "Platform runtime state is unavailable."
+_MAX_WIRE_UINT = 2**64 - 1
+_PLATFORM_RUNTIME_SAMPLE_ADAPTER = TypeAdapter(SourceSample[PlatformRuntimeFacts])
+
+
+class _PlatformRuntimeReadPort(Protocol):
+    def read(self) -> SourceSample[PlatformRuntimeFacts]: ...
 
 
 class GatewaySession:
@@ -144,7 +185,12 @@ class Gateway:
         *,
         clock: Callable[[], datetime] | None = None,
         search_service: GlobalSearchService | None = None,
+        command_registry: CommandRegistry | None = None,
+        platform_runtime_reader: _PlatformRuntimeReadPort | None = None,
+        logon_sid_provider: Callable[[], str] = current_logon_sid,
     ) -> None:
+        if not callable(logon_sid_provider):
+            raise TypeError("logon_sid_provider must be callable")
         self._verifier_path = Path(state_root) / "password-verifier.json"
         self._password_store = PasswordStore(self._verifier_path)
         self._lease = ControlLease()
@@ -152,11 +198,22 @@ class Gateway:
         self._sessions: dict[str, GatewaySession] = {}
         self._sessions_lock = threading.Lock()
         self._publication_lock = threading.RLock()
+        self._control_lock = threading.RLock()
         self._snapshot = self._unavailable_snapshot()
+        self._upstream_snapshot = self._snapshot
         self._has_projection_snapshot = False
         self._search_service = search_service
+        self._command_registry: CommandRegistry | None = None
+        self._platform_runtime_reader: _PlatformRuntimeReadPort | None = None
+        self._platform_runtime_sample = self._unavailable_platform_runtime_sample()
+        self._logon_sid_provider = logon_sid_provider
+        self._operator_id_value: str | None = None
         if search_service is not None:
             search_service.update_snapshot(self._snapshot)
+        if platform_runtime_reader is not None:
+            self.attach_platform_runtime_reader(platform_runtime_reader)
+        if command_registry is not None:
+            self.attach_command_registry(command_registry)
 
     @property
     def controller_id(self) -> str | None:
@@ -165,6 +222,20 @@ class Gateway:
     @property
     def search_service(self) -> GlobalSearchService | None:
         return self._search_service
+
+    @property
+    def operator_id(self) -> str:
+        """Return one stable, non-reversible identifier for this Windows logon."""
+
+        with self._control_lock:
+            if self._operator_id_value is None:
+                sid = self._logon_sid_provider()
+                if type(sid) is not str or not sid:
+                    raise ValueError("current logon SID is unavailable")
+                self._operator_id_value = (
+                    f"windows:{hashlib.sha256(sid.encode('utf-8')).hexdigest()}"
+                )
+            return self._operator_id_value
 
     def attach_search_service(self, service: GlobalSearchService) -> None:
         """Attach the one controller-owned read-only search service."""
@@ -176,6 +247,58 @@ class Gateway:
                 raise RuntimeError("search service is already attached")
             service.update_snapshot(self._snapshot)
             self._search_service = service
+
+    def attach_platform_runtime_reader(
+        self,
+        reader: _PlatformRuntimeReadPort,
+    ) -> None:
+        """Attach the one synchronous read port used for command authorization."""
+
+        if not callable(getattr(reader, "read", None)):
+            raise TypeError("platform runtime reader must provide read()")
+        with self._publication_lock:
+            with self._control_lock:
+                if self._platform_runtime_reader is reader:
+                    return
+                if self._platform_runtime_reader is not None:
+                    raise RuntimeError("platform runtime reader is already attached")
+                if self._command_registry is not None:
+                    raise RuntimeError("command registry is already attached")
+                self._platform_runtime_reader = reader
+
+    def attach_command_registry(self, registry: CommandRegistry) -> None:
+        """Attach the reviewed command registry and publish its exact catalog."""
+
+        if type(registry) is not CommandRegistry:
+            raise TypeError("registry must be CommandRegistry")
+        if registry.specs != COMMAND_SPECS:
+            raise ValueError("registry must use the canonical command catalog")
+        with self._publication_lock:
+            with self._control_lock:
+                if self._command_registry is registry:
+                    return
+                if self._command_registry is not None:
+                    raise RuntimeError("command registry is already attached")
+                if self._platform_runtime_reader is None:
+                    raise ValueError("command registry requires a platform runtime read port")
+                previous = self._snapshot
+                runtime_sample = self._read_platform_runtime()
+                snapshot = self._command_snapshot(
+                    self._upstream_snapshot,
+                    previous,
+                    runtime_sample,
+                )
+                self._command_registry = registry
+                self._platform_runtime_sample = runtime_sample
+                self._snapshot = snapshot
+            if self._search_service is not None:
+                self._search_service.update_snapshot(snapshot)
+            self._publish_to_subscribers(
+                MessageType.SNAPSHOT,
+                SnapshotPayload(snapshot=snapshot),
+                state_version=snapshot.shell.state_version,
+                replace_key=("snapshot",),
+            )
 
     def session(self, client_id: SafeId) -> GatewaySession:
         client_id = _SAFE_ID_ADAPTER.validate_python(client_id, strict=True)
@@ -210,38 +333,58 @@ class Gateway:
         if not isinstance(snapshot, ConsoleSnapshot):
             raise TypeError("snapshot must be a ConsoleSnapshot")
         with self._publication_lock:
-            previous = self._snapshot
-            if self._has_projection_snapshot:
-                if snapshot == previous:
+            with self._control_lock:
+                previous = self._snapshot
+                previous_upstream = self._upstream_snapshot
+                same_upstream = (
+                    self._has_projection_snapshot and snapshot == previous_upstream
+                )
+                if self._has_projection_snapshot:
+                    if (
+                        not same_upstream
+                        and snapshot.shell.state_version
+                        <= previous_upstream.shell.state_version
+                    ):
+                        raise ValueError("snapshot state version must advance")
+                if self._command_registry is not None:
+                    runtime_sample = self._read_platform_runtime()
+                    effective = self._command_snapshot(
+                        snapshot,
+                        previous,
+                        runtime_sample,
+                    )
+                    self._platform_runtime_sample = runtime_sample
+                else:
+                    effective = self._disabled_command_snapshot(snapshot)
+                if same_upstream and effective == previous:
                     return
-                if snapshot.shell.state_version <= previous.shell.state_version:
-                    raise ValueError("snapshot state version must advance")
-            events: tuple[EventPayload, ...] = ()
-            if self._has_projection_snapshot and self._can_publish_incrementally(
-                previous,
-                snapshot,
-            ):
-                try:
-                    events = diff_snapshots(previous, snapshot)
-                except (TypeError, ValueError):
-                    events = ()
-            self._snapshot = snapshot
+                events: tuple[EventPayload, ...] = ()
+                if self._has_projection_snapshot and self._can_publish_incrementally(
+                    previous,
+                    effective,
+                ):
+                    try:
+                        events = diff_snapshots(previous, effective)
+                    except (TypeError, ValueError):
+                        events = ()
+                self._upstream_snapshot = snapshot
+                self._snapshot = effective
+                first_projection = not self._has_projection_snapshot
+                self._has_projection_snapshot = True
             if self._search_service is not None:
-                self._search_service.update_snapshot(snapshot)
-            first_projection = not self._has_projection_snapshot
-            self._has_projection_snapshot = True
+                self._search_service.update_snapshot(effective)
             if first_projection or not events:
                 self._publish_to_subscribers(
                     MessageType.SNAPSHOT,
-                    SnapshotPayload(snapshot=snapshot),
-                    state_version=snapshot.shell.state_version,
+                    SnapshotPayload(snapshot=effective),
+                    state_version=effective.shell.state_version,
                     replace_key=("snapshot",),
                 )
                 return
             for event in events:
                 self._publish_event_to_subscribers(
                     event,
-                    state_version=snapshot.shell.state_version,
+                    state_version=effective.shell.state_version,
                 )
 
     @staticmethod
@@ -350,6 +493,65 @@ class Gateway:
             if not session._authenticated:
                 return (self._error(session, "locked", "Console session is locked."),)
 
+            if envelope.message_type is MessageType.COMMAND:
+                registry = self._command_registry
+                if registry is None:
+                    return (
+                        self._error(
+                            session,
+                            "direction",
+                            "Message type is not accepted from clients.",
+                        ),
+                    )
+                payload = self._payload(envelope, CommandMessagePayload, session)
+                if isinstance(payload, WireEnvelope):
+                    return (payload,)
+                assert isinstance(payload, CommandMessagePayload)
+                try:
+                    with self._control_lock:
+                        runtime_sample = self._read_platform_runtime()
+                        snapshot = self._command_snapshot(
+                            self._upstream_snapshot,
+                            self._snapshot,
+                            runtime_sample,
+                        )
+                        self._platform_runtime_sample = runtime_sample
+                        self._snapshot = snapshot
+                        request = payload.request
+                        context = CommandContext(
+                            operator_id=self.operator_id,
+                            client_id=session.client_id,
+                            authenticated=session._authenticated,
+                            owns_control_lease=(
+                                self._lease.controller_id == session.client_id
+                            ),
+                            control_version=snapshot.control_version,
+                            control_hash=snapshot.control_hash,
+                            capabilities=snapshot.shell.capabilities,
+                            prerequisites=self._prerequisites(
+                                snapshot,
+                                request,
+                                runtime_sample,
+                            ),
+                        )
+                        receipt = registry.execute(context, request)
+                except Exception:
+                    return (
+                        self._error(
+                            session,
+                            "command-unavailable",
+                            "Command processing is unavailable; inspect its receipt before retrying.",
+                        ),
+                    )
+                return (
+                    self._emit(
+                        session,
+                        MessageType.COMMAND_RECEIPT,
+                        CommandReceiptPayload(receipt=receipt),
+                        state_version=snapshot.shell.state_version,
+                    ),
+                )
+
             if envelope.message_type is MessageType.SNAPSHOT_REQUEST:
                 payload = self._payload(envelope, object, session)
                 if isinstance(payload, WireEnvelope):
@@ -432,7 +634,277 @@ class Gateway:
             )
 
     def snapshot(self) -> ConsoleSnapshot:
-        return self._snapshot
+        with self._control_lock:
+            return self._snapshot
+
+    def _read_platform_runtime(self) -> SourceSample[PlatformRuntimeFacts]:
+        reader = self._platform_runtime_reader
+        if reader is None:
+            return self._unavailable_platform_runtime_sample()
+        try:
+            return _PLATFORM_RUNTIME_SAMPLE_ADAPTER.validate_python(
+                reader.read(),
+                strict=True,
+            )
+        except Exception:
+            return self._unavailable_platform_runtime_sample()
+
+    @staticmethod
+    def _unavailable_platform_runtime_sample() -> SourceSample[PlatformRuntimeFacts]:
+        return SourceSample[PlatformRuntimeFacts](
+            value=None,
+            freshness=Freshness.UNAVAILABLE,
+            observed_at_utc=None,
+            source="native platform runtime",
+            error=_RUNTIME_UNAVAILABLE_REASON,
+        )
+
+    @staticmethod
+    def _prerequisite_hash(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _prerequisites(
+        self,
+        snapshot: ConsoleSnapshot,
+        request: CommandRequest,
+        runtime_sample: SourceSample[PlatformRuntimeFacts],
+    ) -> EvaluatedPrerequisites:
+        checks: tuple[PrerequisiteCheck, ...] = ()
+        if request.command_type == "note.add":
+            payload = request.payload
+            assert isinstance(payload, NoteAddPayload)
+            entity = self._note_target(snapshot, payload)
+            binding = {
+                "target_type": payload.target_type,
+                "target_id": payload.target_id,
+                "entity": None if entity is None else entity.model_dump(mode="json"),
+            }
+            checks = (
+                PrerequisiteCheck(
+                    prerequisite_id="note-target",
+                    state="satisfied" if entity is not None else "failed",
+                    binding_hash=self._prerequisite_hash(binding),
+                    reason=(
+                        None
+                        if entity is not None
+                        else "The selected note target is not present in the current snapshot."
+                    ),
+                ),
+            )
+        elif request.command_type in {
+            "approval.approve",
+            "approval.hold",
+            "approval.reject",
+        }:
+            payload = request.payload
+            assert isinstance(payload, ApprovalPayload)
+            runtime = (
+                runtime_sample.value
+                if runtime_sample.freshness is Freshness.FRESH
+                else None
+            )
+            approval = next(
+                (
+                    row
+                    for row in (() if runtime is None else runtime.pending_approvals)
+                    if row.state == "pending"
+                    and row.run_id == payload.run_id
+                    and row.checkpoint_id == payload.checkpoint_id
+                ),
+                None,
+            )
+            binding = {
+                "run_id": payload.run_id,
+                "checkpoint_id": payload.checkpoint_id,
+                "approval": (
+                    None if approval is None else approval.model_dump(mode="json")
+                ),
+            }
+            checks = (
+                PrerequisiteCheck(
+                    prerequisite_id="pending-approval",
+                    state="satisfied" if approval is not None else "failed",
+                    binding_hash=self._prerequisite_hash(binding),
+                    reason=(
+                        None
+                        if approval is not None
+                        else "The exact run checkpoint is not pending approval."
+                    ),
+                ),
+            )
+        elif request.command_type == "agent.enqueue":
+            payload = request.payload
+            assert isinstance(payload, AgentEnqueuePayload)
+            try:
+                role = AgentRole(payload.agent_id)
+            except ValueError:
+                role = None
+            approved = role in AUTONOMOUS_AGENT_ROLES if role is not None else False
+            binding = {
+                "agent_id": payload.agent_id,
+                "approved_autonomous_roles": [role.value for role in AUTONOMOUS_AGENT_ROLES],
+            }
+            checks = (
+                PrerequisiteCheck(
+                    prerequisite_id="autonomous-agent-role",
+                    state="satisfied" if approved else "failed",
+                    binding_hash=self._prerequisite_hash(binding),
+                    reason=(
+                        None
+                        if approved
+                        else "The requested agent is not an approved autonomous role."
+                    ),
+                ),
+            )
+        return EvaluatedPrerequisites(
+            request_sha256=canonical_request_hash(request),
+            complete=True,
+            checks=checks,
+        )
+
+    @staticmethod
+    def _note_target(snapshot: ConsoleSnapshot, payload: NoteAddPayload) -> object | None:
+        if payload.target_type == "stock":
+            return next(
+                (row for row in snapshot.portfolio.rows if row.symbol == payload.target_id),
+                None,
+            )
+        if payload.target_type == "order":
+            return next(
+                (row for row in snapshot.orders.rows if row.order_id == payload.target_id),
+                None,
+            )
+        if payload.target_type == "approval":
+            return next(
+                (
+                    row
+                    for row in snapshot.risk.approvals
+                    if row.approval_id == payload.target_id
+                ),
+                None,
+            )
+        return next(
+            (row for row in snapshot.timeline.rows if row.event_id == payload.target_id),
+            None,
+        )
+
+    @staticmethod
+    def _command_capabilities(
+        runtime_sample: SourceSample[PlatformRuntimeFacts],
+    ) -> tuple[CapabilityView, ...]:
+        runtime_fresh = (
+            runtime_sample.freshness is Freshness.FRESH
+            and runtime_sample.value is not None
+        )
+        return (
+            CapabilityView(
+                capability_id="snapshot.read",
+                state=CapabilityState.READ_ONLY,
+                reason=None,
+            ),
+            *(
+                CapabilityView(
+                    capability_id=spec.capability_id,
+                    state=(
+                        CapabilityState.ENABLED
+                        if spec.command_type == "note.add"
+                        or (
+                            spec.command_type in _RUNTIME_GOVERNED_COMMANDS
+                            and runtime_fresh
+                        )
+                        else CapabilityState.DISABLED
+                    ),
+                    reason=(
+                        None
+                        if spec.command_type == "note.add"
+                        or (
+                            spec.command_type in _RUNTIME_GOVERNED_COMMANDS
+                            and runtime_fresh
+                        )
+                        else (
+                            _RUNTIME_UNAVAILABLE_REASON
+                            if spec.command_type in _RUNTIME_GOVERNED_COMMANDS
+                            else DISABLED_COMMAND_REASONS[spec.command_type]
+                        )
+                    ),
+                )
+                for spec in COMMAND_SPECS
+            ),
+        )
+
+    @staticmethod
+    def _disabled_command_snapshot(upstream: ConsoleSnapshot) -> ConsoleSnapshot:
+        current = {row.capability_id: row for row in upstream.shell.capabilities}
+        snapshot_read = current.get("snapshot.read")
+        capabilities = (
+            (
+                CapabilityView(
+                    capability_id="snapshot.read",
+                    state=CapabilityState.READ_ONLY,
+                    reason=None,
+                ),
+            )
+            if snapshot_read is not None
+            else ()
+        ) + tuple(
+            CapabilityView(
+                capability_id=capability_id,
+                state=CapabilityState.DISABLED,
+                reason=(
+                    row.reason
+                    if (row := current.get(capability_id)) is not None
+                    and row.state is CapabilityState.DISABLED
+                    else _PHASE_ONE_REASON
+                ),
+            )
+            for capability_id in _ACTION_CAPABILITIES
+        )
+        if capabilities == upstream.shell.capabilities:
+            return upstream
+        return upstream.model_copy(
+            update={
+                "shell": upstream.shell.model_copy(update={"capabilities": capabilities})
+            }
+        )
+
+    def _command_snapshot(
+        self,
+        upstream: ConsoleSnapshot,
+        previous: ConsoleSnapshot | None,
+        runtime_sample: SourceSample[PlatformRuntimeFacts],
+    ) -> ConsoleSnapshot:
+        capabilities = self._command_capabilities(runtime_sample)
+        facts = {
+            "upstream_control_version": upstream.control_version,
+            "upstream_control_hash": upstream.control_hash,
+            "command_specs": [row.model_dump(mode="json") for row in COMMAND_SPECS],
+            "capabilities": [row.model_dump(mode="json") for row in capabilities],
+            "platform_runtime": platform_runtime_control_binding(runtime_sample),
+            "approved_autonomous_agent_roles": [
+                role.value for role in AUTONOMOUS_AGENT_ROLES
+            ],
+        }
+        control_hash = hashlib.sha256(
+            json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if previous is None:
+            control_version = upstream.control_version
+        elif previous.control_hash == control_hash:
+            control_version = previous.control_version
+        else:
+            if previous.control_version == _MAX_WIRE_UINT:
+                raise OverflowError("control version exhausted the wire range")
+            control_version = previous.control_version + 1
+        return upstream.model_copy(
+            update={
+                "shell": upstream.shell.model_copy(update={"capabilities": capabilities}),
+                "control_version": control_version,
+                "control_hash": control_hash,
+                "command_specs": COMMAND_SPECS,
+            }
+        )
 
     def _unavailable_snapshot(self) -> ConsoleSnapshot:
         now = self._clock().astimezone(timezone.utc)

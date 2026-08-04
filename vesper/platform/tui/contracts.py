@@ -370,6 +370,8 @@ _FIXTURE_RISK_LIMIT_ROW = {
 }
 _FIXTURE_APPROVAL_ROW = {
     "approval_id": "approval:1",
+    "run_id": "run:1",
+    "checkpoint_id": "checkpoint:1",
     "state": "pending",
     "reason": "Review required",
     "evidence_ids": ["evidence:1"],

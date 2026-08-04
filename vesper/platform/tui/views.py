@@ -266,6 +266,8 @@ class RiskLimitRow(StrictModel):
 
 class ApprovalRow(StrictModel):
     approval_id: SafeId
+    run_id: SafeId
+    checkpoint_id: SafeId
     state: Literal["pending", "approved", "held", "rejected", "rework", "stale"]
     reason: str | None
     evidence_ids: tuple[SafeId, ...]

@@ -27,6 +27,7 @@ STABLE_SOURCE_IDS = frozenset(
         "repository.system",
         "windows.system",
         "events.timeline",
+        "platform.runtime",
     }
 )
 _FAST_SOURCE_ID = "windows.system"

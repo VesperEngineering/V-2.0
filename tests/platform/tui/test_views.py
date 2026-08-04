@@ -218,6 +218,8 @@ def full_snapshot_payload() -> dict[str, object]:
     }
     approval = {
         "approval_id": "approval:1",
+        "run_id": "run:1",
+        "checkpoint_id": "checkpoint:1",
         "state": "pending",
         "reason": "Review required",
         "evidence_ids": ("evidence:1",),

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from vesper.platform.persistence import PlatformPaths
 from vesper.platform.tui.contracts import (
     AuthResultPayload,
     Freshness,
@@ -921,13 +922,18 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
         EventTimelineProjection,
         LegacyStateProjection,
         NativePlatformProjection,
+        PlatformRuntimeProjection,
     )
     from vesper.platform.tui.projections.repository import RepositoryProjection
     from vesper.platform.tui.projections.windows_system import WindowsSystemProjection
     from vesper.platform.tui.sqlite_ledger import LedgerClosedError
 
     gateway = Gateway(tmp_path / "auth")
-    runtime = cli._build_projection_runtime(tmp_path, gateway)
+    runtime = cli._build_projection_runtime(
+        tmp_path,
+        gateway,
+        platform_paths=PlatformPaths.below(tmp_path / "platform"),
+    )
     sources = runtime.loop._sources
     assert tuple(sources) == (
         "native.agents",
@@ -937,6 +943,7 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
         "legacy.risk",
         "native.data",
         "native.memory",
+        "platform.runtime",
         "repository.system",
         "windows.system",
         "events.timeline",
@@ -949,6 +956,7 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
     assert sources["legacy.risk"]._state_path == Path("data/engine_state.json")
     assert isinstance(sources["native.data"], UnavailablePort)
     assert isinstance(sources["native.memory"], UnavailablePort)
+    assert isinstance(sources["platform.runtime"], PlatformRuntimeProjection)
     assert isinstance(sources["repository.system"], RepositoryProjection)
     assert isinstance(sources["windows.system"], WindowsSystemProjection)
     assert isinstance(sources["events.timeline"], EventTimelineProjection)
@@ -1055,7 +1063,11 @@ def test_projection_reads_never_cross_mutating_or_protected_boundaries(
     monkeypatch.setattr(sqlite3, "connect", guarded(sqlite3.connect))
 
     gateway = Gateway(tmp_path / "auth")
-    runtime = cli._build_projection_runtime(tmp_path, gateway)
+    runtime = cli._build_projection_runtime(
+        tmp_path,
+        gateway,
+        platform_paths=PlatformPaths.below(tmp_path / "platform"),
+    )
     try:
         samples = {source_id: source.read() for source_id, source in runtime.loop._sources.items()}
         snapshot = runtime.loop._builder.build(samples=samples, generated_at_utc=NOW)
@@ -1096,7 +1108,11 @@ def test_projection_runtime_degrades_corrupt_ledger_without_losing_other_sources
 
     (tmp_path / "operations.sqlite3").write_bytes(b"not sqlite")
     gateway = Gateway(tmp_path / "auth")
-    runtime = cli._build_projection_runtime(tmp_path, gateway)
+    runtime = cli._build_projection_runtime(
+        tmp_path,
+        gateway,
+        platform_paths=PlatformPaths.below(tmp_path / "platform"),
+    )
 
     assert runtime.event_store is None
     assert isinstance(runtime.loop._sources["events.timeline"], UnavailablePort)
@@ -1130,7 +1146,11 @@ def test_projection_runtime_degrades_one_adapter_initialization_failure(
         raise OSError("host API unavailable")
 
     monkeypatch.setattr(cli, "WindowsSystemProjection", fail_windows)
-    runtime = cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+    runtime = cli._build_projection_runtime(
+        tmp_path,
+        Gateway(tmp_path / "auth"),
+        platform_paths=PlatformPaths.below(tmp_path / "platform"),
+    )
 
     assert isinstance(runtime.loop._sources["windows.system"], UnavailablePort)
     assert isinstance(runtime.loop._sources["native.agents"], NativePlatformProjection)
@@ -1149,7 +1169,11 @@ def test_projection_runtime_does_not_hide_adapter_programmer_errors(
     monkeypatch.setattr(cli, "NativePlatformProjection", fail_native)
 
     with pytest.raises(TypeError, match="adapter wiring bug"):
-        cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+        cli._build_projection_runtime(
+            tmp_path,
+            Gateway(tmp_path / "auth"),
+            platform_paths=PlatformPaths.below(tmp_path / "platform"),
+        )
 
 
 def test_cli_starts_projection_loop_and_closes_it_before_return(

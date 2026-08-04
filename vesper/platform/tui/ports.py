@@ -9,6 +9,7 @@ from pydantic import model_validator
 
 from vesper.platform.tui.views import (
     AgentCard,
+    ApprovalRow,
     CandidateRow,
     DecimalString,
     EvidenceRow,
@@ -77,6 +78,11 @@ class AgentFacts(StrictModel):
         if (self.active_work is None) == (self.active_work_error is None):
             raise ValueError("unavailable active work requires one reason")
         return self
+
+
+class PlatformRuntimeFacts(StrictModel):
+    pending_approvals: tuple[ApprovalRow, ...]
+    active_work: tuple[AgentCard, ...]
 
 
 class PortfolioFacts(StrictModel):
