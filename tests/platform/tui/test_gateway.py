@@ -227,9 +227,10 @@ def test_setup_is_first_run_only_and_every_new_session_unlocks(gateway: Gateway)
         (MessageType.SNAPSHOT_REQUEST, {}),
         (MessageType.LEASE_REQUEST, {"action": "take-control"}),
         (MessageType.LOCK_REQUEST, {"action": "lock"}),
+        (MessageType.COMMAND, {"request": {"untrusted": "payload"}}),
     ],
 )
-def test_locked_session_rejects_state_lease_and_lock(
+def test_locked_session_rejects_state_lease_lock_and_command(
     gateway: Gateway, message_type: MessageType, payload: dict[str, object]
 ) -> None:
     response = send(gateway, "locked", message_type, 1, **payload)

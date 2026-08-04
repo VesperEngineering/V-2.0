@@ -192,6 +192,15 @@ class CommandRegistry:
             raise TypeError("context must be CommandContext")
         if type(request) is not CommandRequest:
             raise TypeError("request must be CommandRequest")
+        handler_key = _HANDLER_KEYS.get(request.command_type)
+        if context.authenticated and context.owns_control_lease:
+            reconnect_receipt = self._store.exact_operator_replay(
+                request,
+                operator_id=context.operator_id,
+                accepted_handler_key=handler_key,
+            )
+            if reconnect_receipt is not None:
+                return reconnect_receipt
         spec = self._specs.get(request.command_type)
         if spec is None:
             decision = AuthorizationDecision(

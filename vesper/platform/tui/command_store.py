@@ -657,6 +657,62 @@ class CommandStore:
         except (TypeError, ValueError) as exc:
             raise LedgerCorruptionError("stored accepted command is invalid") from exc
 
+    def exact_operator_replay(
+        self,
+        request: CommandRequest,
+        *,
+        operator_id: str,
+        accepted_handler_key: str | None,
+    ) -> CommandReceipt | None:
+        """Read one immutable receipt for an authenticated lease-holder replay."""
+
+        self._require_open()
+        if type(request) is not CommandRequest:
+            raise TypeError("request must be CommandRequest")
+        checked_operator = _SAFE_ID.validate_python(operator_id, strict=True)
+        checked_handler = (
+            None
+            if accepted_handler_key is None
+            else _SAFE_ID.validate_python(accepted_handler_key, strict=True)
+        )
+        request_json = canonical_request_json(request)
+        request_sha256 = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+        with self._ledger.read() as connection:
+            row = connection.execute(
+                "SELECT * FROM commands WHERE command_id = ?",
+                (request.command_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        exact_context = (
+            hmac.compare_digest(row["request_sha256"], request_sha256)
+            and row["command_type"] == request.command_type
+            and row["operator_id"] == checked_operator
+            and row["reviewed_control_version"]
+            == str(request.reviewed_control_version)
+            and hmac.compare_digest(
+                row["reviewed_control_hash"],
+                request.reviewed_control_hash,
+            )
+        )
+        if not exact_context:
+            raise CommandConflict(
+                f"command ID {request.command_id} has conflicting replay context"
+            )
+        accepted_json = row["accepted_request_json"]
+        if accepted_json is None:
+            if row["status"] != ReceiptStatus.REJECTED or row["handler_key"] is not None:
+                raise LedgerCorruptionError("stored rejected command binding is invalid")
+        elif (
+            checked_handler is None
+            or row["handler_key"] != checked_handler
+            or not hmac.compare_digest(accepted_json, request_json)
+        ):
+            raise CommandConflict(
+                f"command ID {request.command_id} has conflicting handler binding"
+            )
+        return self._receipt_from_row(row)
+
     def list(self, limit: int, cursor: str | None) -> tuple[CommandReceipt, ...]:
         self._require_open()
         page_size = _plain_limit(limit)

@@ -173,6 +173,84 @@ def test_accepted_replay_binds_handler_key(tmp_path) -> None:
     store.close()
 
 
+def test_exact_operator_replay_is_cross_client_read_only_and_conflict_safe(tmp_path) -> None:
+    store = CommandStore(tmp_path / "commands.db")
+    request = _request()
+    accepted = store.accept(request, _context(client_id="client:first"), "note.add", NOW)
+    with store._ledger.read() as connection:
+        events_before = connection.execute(
+            "SELECT COUNT(*) FROM command_receipt_events"
+        ).fetchone()[0]
+
+    assert store.exact_operator_replay(
+        request,
+        operator_id="operator:windows",
+        accepted_handler_key="note.add",
+    ) == accepted
+    with store._ledger.read() as connection:
+        row = connection.execute(
+            "SELECT client_id FROM commands WHERE command_id = ?",
+            (request.command_id,),
+        ).fetchone()
+        events_after = connection.execute(
+            "SELECT COUNT(*) FROM command_receipt_events"
+        ).fetchone()[0]
+    assert row["client_id"] == "client:first"
+    assert events_after == events_before
+
+    with pytest.raises(CommandConflict, match="replay context"):
+        store.exact_operator_replay(
+            request,
+            operator_id="operator:other",
+            accepted_handler_key="note.add",
+        )
+    with pytest.raises(CommandConflict, match="replay context"):
+        store.exact_operator_replay(
+            _request(body="changed"),
+            operator_id="operator:windows",
+            accepted_handler_key="note.add",
+        )
+    with pytest.raises(CommandConflict, match="handler binding"):
+        store.exact_operator_replay(
+            request,
+            operator_id="operator:windows",
+            accepted_handler_key="other.handler",
+        )
+    store.close()
+
+
+def test_exact_operator_replay_returns_rejected_receipt_without_new_event(tmp_path) -> None:
+    store = CommandStore(tmp_path / "commands.db")
+    request = _request(command_id="client:note:rejected")
+    context = _context(client_id="client:first")
+    rejected = store.reject(
+        _request_hash(request),
+        _metadata(request, context),
+        AuthorizationDecision(
+            allowed=False,
+            code="viewer",
+            safe_message="Take Control is required.",
+        ),
+        NOW,
+    )
+    with store._ledger.read() as connection:
+        events_before = connection.execute(
+            "SELECT COUNT(*) FROM command_receipt_events"
+        ).fetchone()[0]
+
+    assert store.exact_operator_replay(
+        request,
+        operator_id=context.operator_id,
+        accepted_handler_key="note.add",
+    ) == rejected
+    with store._ledger.read() as connection:
+        events_after = connection.execute(
+            "SELECT COUNT(*) FROM command_receipt_events"
+        ).fetchone()[0]
+    assert events_after == events_before
+    store.close()
+
+
 def test_rejection_stores_only_safe_audit_metadata_and_replays(tmp_path) -> None:
     request = _request(body="PRIVATE-PAYLOAD-MARKER")
     context = _context()
