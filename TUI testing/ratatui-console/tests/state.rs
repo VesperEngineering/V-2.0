@@ -40,6 +40,36 @@ fn snapshot(sequence: u64, state_version: u64, regime: &str) -> Envelope {
     )
 }
 
+fn snapshot_with_qwen_state(
+    sequence: u64,
+    state_version: u64,
+    regime: &str,
+    qwen_state: &str,
+) -> Envelope {
+    let mut value = serde_json::to_value(snapshot(sequence, state_version, regime)).unwrap();
+    value["payload"]["snapshot"]["shell"]["header"]["qwen_state"] = json!(qwen_state);
+    serde_json::from_value(value).unwrap()
+}
+
+fn stale_cache_snapshot(sequence: u64, state_version: u64, regime: &str) -> Envelope {
+    let mut value = serde_json::to_value(snapshot_with_qwen_state(
+        sequence,
+        state_version,
+        regime,
+        "STALE CACHE",
+    ))
+    .unwrap();
+    value["payload"]["snapshot"]["command_specs"] = json!([]);
+    for capability in value["payload"]["snapshot"]["shell"]["capabilities"]
+        .as_array_mut()
+        .expect("capability array")
+    {
+        capability["state"] = json!("disabled");
+        capability["reason"] = json!("Cached state cannot authorize actions.");
+    }
+    serde_json::from_value(value).unwrap()
+}
+
 fn snapshot_with_note_control(sequence: u64, state_version: u64, regime: &str) -> Envelope {
     let mut value = serde_json::to_value(snapshot(sequence, state_version, regime)).unwrap();
     value["payload"]["snapshot"]["command_specs"] = json!([{
@@ -1317,6 +1347,67 @@ fn snapshot_versions_reject_mismatch_stale_and_equal_divergence() {
     );
     assert!(versions.reduce(snapshot(4, 7, "Divergent")).is_err());
     assert_eq!(versions.access, AccessState::ProtocolLockout);
+}
+
+#[test]
+fn equal_version_cache_can_be_replaced_once_by_a_fresh_projection_only() {
+    let mut replacement = AppState::controller();
+    assert_eq!(
+        replacement.reduce(stale_cache_snapshot(1, 0, "Cached")),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(
+        replacement.reduce(snapshot_with_qwen_state(2, 0, "Fresh", "READY")),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(
+        replacement
+            .snapshot
+            .as_ref()
+            .expect("fresh snapshot")
+            .shell
+            .header
+            .regime_label,
+        "Fresh"
+    );
+
+    let mut reverse = AppState::controller();
+    reverse
+        .reduce(snapshot_with_qwen_state(1, 0, "Fresh", "READY"))
+        .unwrap();
+    assert!(
+        reverse
+            .reduce(stale_cache_snapshot(2, 0, "Cached"))
+            .is_err()
+    );
+    assert_eq!(reverse.access, AccessState::ProtocolLockout);
+
+    let mut nonzero = AppState::controller();
+    assert!(
+        nonzero
+            .reduce(stale_cache_snapshot(1, 7, "Cached"))
+            .is_err(),
+        "only a version-zero startup cache is valid"
+    );
+    assert_eq!(nonzero.access, AccessState::ProtocolLockout);
+}
+
+#[test]
+fn forged_cache_label_with_an_enabled_capability_is_rejected() {
+    let mut forged = serde_json::to_value(stale_cache_snapshot(1, 0, "Forged")).unwrap();
+    forged["payload"]["snapshot"]["shell"]["capabilities"] = json!([{
+        "capability_id": "note.add",
+        "state": "enabled",
+        "reason": null
+    }]);
+    let mut state = AppState::controller();
+
+    assert!(
+        state
+            .reduce(serde_json::from_value(forged).unwrap())
+            .is_err()
+    );
+    assert_eq!(state.access, AccessState::ProtocolLockout);
 }
 
 #[test]

@@ -109,6 +109,7 @@ pub enum PrepareOutcome {
 struct TrackedCommand {
     pending: PendingCommand,
     sent: bool,
+    replay_pending: bool,
     state: TrackedCommandState,
     code: Option<String>,
     safe_message: Option<String>,
@@ -193,6 +194,7 @@ impl CommandTracker {
             TrackedCommand {
                 pending: pending.clone(),
                 sent: false,
+                replay_pending: false,
                 state: TrackedCommandState::Prepared,
                 code: None,
                 safe_message: None,
@@ -256,6 +258,25 @@ impl CommandTracker {
         }
     }
 
+    pub(crate) fn on_connection_lost(&mut self) {
+        for tracked in self.by_id.values_mut() {
+            tracked.replay_pending = tracked.sent && !tracked.state.is_terminal();
+        }
+    }
+
+    pub(crate) fn take_replay_request(&mut self) -> Option<CommandRequest> {
+        let mut candidates = self.by_id.iter().filter_map(|(command_id, tracked)| {
+            tracked.replay_pending.then_some(command_id.clone())
+        });
+        let command_id = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        let tracked = self.by_id.get_mut(&command_id)?;
+        tracked.replay_pending = false;
+        Some(tracked.pending.request.clone())
+    }
+
     pub fn apply_receipt(&mut self, receipt: CommandReceipt) -> Result<(), TrackerError> {
         let tracked = self
             .by_id
@@ -283,6 +304,7 @@ impl CommandTracker {
         tracked.safe_message = Some(receipt.safe_message.as_str().to_owned());
         tracked.last_receipt = Some(receipt);
         if next.is_terminal() {
+            tracked.replay_pending = false;
             let dedup_key = tracked.pending.dedup_key.clone();
             let command_id = tracked.pending.request.command_id.as_str().to_owned();
             if self.by_dedup_key.get(&dedup_key) == Some(&command_id) {
@@ -376,3 +398,101 @@ impl fmt::Display for CommandBuildError {
 }
 
 impl std::error::Error for CommandBuildError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash() -> Sha256Hex {
+        serde_json::from_value(serde_json::json!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))
+        .expect("valid hash")
+    }
+
+    fn prepare(tracker: &mut CommandTracker, checkpoint: &str, dedup_key: &str) -> PendingCommand {
+        let draft = CommandDraft::new(
+            CommandType::ApprovalApprove,
+            serde_json::json!({"run_id": "run-1", "checkpoint_id": checkpoint}),
+            None,
+            dedup_key,
+        );
+        let PrepareOutcome::New(pending) = tracker.prepare(draft, 7, hash()).expect("valid draft")
+        else {
+            panic!("new command expected")
+        };
+        *pending
+    }
+
+    fn terminal_receipt(command_id: &str, status: &str) -> CommandReceipt {
+        serde_json::from_value(serde_json::json!({
+            "command_id": command_id,
+            "status": status,
+            "code": "command-finished",
+            "safe_message": "Command finished.",
+            "accepted_at_utc": "2026-08-04T12:00:00Z",
+            "finished_at_utc": "2026-08-04T12:01:00Z",
+            "result": null
+        }))
+        .expect("valid receipt")
+    }
+
+    #[test]
+    fn reconnect_replay_returns_the_exact_nonterminal_request_once() {
+        let mut tracker = CommandTracker::with_generator(CommandIdGenerator::seeded(41, 99));
+        let pending = prepare(&mut tracker, "checkpoint-1", "approval:1");
+        let original = tracker.mark_sent(&pending).expect("first send");
+
+        tracker.on_connection_lost();
+
+        let replay = tracker.take_replay_request().expect("replay request");
+        assert_eq!(
+            serde_json::to_value(&replay).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(replay.command_id, original.command_id);
+        assert!(tracker.take_replay_request().is_none());
+    }
+
+    #[test]
+    fn reconnect_replay_excludes_prepared_and_every_terminal_state() {
+        let mut prepared_tracker =
+            CommandTracker::with_generator(CommandIdGenerator::seeded(41, 99));
+        prepare(&mut prepared_tracker, "checkpoint-1", "approval:prepared");
+        prepared_tracker.on_connection_lost();
+        assert!(prepared_tracker.take_replay_request().is_none());
+
+        for status in ["completed", "rejected", "failed", "cancelled"] {
+            let mut tracker = CommandTracker::with_generator(CommandIdGenerator::seeded(41, 99));
+            let pending = prepare(&mut tracker, status, status);
+            tracker.mark_sent(&pending).expect("first send");
+            tracker
+                .apply_receipt(terminal_receipt(
+                    pending.request().command_id.as_str(),
+                    status,
+                ))
+                .expect("terminal receipt");
+
+            tracker.on_connection_lost();
+
+            assert!(
+                tracker.take_replay_request().is_none(),
+                "{status} commands must not replay"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_replay_refuses_multiple_nonterminal_candidates() {
+        let mut tracker = CommandTracker::with_generator(CommandIdGenerator::seeded(41, 99));
+        let first = prepare(&mut tracker, "checkpoint-1", "approval:1");
+        let second = prepare(&mut tracker, "checkpoint-2", "approval:2");
+        tracker.mark_sent(&first).expect("first send");
+        tracker.mark_sent(&second).expect("second send");
+
+        tracker.on_connection_lost();
+
+        assert!(tracker.take_replay_request().is_none());
+        assert!(tracker.take_replay_request().is_none());
+    }
+}

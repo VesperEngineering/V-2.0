@@ -7,9 +7,9 @@ use ratatui::layout::Rect;
 use crate::command::{CommandDraft, CommandTracker, PrepareOutcome, TrackedCommandSummary};
 use crate::confirm::{Selection, begin_confirmation, submit_confirmation};
 use crate::contract::{
-    AccessState as WireAccessState, AgentStage, CommandReceipt, CommandRequest, CommandType,
-    ConsoleSnapshot, Envelope, Freshness, LeaseStatus, MemoryStatus, Message, PasswordString,
-    SearchRequestPayload,
+    AccessState as WireAccessState, AgentStage, CapabilityState, CommandReceipt, CommandRequest,
+    CommandType, ConsoleSnapshot, Envelope, Freshness, LeaseStatus, MemoryStatus, Message,
+    PasswordString, SearchRequestPayload,
 };
 use crate::controls::{
     AgentEnqueueForm, AgentRouteDraft, ButtonState, ControlButton, ControlContext, ControlMenu,
@@ -212,6 +212,26 @@ struct ViewKey {
 }
 
 struct ReceiptSequenceEvidence(CommandReceipt);
+
+const STALE_CACHE_LABEL: &str = "STALE CACHE";
+const STALE_CACHE_CAPABILITY_REASON: &str = "Cached state cannot authorize actions.";
+
+fn has_stale_cache_label(snapshot: &ConsoleSnapshot) -> bool {
+    snapshot.shell.header.qwen_state == STALE_CACHE_LABEL
+}
+
+fn is_stale_cache_projection(snapshot: &ConsoleSnapshot) -> bool {
+    snapshot.shell.state_version == 0
+        && has_stale_cache_label(snapshot)
+        && snapshot.command_specs.is_empty()
+        && snapshot.shell.capabilities.iter().all(|capability| {
+            capability.state == CapabilityState::Disabled
+                && capability
+                    .reason
+                    .as_ref()
+                    .is_some_and(|reason| reason.as_str() == STALE_CACHE_CAPABILITY_REASON)
+        })
+}
 
 impl fmt::Debug for ReceiptSequenceEvidence {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -771,6 +791,14 @@ impl AppState {
                 if payload.snapshot.shell.state_version != envelope.state_version {
                     return Err(self.fail_closed("state-version", "Snapshot version is invalid."));
                 }
+                if has_stale_cache_label(&payload.snapshot)
+                    && !is_stale_cache_projection(&payload.snapshot)
+                {
+                    return Err(self.fail_closed(
+                        "snapshot-cache",
+                        "Cached snapshot safety markers are invalid.",
+                    ));
+                }
                 if envelope.state_version < self.state_version {
                     if self.awaiting_snapshot {
                         return Err(self
@@ -778,6 +806,14 @@ impl AppState {
                     }
                     self.observe_presentation_sequence(envelope.sequence)?;
                     return Ok(ReduceOutcome::Ignored);
+                }
+                let replaces_stale_cache = self.snapshot.as_ref().is_some_and(|current| {
+                    is_stale_cache_projection(current)
+                        && current.shell.state_version == payload.snapshot.shell.state_version
+                        && !has_stale_cache_label(&payload.snapshot)
+                });
+                if replaces_stale_cache {
+                    self.snapshot_reducer = SnapshotReducer::default();
                 }
                 let outcome = self.snapshot_reducer.apply_snapshot(payload.snapshot);
                 if outcome == SnapshotReduceOutcome::ResnapshotRequired {
@@ -1048,6 +1084,7 @@ impl AppState {
     }
 
     pub fn fail_connection(&mut self) {
+        self.command_tracker.on_connection_lost();
         self.enter_protocol_lockout();
         self.dirty = true;
     }
@@ -1076,6 +1113,20 @@ impl AppState {
         self.search_return_screen = None;
         self.control_epoch = self.control_epoch.saturating_add(1);
         self.dirty = true;
+    }
+
+    pub(crate) fn take_reconnect_replay(&mut self) -> Option<CommandRequest> {
+        if self.phase != SessionPhase::Authenticated
+            || self.access != AccessState::Controller
+            || self.awaiting_snapshot
+        {
+            return None;
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        if is_stale_cache_projection(snapshot) {
+            return None;
+        }
+        self.command_tracker.take_replay_request()
     }
 
     fn view_key(&self) -> ViewKey {

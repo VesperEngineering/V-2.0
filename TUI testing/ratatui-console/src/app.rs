@@ -1186,7 +1186,13 @@ impl FoundationClient {
                 self.send_action(session, ClientAction::RequestSnapshot)
                     .await
             }
-            Ok(ReduceOutcome::Changed | ReduceOutcome::Ignored) => Ok(SessionStep::Continue),
+            Ok(ReduceOutcome::Changed | ReduceOutcome::Ignored) => {
+                let Some(request) = self.app.state.take_reconnect_replay() else {
+                    return Ok(SessionStep::Continue);
+                };
+                self.send_action(session, ClientAction::Command(request))
+                    .await
+            }
             Err(_) => {
                 self.fail_connection();
                 Ok(SessionStep::Reconnect)
