@@ -20,6 +20,9 @@ dependencies = [
     "pyyaml>=6.0.1,<7",
     "scikit-learn>=1.4.0,<2",
     "typer>=0.27.0,<1",
+    "winrt-runtime==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Data.Xml.Dom==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.UI.Notifications==3.2.1; sys_platform == 'win32'",
     "xgboost>=2.0.0,<4",
     "yfinance>=0.2.40,<2",
 ]

@@ -12,6 +12,17 @@ def test_tui_windows_transport_is_pinned() -> None:
     assert "pywin32==312; sys_platform == 'win32'" in dependencies
 
 
+def test_tui_notification_dependencies_are_windows_only() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = set(project["project"]["dependencies"])
+    required = {
+        "winrt-runtime==3.2.1; sys_platform == 'win32'",
+        "winrt-Windows.Data.Xml.Dom==3.2.1; sys_platform == 'win32'",
+        "winrt-Windows.UI.Notifications==3.2.1; sys_platform == 'win32'",
+    }
+    assert required.issubset(dependencies)
+
+
 @pytest.mark.parametrize(
     ("distribution", "module"),
     [
