@@ -26,6 +26,8 @@ from .command_contracts import (
     CompressMemoryPayload,
     NoteAddPayload,
     ReceiptStatus,
+    RuntimeStartPayload,
+    ServicePayload,
 )
 from .command_policy import (
     AuthorizationDecision,
@@ -40,6 +42,8 @@ from .command_ports import (
     MemoryCommandPort,
     PlatformCommandPort,
     PortResult,
+    RuntimeCommandPort,
+    ServiceCommandPort,
 )
 from .command_store import (
     CommandClaim,
@@ -50,7 +54,7 @@ from .command_store import (
 from .notes import NoteStore, NoteTarget, NoteVisibility
 from .operator_decisions import OperatorDecisionStore
 from .sqlite_ledger import LedgerClosedError, LedgerCorruptionError, TuiLedger
-from .views import CommandSpecView, UtcDateTime
+from .views import CapabilityState, CapabilityView, CommandSpecView, UtcDateTime
 
 
 _HANDLER_KEYS: Mapping[CommandType, str] = MappingProxyType(
@@ -61,17 +65,36 @@ _HANDLER_KEYS: Mapping[CommandType, str] = MappingProxyType(
         "approval.reject": "approval.reject",
         "agent.enqueue": "agent.enqueue",
         "memory.compress-now": "memory.compress-now",
+        "service.pause": "service.pause",
+        "service.restart": "service.restart",
+        "runtime.start": "runtime.start",
+        "runtime.stop-safe": "runtime.stop-safe",
+        "runtime.stop-force": "runtime.stop-force",
+        "runtime.prepare-shutdown": "runtime.prepare-shutdown",
     }
 )
 _EXTERNAL_HANDLERS = {
     "approval.approve",
     "approval.reject",
     "agent.enqueue",
+    "service.pause",
+    "service.restart",
+    "runtime.start",
+    "runtime.stop-safe",
+    "runtime.stop-force",
+    "runtime.prepare-shutdown",
 }
-_RECOVERY_STATES = {"not-started", "completed", "failed", "unknown"}
-_MANUAL_INTERVENTION_MESSAGE = (
-    "Downstream command state is unknown; inspect it before any retry."
+_RUNTIME_HANDLERS = frozenset(
+    {
+        "runtime.start",
+        "runtime.stop-safe",
+        "runtime.stop-force",
+        "runtime.prepare-shutdown",
+    }
 )
+_SERVICE_HANDLERS = frozenset({"service.pause", "service.restart"})
+_RECOVERY_STATES = {"not-started", "completed", "failed", "unknown"}
+_MANUAL_INTERVENTION_MESSAGE = "Downstream command state is unknown; inspect it before any retry."
 _UTC = TypeAdapter(UtcDateTime)
 
 
@@ -131,6 +154,8 @@ class CommandRegistry:
         port: PlatformCommandPort,
         *,
         memory_port: MemoryCommandPort | None = None,
+        runtime_port: RuntimeCommandPort | None = None,
+        service_port: ServiceCommandPort | None = None,
         policy: CommandPolicy | None = None,
         specs: tuple[CommandSpecView, ...] = COMMAND_SPECS,
         clock: Callable[[], datetime] = _utc_now,
@@ -151,6 +176,8 @@ class CommandRegistry:
             raise ValueError("claim lease must be a positive timedelta")
         self._port = port
         self._memory_port = memory_port
+        self._runtime_port = runtime_port
+        self._service_port = service_port
         self._policy = CommandPolicy() if policy is None else policy
         if type(self._policy) is not CommandPolicy:
             raise TypeError("policy must be CommandPolicy")
@@ -181,6 +208,13 @@ class CommandRegistry:
         return tuple(
             command_type for command_type in self._specs if self._handler_enabled(command_type)
         )
+
+    @property
+    def command_capabilities(self) -> tuple[CapabilityView, ...]:
+        """Return current adapter truth for every command in catalog order."""
+
+        self._require_open()
+        return tuple(self._handler_capability(command_type) for command_type in self._specs)
 
     def __enter__(self) -> CommandRegistry:
         self._require_open()
@@ -313,7 +347,7 @@ class CommandRegistry:
                 continue
             if request.command_type not in _EXTERNAL_HANDLERS:
                 raise LedgerCorruptionError("recoverable command has no reviewed handler")
-            state = self._port.recover(request.command_id, request)
+            state = self._recover_external(request)
             if state not in _RECOVERY_STATES:
                 raise ValueError("command recovery port returned an invalid state")
             claim = self._claim_for_recovery(
@@ -521,7 +555,118 @@ class CommandRegistry:
                 safe_message="Context compression completed.",
                 result=receipt.model_dump(mode="json"),
             )
+        if request.command_type in _RUNTIME_HANDLERS:
+            runtime_port = self._runtime_port
+            if runtime_port is None:
+                raise LedgerCorruptionError("enabled runtime port disappeared")
+            if request.command_type == "runtime.start":
+                payload = cast(RuntimeStartPayload, request.payload)
+                runtime_receipt = runtime_port.start(
+                    request.command_id,
+                    payload.mode,
+                    payload.activation_receipt_id,
+                )
+            elif request.command_type == "runtime.stop-safe":
+                runtime_receipt = runtime_port.stop_safe(request.command_id)
+            elif request.command_type == "runtime.stop-force":
+                runtime_receipt = runtime_port.stop_force(request.command_id)
+            else:
+                runtime_receipt = runtime_port.prepare_shutdown(request.command_id)
+            return self._runtime_result(runtime_receipt, request)
+        if request.command_type in _SERVICE_HANDLERS:
+            service_port = self._service_port
+            if service_port is None:
+                raise LedgerCorruptionError("enabled service port disappeared")
+            payload = cast(ServicePayload, request.payload)
+            service_receipt = (
+                service_port.pause(request.command_id, payload.service_id)
+                if request.command_type == "service.pause"
+                else service_port.restart(request.command_id, payload.service_id)
+            )
+            return self._service_result(service_receipt, request)
         raise LedgerCorruptionError("claimed command has no reviewed external handler")
+
+    def _recover_external(self, request: CommandRequest) -> str:
+        if request.command_type in _RUNTIME_HANDLERS:
+            port = self._runtime_port
+        elif request.command_type in _SERVICE_HANDLERS:
+            port = self._service_port
+        else:
+            port = self._port
+        if port is None:
+            return "unknown"
+        try:
+            return port.recover(request.command_id, request)
+        except Exception:
+            return "unknown"
+
+    @staticmethod
+    def _runtime_result(receipt: object, request: CommandRequest) -> PortResult:
+        from vesper.platform.ops.services import RuntimeReceipt
+
+        if type(receipt) is not RuntimeReceipt:
+            raise TypeError("runtime port must return RuntimeReceipt")
+        validated = RuntimeReceipt.model_validate(
+            receipt.model_dump(mode="python", warnings=False),
+            strict=True,
+        )
+        operations = {
+            "runtime.start": "start",
+            "runtime.stop-safe": "stop-safe",
+            "runtime.stop-force": "stop-force",
+            "runtime.prepare-shutdown": "prepare-shutdown",
+        }
+        payload = cast(RuntimeStartPayload, request.payload)
+        expected = (
+            request.command_id,
+            operations[request.command_type],
+            payload.mode if request.command_type == "runtime.start" else None,
+            (payload.activation_receipt_id if request.command_type == "runtime.start" else None),
+        )
+        actual = (
+            validated.command_id,
+            validated.operation,
+            validated.mode,
+            validated.activation_receipt_id,
+        )
+        if actual != expected:
+            raise ValueError("runtime receipt does not match the command")
+        return PortResult(
+            ok=validated.accepted,
+            code=validated.code,
+            safe_message=validated.safe_message,
+            result=validated.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _service_result(receipt: object, request: CommandRequest) -> PortResult:
+        from vesper.platform.ops.services import ServiceReceipt
+
+        if type(receipt) is not ServiceReceipt:
+            raise TypeError("service port must return ServiceReceipt")
+        validated = ServiceReceipt.model_validate(
+            receipt.model_dump(mode="python", warnings=False),
+            strict=True,
+        )
+        payload = cast(ServicePayload, request.payload)
+        expected = (
+            request.command_id,
+            payload.service_id,
+            "pause" if request.command_type == "service.pause" else "restart",
+        )
+        actual = (
+            validated.command_id,
+            validated.service_id,
+            validated.operation,
+        )
+        if actual != expected:
+            raise ValueError("service receipt does not match the command")
+        return PortResult(
+            ok=validated.accepted,
+            code=validated.code,
+            safe_message=validated.safe_message,
+            result=validated.model_dump(mode="json"),
+        )
 
     @staticmethod
     def _require_memory_agent(request: CommandRequest) -> str:
@@ -548,9 +693,53 @@ class CommandRegistry:
         return validated
 
     def _handler_enabled(self, command_type: CommandType) -> bool:
+        return self._handler_capability(command_type).state is CapabilityState.ENABLED
+
+    def _handler_capability(self, command_type: CommandType) -> CapabilityView:
         if command_type == "memory.compress-now":
-            return self._memory_port_healthy()
-        return command_type in _HANDLER_KEYS
+            enabled = self._memory_port_healthy()
+            return CapabilityView(
+                capability_id=command_type,
+                state=CapabilityState.ENABLED if enabled else CapabilityState.DISABLED,
+                reason=None if enabled else DISABLED_COMMAND_REASONS[command_type],
+            )
+        if command_type in _RUNTIME_HANDLERS:
+            return self._optional_port_capability(command_type, self._runtime_port)
+        if command_type in _SERVICE_HANDLERS:
+            return self._optional_port_capability(command_type, self._service_port)
+        enabled = command_type in _HANDLER_KEYS
+        return CapabilityView(
+            capability_id=command_type,
+            state=CapabilityState.ENABLED if enabled else CapabilityState.DISABLED,
+            reason=None if enabled else DISABLED_COMMAND_REASONS[command_type],
+        )
+
+    @staticmethod
+    def _optional_port_capability(command_type: CommandType, port: object) -> CapabilityView:
+        if port is None:
+            return CapabilityView(
+                capability_id=command_type,
+                state=CapabilityState.DISABLED,
+                reason=DISABLED_COMMAND_REASONS[command_type],
+            )
+        try:
+            available = getattr(port, "available")
+            candidate = available(command_type)
+            if type(candidate) is not CapabilityView:
+                raise TypeError("port capability must be CapabilityView")
+            capability = CapabilityView.model_validate(
+                candidate.model_dump(mode="python", warnings=False),
+                strict=True,
+            )
+            if capability.capability_id != command_type:
+                raise ValueError("port capability ID does not match command")
+            return capability
+        except Exception:
+            return CapabilityView(
+                capability_id=command_type,
+                state=CapabilityState.DISABLED,
+                reason=DISABLED_COMMAND_REASONS[command_type],
+            )
 
     def _memory_port_healthy(self) -> bool:
         if self._memory_port is None:

@@ -121,16 +121,14 @@ _ACTION_CAPABILITIES = (
     "source-control.push",
 )
 _SAFE_ID_ADAPTER = TypeAdapter(SafeId)
-_HANDLED_COMMANDS = frozenset(
+_RUNTIME_GOVERNED_COMMANDS = frozenset(
     {
-        "note.add",
         "approval.approve",
         "approval.hold",
         "approval.reject",
         "agent.enqueue",
     }
 )
-_RUNTIME_GOVERNED_COMMANDS = _HANDLED_COMMANDS - {"note.add"}
 _RUNTIME_UNAVAILABLE_REASON = "Platform runtime state is unavailable."
 _MAX_WIRE_UINT = 2**64 - 1
 _PLATFORM_RUNTIME_SAMPLE_ADAPTER = TypeAdapter(SourceSample[PlatformRuntimeFacts])
@@ -325,6 +323,7 @@ class Gateway:
                     self._upstream_snapshot,
                     previous,
                     runtime_sample,
+                    registry,
                 )
                 self._command_registry = registry
                 self._platform_runtime_sample = runtime_sample
@@ -374,14 +373,11 @@ class Gateway:
             with self._control_lock:
                 previous = self._snapshot
                 previous_upstream = self._upstream_snapshot
-                same_upstream = (
-                    self._has_projection_snapshot and snapshot == previous_upstream
-                )
+                same_upstream = self._has_projection_snapshot and snapshot == previous_upstream
                 if self._has_projection_snapshot:
                     if (
                         not same_upstream
-                        and snapshot.shell.state_version
-                        <= previous_upstream.shell.state_version
+                        and snapshot.shell.state_version <= previous_upstream.shell.state_version
                     ):
                         raise ValueError("snapshot state version must advance")
                 if self._command_registry is not None:
@@ -569,9 +565,7 @@ class Gateway:
                             operator_id=self.operator_id,
                             client_id=session.client_id,
                             authenticated=session._authenticated,
-                            owns_control_lease=(
-                                self._lease.controller_id == session.client_id
-                            ),
+                            owns_control_lease=(self._lease.controller_id == session.client_id),
                             control_version=snapshot.control_version,
                             control_hash=snapshot.control_hash,
                             capabilities=snapshot.shell.capabilities,
@@ -747,11 +741,7 @@ class Gateway:
         }:
             payload = request.payload
             assert isinstance(payload, ApprovalPayload)
-            runtime = (
-                runtime_sample.value
-                if runtime_sample.freshness is Freshness.FRESH
-                else None
-            )
+            runtime = runtime_sample.value if runtime_sample.freshness is Freshness.FRESH else None
             approval = next(
                 (
                     row
@@ -765,9 +755,7 @@ class Gateway:
             binding = {
                 "run_id": payload.run_id,
                 "checkpoint_id": payload.checkpoint_id,
-                "approval": (
-                    None if approval is None else approval.model_dump(mode="json")
-                ),
+                "approval": (None if approval is None else approval.model_dump(mode="json")),
             }
             checks = (
                 PrerequisiteCheck(
@@ -825,11 +813,7 @@ class Gateway:
             )
         if payload.target_type == "approval":
             return next(
-                (
-                    row
-                    for row in snapshot.risk.approvals
-                    if row.approval_id == payload.target_id
-                ),
+                (row for row in snapshot.risk.approvals if row.approval_id == payload.target_id),
                 None,
             )
         return next(
@@ -840,11 +824,12 @@ class Gateway:
     @staticmethod
     def _command_capabilities(
         runtime_sample: SourceSample[PlatformRuntimeFacts],
+        registry: CommandRegistry,
     ) -> tuple[CapabilityView, ...]:
         runtime_fresh = (
-            runtime_sample.freshness is Freshness.FRESH
-            and runtime_sample.value is not None
+            runtime_sample.freshness is Freshness.FRESH and runtime_sample.value is not None
         )
+        adapter_capabilities = {row.capability_id: row for row in registry.command_capabilities}
         return (
             CapabilityView(
                 capability_id="snapshot.read",
@@ -852,30 +837,18 @@ class Gateway:
                 reason=None,
             ),
             *(
-                CapabilityView(
-                    capability_id=spec.capability_id,
-                    state=(
-                        CapabilityState.ENABLED
-                        if spec.command_type == "note.add"
-                        or (
-                            spec.command_type in _RUNTIME_GOVERNED_COMMANDS
-                            and runtime_fresh
-                        )
-                        else CapabilityState.DISABLED
-                    ),
-                    reason=(
-                        None
-                        if spec.command_type == "note.add"
-                        or (
-                            spec.command_type in _RUNTIME_GOVERNED_COMMANDS
-                            and runtime_fresh
-                        )
-                        else (
-                            _RUNTIME_UNAVAILABLE_REASON
-                            if spec.command_type in _RUNTIME_GOVERNED_COMMANDS
-                            else DISABLED_COMMAND_REASONS[spec.command_type]
-                        )
-                    ),
+                (
+                    CapabilityView(
+                        capability_id=spec.capability_id,
+                        state=CapabilityState.DISABLED,
+                        reason=_RUNTIME_UNAVAILABLE_REASON,
+                    )
+                    if (
+                        spec.command_type in _RUNTIME_GOVERNED_COMMANDS
+                        and not runtime_fresh
+                        and adapter_capabilities[spec.command_type].state is CapabilityState.ENABLED
+                    )
+                    else adapter_capabilities[spec.command_type]
                 )
                 for spec in COMMAND_SPECS
             ),
@@ -911,9 +884,7 @@ class Gateway:
         if capabilities == upstream.shell.capabilities:
             return upstream
         return upstream.model_copy(
-            update={
-                "shell": upstream.shell.model_copy(update={"capabilities": capabilities})
-            }
+            update={"shell": upstream.shell.model_copy(update={"capabilities": capabilities})}
         )
 
     def _command_snapshot(
@@ -921,17 +892,19 @@ class Gateway:
         upstream: ConsoleSnapshot,
         previous: ConsoleSnapshot | None,
         runtime_sample: SourceSample[PlatformRuntimeFacts],
+        registry: CommandRegistry | None = None,
     ) -> ConsoleSnapshot:
-        capabilities = self._command_capabilities(runtime_sample)
+        selected_registry = self._command_registry if registry is None else registry
+        if selected_registry is None:
+            raise RuntimeError("command registry is unavailable")
+        capabilities = self._command_capabilities(runtime_sample, selected_registry)
         facts = {
             "upstream_control_version": upstream.control_version,
             "upstream_control_hash": upstream.control_hash,
             "command_specs": [row.model_dump(mode="json") for row in COMMAND_SPECS],
             "capabilities": [row.model_dump(mode="json") for row in capabilities],
             "platform_runtime": platform_runtime_control_binding(runtime_sample),
-            "approved_autonomous_agent_roles": [
-                role.value for role in AUTONOMOUS_AGENT_ROLES
-            ],
+            "approved_autonomous_agent_roles": [role.value for role in AUTONOMOUS_AGENT_ROLES],
         }
         control_hash = hashlib.sha256(
             json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")

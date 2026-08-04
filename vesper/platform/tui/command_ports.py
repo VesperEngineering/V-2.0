@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Callable, Literal, Mapping, Protocol
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Protocol
 
 from vesper.platform.agent_profiles import AUTONOMOUS_AGENT_ROLES
 from vesper.platform.contracts import ApprovalDecision, AgentRole
@@ -15,9 +15,13 @@ from vesper.platform.tui.command_contracts import (
     AgentEnqueuePayload,
     ApprovalPayload,
     CommandRequest,
+    CommandType,
 )
 from vesper.platform.tui.compression import CompressionReceipt
-from vesper.platform.tui.views import SafeId
+from vesper.platform.tui.views import CapabilityView, SafeId
+
+if TYPE_CHECKING:
+    from vesper.platform.ops.services import RuntimeReceipt, ServiceReceipt
 
 
 RecoveryStatus = Literal["not-started", "completed", "failed", "unknown"]
@@ -123,6 +127,39 @@ class MemoryCommandPort(Protocol):
     ) -> CompressionReceipt | None: ...
 
 
+class RuntimeCommandPort(Protocol):
+    """Optional reviewed runtime lifecycle adapter."""
+
+    def available(self, command_type: CommandType) -> CapabilityView: ...
+
+    def start(
+        self,
+        command_id: SafeId,
+        mode: Literal["shadow", "paper"],
+        activation_receipt_id: SafeId | None,
+    ) -> RuntimeReceipt: ...
+
+    def stop_safe(self, command_id: SafeId) -> RuntimeReceipt: ...
+
+    def stop_force(self, command_id: SafeId) -> RuntimeReceipt: ...
+
+    def prepare_shutdown(self, command_id: SafeId) -> RuntimeReceipt: ...
+
+    def recover(self, command_id: str, request: CommandRequest) -> RecoveryStatus: ...
+
+
+class ServiceCommandPort(Protocol):
+    """Optional allowlisted service lifecycle adapter."""
+
+    def available(self, command_type: CommandType) -> CapabilityView: ...
+
+    def pause(self, command_id: SafeId, service_id: SafeId) -> ServiceReceipt: ...
+
+    def restart(self, command_id: SafeId, service_id: SafeId) -> ServiceReceipt: ...
+
+    def recover(self, command_id: str, request: CommandRequest) -> RecoveryStatus: ...
+
+
 class LocalPlatformCommandPort:
     def __init__(
         self,
@@ -213,8 +250,7 @@ class LocalPlatformCommandPort:
                 payload.priority,
             )
             actual = tuple(
-                existing[key]
-                for key in ("role", "session_id", "title", "objective", "priority")
+                existing[key] for key in ("role", "session_id", "title", "objective", "priority")
             )
             if actual != expected:
                 raise SpecialistRuntimeUnavailable(
@@ -273,8 +309,7 @@ class LocalPlatformCommandPort:
             payload.priority,
         )
         actual = tuple(
-            work[key]
-            for key in ("work_id", "role", "session_id", "title", "objective", "priority")
+            work[key] for key in ("work_id", "role", "session_id", "title", "objective", "priority")
         )
         return "completed" if actual == expected else "unknown"
 
@@ -283,9 +318,7 @@ class LocalPlatformCommandPort:
         if not isinstance(payload, ApprovalPayload):
             return "unknown"
         try:
-            work = self._service.get_tui_agent_work(
-                deterministic_work_id(request.command_id)
-            )
+            work = self._service.get_tui_agent_work(deterministic_work_id(request.command_id))
         except Exception:
             return "unknown"
         if work is not None:
