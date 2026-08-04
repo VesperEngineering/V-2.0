@@ -25,8 +25,10 @@ from vesper.platform.tui.snapshot import (
     ControlStateBuilder,
     SnapshotBuilder,
     diff_snapshots,
+    requires_full_snapshot,
 )
 from vesper.platform.tui.views import (
+    AccountSummaryView,
     AgentCard,
     CandidateRow,
     EvidenceRow,
@@ -40,6 +42,7 @@ from vesper.platform.tui.views import (
     ServiceRow,
     SourceRow,
     TimelineRow,
+    TransitionPlanView,
 )
 
 
@@ -957,6 +960,38 @@ def test_snapshot_diff_emits_canonical_upserts_and_removals() -> None:
     duplicate_snapshot = first.model_copy(update={"portfolio": duplicate_view})
     with pytest.raises(ValueError, match="Duplicate entity ID"):
         diff_snapshots(first, duplicate_snapshot)
+
+
+@pytest.mark.parametrize("live_field", ["live_readiness", "live_account", "live_transition_plan"])
+def test_live_field_changes_require_a_full_snapshot(live_field: str) -> None:
+    first = _build({})
+    if live_field == "live_readiness":
+        readiness = first.system.live_readiness.model_copy(
+            update={
+                "broker": first.system.live_readiness.broker.model_copy(
+                    update={"reason": "New reviewed broker readiness evidence."}
+                )
+            }
+        )
+        value = readiness
+    elif live_field == "live_account":
+        value = AccountSummaryView(
+            name="Primary brokerage",
+            number="123456789",
+            balance="1000",
+            capital="900",
+        )
+    else:
+        value = TransitionPlanView(
+            broker_positions_as_of_utc=NOW,
+            desired_portfolio_id="portfolio:candidate",
+            orders=(),
+        )
+    current = first.model_copy(
+        update={"system": first.system.model_copy(update={live_field: value})}
+    )
+
+    assert requires_full_snapshot(first, current) is True
 
 
 def test_snapshot_diff_coalesces_identical_entity_changes_across_targets() -> None:

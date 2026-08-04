@@ -497,6 +497,26 @@ _FIXTURE_SNAPSHOT = {
         "services": [_FIXTURE_SERVICE_ROW],
         "metrics": [_FIXTURE_METRIC_ROW],
         "repositories": [_FIXTURE_REPOSITORY_ROW],
+        "live_readiness": {
+            name: {
+                "state": "unavailable",
+                "reason": f"No reviewed {name} readiness source is configured.",
+            }
+            for name in (
+                "broker",
+                "account",
+                "data",
+                "model",
+                "strategy",
+                "risk",
+                "reconciliation",
+                "incident",
+                "authority",
+            )
+        }
+        | {"enabled": False},
+        "live_account": None,
+        "live_transition_plan": None,
     },
 }
 
@@ -686,6 +706,7 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "event-presentation-metadata",
             "repository-status",
             "governed-command-contracts",
+            "live-readiness",
         ],
         "optional_default": [
             "capability.reason",
@@ -739,6 +760,8 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "snapshot.memory.error",
             "snapshot.system.as_of_utc",
             "snapshot.system.error",
+            "snapshot.system.live_account",
+            "snapshot.system.live_transition_plan",
             "event.presentation.header.operating_mode_reason",
             "event.presentation.header.data_age_seconds",
             "event.presentation.header.regime_confidence",

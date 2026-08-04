@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from vesper.platform.tui.live_readiness import unavailable_live_readiness
 from vesper.platform.tui.views import (
     AgentCard,
     AlertRow,
@@ -331,6 +332,9 @@ def full_snapshot_payload() -> dict[str, object]:
             "services": (service,),
             "metrics": (metric,),
             "repositories": (repository,),
+            "live_readiness": unavailable_live_readiness(),
+            "live_account": None,
+            "live_transition_plan": None,
         },
     }
 

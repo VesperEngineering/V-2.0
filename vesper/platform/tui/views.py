@@ -6,6 +6,7 @@ import json
 import math
 import re
 from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Literal, Self, TypeAlias, get_args
 
@@ -430,10 +431,83 @@ class MemoryView(ScreenView):
     history: tuple[TimelineRow, ...]
 
 
+class ReadinessGate(StrictModel):
+    state: Literal["ready", "blocked", "unavailable", "stale"]
+    reason: NonEmptyStr
+
+
+class LiveReadinessView(StrictModel):
+    broker: ReadinessGate
+    account: ReadinessGate
+    data: ReadinessGate
+    model: ReadinessGate
+    strategy: ReadinessGate
+    risk: ReadinessGate
+    reconciliation: ReadinessGate
+    incident: ReadinessGate
+    authority: ReadinessGate
+    enabled: bool
+
+    @model_validator(mode="after")
+    def require_exact_enabled_state(self) -> Self:
+        gates = (
+            self.broker,
+            self.account,
+            self.data,
+            self.model,
+            self.strategy,
+            self.risk,
+            self.reconciliation,
+            self.incident,
+            self.authority,
+        )
+        if self.enabled is not all(gate.state == "ready" for gate in gates):
+            raise ValueError(
+                "Live readiness enabled must be true if and only if all gates are ready"
+            )
+        return self
+
+
+class AccountSummaryView(StrictModel):
+    name: NonEmptyStr
+    number: NonEmptyStr
+    balance: DecimalString
+    capital: DecimalString
+
+
+class TransitionOrderView(StrictModel):
+    symbol: SafeId
+    side: Literal["buy", "sell"]
+    quantity: DecimalString
+    approval_required: Literal[True]
+
+    @model_validator(mode="after")
+    def require_positive_quantity(self) -> Self:
+        if Decimal(self.quantity) <= 0:
+            raise ValueError("transition order quantity must be positive")
+        return self
+
+
+class TransitionPlanView(StrictModel):
+    broker_positions_as_of_utc: UtcDateTime
+    desired_portfolio_id: SafeId
+    orders: tuple[TransitionOrderView, ...]
+
+    @model_validator(mode="after")
+    def require_unique_orders(self) -> Self:
+        symbols = tuple(order.symbol for order in self.orders)
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("transition plan order symbols must be unique")
+        return self
+
+
 class SystemView(ScreenView):
     services: tuple[ServiceRow, ...]
     metrics: tuple[MetricRow, ...]
     repositories: tuple[RepositoryRow, ...]
+    live_readiness: LiveReadinessView
+    live_account: AccountSummaryView | None
+    live_transition_plan: TransitionPlanView | None
 
 
 EventTarget: TypeAlias = Literal[

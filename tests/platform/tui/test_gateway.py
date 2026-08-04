@@ -27,6 +27,7 @@ from vesper.platform.tui.notes import NoteFilters, NoteStore, NoteTarget, NoteVi
 from vesper.platform.tui.protocol import MAX_FRAME_BYTES
 from vesper.platform.tui.search import GlobalSearchService, SearchKind
 from vesper.platform.tui.views import (
+    AccountSummaryView,
     AlertRow,
     CommandSpecView,
     ConsoleSnapshot,
@@ -606,6 +607,54 @@ def test_projection_snapshot_uses_full_snapshot_when_command_specs_and_rows_chan
             "shell": first.shell.model_copy(update={"state_version": 2}),
             "command_specs": (command_spec,),
             "system": first.system.model_copy(update={"metrics": (second_metric,)}),
+        }
+    )
+    gateway.publish_snapshot(second)
+
+    replacement = gateway.poll("subscriber")
+    assert replacement is not None
+    assert replacement.message_type is MessageType.SNAPSHOT
+    assert decode_payload(replacement).snapshot == second
+    assert gateway.poll("subscriber") is None
+
+
+def test_projection_snapshot_uses_full_snapshot_when_live_state_and_rows_change(
+    gateway: Gateway,
+) -> None:
+    subscribe(gateway)
+    original = gateway.snapshot()
+    first_metric = MetricRow(
+        metric_id="metric:cpu",
+        value=10.0,
+        unit="percent",
+        freshness=Freshness.FRESH,
+        observed_at_utc=NOW,
+        error=None,
+    )
+    first = original.model_copy(
+        update={
+            "shell": original.shell.model_copy(update={"state_version": 1}),
+            "system": original.system.model_copy(update={"metrics": (first_metric,)}),
+        }
+    )
+    gateway.publish_snapshot(first)
+    assert gateway.poll("subscriber") is not None
+
+    account = AccountSummaryView(
+        name="Primary brokerage",
+        number="123456789",
+        balance="1000",
+        capital="900",
+    )
+    second = first.model_copy(
+        update={
+            "shell": first.shell.model_copy(update={"state_version": 2}),
+            "system": first.system.model_copy(
+                update={
+                    "metrics": (first_metric.model_copy(update={"value": 20.0}),),
+                    "live_account": account,
+                }
+            ),
         }
     )
     gateway.publish_snapshot(second)

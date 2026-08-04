@@ -513,6 +513,9 @@ def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() ->
     assert descriptor["schema_version"] == 1
     assert set(descriptor["messages"]) == {message.value for message in MessageType}
     assert "snapshot.shell.header.agent_queue_length" in descriptor["nullable_required"]
+    assert "snapshot.system.live_account" in descriptor["nullable_required"]
+    assert "snapshot.system.live_transition_plan" in descriptor["nullable_required"]
+    assert "live-readiness" in descriptor["field_catalog_scope"]
     assert descriptor["optional_default"] == [
         "capability.reason",
         "command.request.confirmation",

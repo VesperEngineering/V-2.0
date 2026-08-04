@@ -784,6 +784,61 @@ fn number_keys_select_all_ten_screens_after_unlock() {
 }
 
 #[test]
+fn p_toggles_account_mask_only_on_system_and_never_mutates_the_snapshot() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 7, "First")).unwrap();
+    let before = serde_json::to_value(state.snapshot.as_ref().unwrap()).unwrap();
+
+    state.screen = Screen::Portfolio;
+    state.handle(InputEvent::Char('p'));
+    assert!(!state.preferences().mask_account_details);
+
+    state.screen = Screen::System;
+    state.handle(InputEvent::Char('p'));
+    assert!(state.preferences().mask_account_details);
+    assert!(state.screen_state().mask_account_details);
+    assert_eq!(
+        serde_json::to_value(state.snapshot.as_ref().unwrap()).unwrap(),
+        before
+    );
+
+    state.handle(InputEvent::Char('p'));
+    assert!(!state.preferences().mask_account_details);
+}
+
+#[test]
+fn system_live_panel_keyboard_scroll_reaches_long_transition_plans() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot(1, 7, "First")).unwrap();
+    let mut value = serde_json::to_value(state.snapshot.take().unwrap()).unwrap();
+    value["system"]["live_transition_plan"] = json!({
+        "broker_positions_as_of_utc":"2026-08-04T12:00:00Z",
+        "desired_portfolio_id":"portfolio:candidate",
+        "orders": (0..8).map(|index| json!({
+            "symbol": format!("SYM{index}"),
+            "side":"buy",
+            "quantity":"1",
+            "approval_required":true
+        })).collect::<Vec<_>>()
+    });
+    state.snapshot = Some(serde_json::from_value(value).unwrap());
+    state.screen = Screen::System;
+    for _ in 0..3 {
+        state.handle(InputEvent::Right);
+    }
+    for _ in 0..20 {
+        state.handle(InputEvent::Down);
+    }
+
+    assert_eq!(state.screen_state().narrow_panel, 3);
+    assert!(
+        state.screen_state().scroll_offset >= 8,
+        "scroll offset was {}",
+        state.screen_state().scroll_offset
+    );
+}
+
+#[test]
 fn manual_lock_hides_content_and_blocks_auth_until_lock_result() {
     let mut state = AppState::controller();
     assert_eq!(

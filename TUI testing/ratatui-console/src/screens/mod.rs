@@ -56,6 +56,7 @@ pub enum DetailKind {
 pub struct ScreenState {
     pub theme: Theme,
     pub display_mode: DisplayMode,
+    pub mask_account_details: bool,
     pub performance_period: PerformancePeriod,
     pub scroll_offset: usize,
     pub selected_id: Option<String>,
@@ -70,6 +71,7 @@ impl Default for ScreenState {
         Self {
             theme: Theme::WarmWhite,
             display_mode: DisplayMode::Standard,
+            mask_account_details: false,
             performance_period: PerformancePeriod::Today,
             scroll_offset: 0,
             selected_id: None,

@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Final, TypeAlias, cast
 
 from vesper.platform.tui.contracts import MessageType, SnapshotPayload, WireEnvelope
+from vesper.platform.tui.live_readiness import unavailable_live_readiness
 from vesper.platform.tui.ports import (
     AgentFacts,
     DataFacts,
@@ -971,6 +972,9 @@ def _assemble_snapshot(
             services=cast(tuple[ServiceRow, ...], windows["system.services"]),
             metrics=cast(tuple[MetricRow, ...], windows["system.metrics"]),
             repositories=cast(tuple[RepositoryRow, ...], windows["system.repositories"]),
+            live_readiness=unavailable_live_readiness(),
+            live_account=None,
+            live_transition_plan=None,
         ),
     )
 
@@ -1267,6 +1271,22 @@ def diff_snapshots(
             presentation=presentation,
         )
         for entity_type, entity_id, operation, entity, targets in grouped.values()
+    )
+
+
+def requires_full_snapshot(
+    previous: ConsoleSnapshot,
+    current: ConsoleSnapshot,
+) -> bool:
+    """Return true when an incremental row event cannot carry changed state."""
+
+    return (
+        previous.command_specs != current.command_specs
+        or previous.shell.capabilities != current.shell.capabilities
+        or (previous.shell.alerts is None) != (current.shell.alerts is None)
+        or previous.system.live_readiness != current.system.live_readiness
+        or previous.system.live_account != current.system.live_account
+        or previous.system.live_transition_plan != current.system.live_transition_plan
     )
 
 

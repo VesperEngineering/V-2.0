@@ -80,16 +80,20 @@ fn wide_views_render_contract_facts_with_words_not_color_only() {
         "SERVICES",
         "SYSTEM METRICS",
         "SOURCE CONTROL",
-        "UNSUPPORTED FACTS",
+        "LIVE READINESS",
         "[>] RUNNING",
         "[!] FAILED",
         "Branch",
         "codex/vesper/ratatui-console",
         "DIRTY",
         "Unpushed 2",
-        "Backup status: [?] UNAVAILABLE",
-        "Recovery status: [?] UNAVAILABLE",
-        "Notification status: [?] UNAVAILABLE",
+        "LIVE: [!] BLOCKED",
+        "BROKER: [OK] READY",
+        "AUTHORITY: [!] BLOCKED",
+        "Primary brokerage",
+        "ACCT-12345",
+        "portfolio:candidate",
+        "APPROVAL REQUIRED",
     ] {
         assert!(system.contains(expected), "missing {expected:?}\n{system}");
     }
@@ -190,6 +194,113 @@ fn system_selection_marks_the_typed_row_and_scrolls_only_the_focused_panel() {
 }
 
 #[test]
+fn system_account_mask_is_local_render_state_and_defaults_to_visible() {
+    let snapshot = fixture();
+    let visible = render_text(120, 32, |frame| {
+        render_system(
+            frame,
+            frame.area(),
+            &snapshot.system,
+            &ScreenState::default(),
+        )
+    });
+    assert!(visible.contains("Primary brokerage"), "{visible}");
+    assert!(visible.contains("ACCT-12345"), "{visible}");
+    assert!(visible.contains("1000.25"), "{visible}");
+
+    let masked_state = ScreenState {
+        mask_account_details: true,
+        ..ScreenState::default()
+    };
+    let masked = render_text(120, 32, |frame| {
+        render_system(frame, frame.area(), &snapshot.system, &masked_state)
+    });
+    assert!(masked.contains("Privacy: MASKED"), "{masked}");
+    assert!(masked.contains("HIDDEN"), "{masked}");
+    assert!(!masked.contains("Primary brokerage"), "{masked}");
+    assert!(!masked.contains("ACCT-12345"), "{masked}");
+    assert!(!masked.contains("1000.25"), "{masked}");
+
+    let mut unavailable = snapshot.system.clone();
+    unavailable.live_account = None;
+    let unavailable_masked = render_text(120, 32, |frame| {
+        render_system(frame, frame.area(), &unavailable, &masked_state)
+    });
+    assert!(
+        unavailable_masked.contains("Account: [?] UNAVAILABLE"),
+        "{unavailable_masked}"
+    );
+}
+
+#[test]
+fn live_overall_status_distinguishes_unavailable_stale_and_blocked() {
+    let mut value = serde_json::to_value(fixture()).unwrap();
+    {
+        let gates = value["system"]["live_readiness"].as_object_mut().unwrap();
+        for gate in gates.values_mut().filter(|value| value.is_object()) {
+            gate["state"] = json!("unavailable");
+            gate["reason"] = json!("No reviewed source.");
+        }
+        gates["enabled"] = json!(false);
+    }
+    let unavailable: ConsoleSnapshot = serde_json::from_value(value.clone()).unwrap();
+    let text = render_system_narrow(&unavailable.system, 3);
+    assert!(text.contains("LIVE: [?] UNAVAILABLE"), "{text}");
+    assert!(!text.contains("LIVE: [!] BLOCKED"), "{text}");
+
+    {
+        let gates = value["system"]["live_readiness"].as_object_mut().unwrap();
+        for gate in gates.values_mut().filter(|value| value.is_object()) {
+            gate["state"] = json!("ready");
+            gate["reason"] = json!("Reviewed test source.");
+        }
+        gates["broker"]["state"] = json!("stale");
+        gates["enabled"] = json!(false);
+    }
+    let stale: ConsoleSnapshot = serde_json::from_value(value.clone()).unwrap();
+    let text = render_system_narrow(&stale.system, 3);
+    assert!(text.contains("LIVE: [~] STALE"), "{text}");
+    assert!(!text.contains("LIVE: [!] BLOCKED"), "{text}");
+
+    {
+        let gates = value["system"]["live_readiness"].as_object_mut().unwrap();
+        gates["broker"]["state"] = json!("ready");
+        gates["enabled"] = json!(true);
+    }
+    let ready: ConsoleSnapshot = serde_json::from_value(value).unwrap();
+    let text = render_system_narrow(&ready.system, 3);
+    assert!(text.contains("LIVE: [OK] READY"), "{text}");
+}
+
+#[test]
+fn focused_live_panel_scrolls_to_every_transition_order_in_a_small_viewport() {
+    let mut value = serde_json::to_value(fixture()).unwrap();
+    value["system"]["live_transition_plan"]["orders"] = json!(
+        (0..8)
+            .map(|index| json!({
+                "symbol": format!("SYM{index}"),
+                "side": "buy",
+                "quantity": "1",
+                "approval_required": true
+            }))
+            .collect::<Vec<_>>()
+    );
+    let snapshot: ConsoleSnapshot = serde_json::from_value(value).unwrap();
+    let state = ScreenState {
+        narrow_panel: 3,
+        scroll_offset: 15,
+        ..ScreenState::default()
+    };
+
+    let text = render_text(78, 8, |frame| {
+        render_system(frame, frame.area(), &snapshot.system, &state)
+    });
+
+    assert!(text.contains("SYM7"), "last order was clipped\n{text}");
+    assert!(!text.contains("SYM0"), "scroll did not move\n{text}");
+}
+
+#[test]
 fn narrow_panel_focus_uses_screen_state_and_hides_other_panels() {
     let snapshot = fixture();
     let cases: Vec<(usize, &str, &str, String)> = vec![
@@ -213,7 +324,7 @@ fn narrow_panel_focus_uses_screen_state_and_hides_other_panels() {
         ),
         (
             3,
-            "UNSUPPORTED FACTS - PANEL 4/4",
+            "LIVE READINESS - PANEL 4/4",
             "SERVICES",
             render_system_narrow(&snapshot.system, 3),
         ),
@@ -259,7 +370,7 @@ fn stale_keeps_last_sample_and_exact_reason_while_unavailable_and_loading_hide_v
         "SERVICES",
         "SYSTEM METRICS",
         "SOURCE CONTROL",
-        "UNSUPPORTED FACTS",
+        "LIVE READINESS",
     ] {
         assert!(text.contains(panel), "{text}");
     }
@@ -515,7 +626,30 @@ fn fixture() -> ConsoleSnapshot {
         "repositories":[
             {"repository_id":"repository:v20","freshness":"fresh","as_of_utc":"2026-07-15T12:34:56Z","source":"git","error":null,"branch":"codex/vesper/ratatui-console","revision":"0123456789abcdef","clean":false,"worktrees":["C:/Users/bgonn/Desktop/v20","C:/tmp/worktree"],"unpushed_commit_count":2},
             {"repository_id":"repository:missing","freshness":"unavailable","as_of_utc":null,"source":"git","error":"Repository unavailable","branch":null,"revision":null,"clean":null,"worktrees":[],"unpushed_commit_count":null}
-        ]
+        ],
+        "live_readiness": {
+            "broker":{"state":"ready","reason":"Reviewed broker connection."},
+            "account":{"state":"ready","reason":"Reviewed account identity."},
+            "data":{"state":"ready","reason":"Reviewed market data."},
+            "model":{"state":"ready","reason":"Reviewed active model."},
+            "strategy":{"state":"ready","reason":"Reviewed strategy."},
+            "risk":{"state":"ready","reason":"Reviewed risk limits."},
+            "reconciliation":{"state":"ready","reason":"Reviewed position match."},
+            "incident":{"state":"ready","reason":"No blocking incident."},
+            "authority":{"state":"blocked","reason":"Live authority is not granted."},
+            "enabled":false
+        },
+        "live_account": {
+            "name":"Primary brokerage",
+            "number":"ACCT-12345",
+            "balance":"1000.25",
+            "capital":"900"
+        },
+        "live_transition_plan": {
+            "broker_positions_as_of_utc":"2026-07-15T12:34:56Z",
+            "desired_portfolio_id":"portfolio:candidate",
+            "orders":[{"symbol":"NVDA","side":"buy","quantity":"2.5","approval_required":true}]
+        }
     });
     serde_json::from_value(value).expect("valid system screen fixture")
 }

@@ -45,6 +45,7 @@ const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
     "vesper/platform/tui/contracts.py",
     "vesper/platform/tui/event_store.py",
     "vesper/platform/tui/gateway.py",
+    "vesper/platform/tui/live_readiness.py",
     "vesper/platform/tui/notes.py",
     "vesper/platform/tui/outbox.py",
     "vesper/platform/tui/pipe_security.py",
@@ -657,6 +658,9 @@ fn panel_click_to_input(column: u16, row: u16, area: Rect, state: &AppState) -> 
     {
         return None;
     }
+    if state.screen == crate::state::Screen::System && panel == 3 {
+        return Some(InputEvent::FocusBrowsePanel { panel });
+    }
     let targets = state.browse_targets_for_panel(panel)?;
     let screen_state = state.screen_state();
     let start = if screen_state.narrow_panel % panel_count == panel {
@@ -718,7 +722,7 @@ fn panel_at(
             let top = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(rows[0]);
             let bottom =
-                Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                     .split(rows[1]);
             vec![(top[0], 0), (top[1], 0), (bottom[0], 0), (bottom[1], 0)]
         }

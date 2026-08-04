@@ -48,6 +48,62 @@ fn missing_preferences_use_defaults_without_claiming_unavailable() {
 
     assert_eq!(loaded.preferences, UiPreferences::default());
     assert_eq!(loaded.unavailable_reason, None);
+    assert!(!loaded.preferences.mask_account_details);
+}
+
+#[test]
+fn version_one_preferences_migrate_explicitly_to_version_two_with_unmasked_accounts() {
+    let directory = unique_test_directory("v1-migration");
+    std::fs::create_dir_all(&directory).expect("create isolated test directory");
+    let path = directory.join("preferences.json");
+    std::fs::write(
+        &path,
+        r#"{"version":1,"theme":"charcoal","display_mode":"compact","screens":{"portfolio":{"visible_columns":["symbol","weight"],"panel_sizes":[60,40],"performance_period":"since-start"}}}"#,
+    )
+    .expect("write v1 preferences");
+    let original = std::fs::read(&path).expect("read v1 source bytes");
+
+    let loaded = load_preferences_from(&path);
+
+    assert_eq!(loaded.unavailable_reason, None);
+    assert_eq!(loaded.preferences.version, 2);
+    assert_eq!(loaded.preferences.theme, Theme::Charcoal);
+    assert_eq!(loaded.preferences.display_mode, DisplayMode::Compact);
+    assert!(!loaded.preferences.mask_account_details);
+    assert_eq!(
+        loaded.preferences.screens.get(&ScreenId::Portfolio),
+        Some(&ScreenPreferences {
+            visible_columns: vec!["symbol".to_owned(), "weight".to_owned()],
+            panel_sizes: vec![60, 40],
+            performance_period: Some(PerformancePeriod::SinceStart),
+        })
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("read v1 source after migration"),
+        original,
+        "loading a migration must not rewrite its source"
+    );
+
+    std::fs::remove_dir_all(directory).expect("remove owned test directory");
+}
+
+#[test]
+fn future_preferences_versions_fail_closed_instead_of_migrating() {
+    let directory = unique_test_directory("future-version");
+    std::fs::create_dir_all(&directory).expect("create isolated test directory");
+    let path = directory.join("preferences.json");
+    std::fs::write(
+        &path,
+        r#"{"version":3,"theme":"warm-white","display_mode":"standard","mask_account_details":false,"screens":{}}"#,
+    )
+    .expect("write future preferences");
+
+    let loaded = load_preferences_from(&path);
+
+    assert_eq!(loaded.preferences, UiPreferences::default());
+    assert!(loaded.unavailable_reason.is_some());
+
+    std::fs::remove_dir_all(directory).expect("remove owned test directory");
 }
 
 #[test]
@@ -57,6 +113,7 @@ fn valid_preferences_round_trip_and_atomically_replace_the_previous_file() {
     let mut preferences = UiPreferences {
         theme: Theme::Charcoal,
         display_mode: DisplayMode::LargeText,
+        mask_account_details: true,
         ..UiPreferences::default()
     };
     preferences.screens.insert(
@@ -238,6 +295,7 @@ fn applying_loaded_preferences_does_not_rewrite_the_source_file() {
     let preferences = UiPreferences {
         theme: Theme::Charcoal,
         display_mode: DisplayMode::Compact,
+        mask_account_details: true,
         ..UiPreferences::default()
     };
     save_preferences_to(&path, &preferences).expect("write valid preferences fixture");

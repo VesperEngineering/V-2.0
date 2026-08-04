@@ -1,4 +1,7 @@
-use crate::contract::{Freshness, MetricRow, RepositoryRow, ServiceState, SystemView};
+use crate::contract::{
+    Freshness, MetricRow, OrderSide, ReadinessGate, ReadinessState, RepositoryRow, ServiceState,
+    SystemView,
+};
 use crate::screens::{DetailKind, ScreenState};
 use crate::ui::format_eastern_time;
 use crate::widgets::sanitize_line;
@@ -15,14 +18,9 @@ pub fn render_system(frame: &mut Frame<'_>, area: Rect, view: &SystemView, state
             0 => render_services(frame, area, view, state, "SERVICES - PANEL 1/4", true),
             1 => render_metrics(frame, area, view, state, "SYSTEM METRICS - PANEL 2/4", true),
             2 => render_repositories(frame, area, view, state, "SOURCE CONTROL - PANEL 3/4", true),
-            _ => render_unsupported(
-                frame,
-                area,
-                view,
-                state,
-                "UNSUPPORTED FACTS - PANEL 4/4",
-                true,
-            ),
+            _ => {
+                render_live_readiness(frame, area, view, state, "LIVE READINESS - PANEL 4/4", true)
+            }
         }
         return;
     }
@@ -31,7 +29,7 @@ pub fn render_system(frame: &mut Frame<'_>, area: Rect, view: &SystemView, state
     let top =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(rows[0]);
     let bottom =
-        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[1]);
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
     let focused = state.narrow_panel % 4;
     render_services(frame, top[0], view, state, "SERVICES", focused == 0);
     render_metrics(frame, top[1], view, state, "SYSTEM METRICS", focused == 1);
@@ -43,12 +41,12 @@ pub fn render_system(frame: &mut Frame<'_>, area: Rect, view: &SystemView, state
         "SOURCE CONTROL",
         focused == 2,
     );
-    render_unsupported(
+    render_live_readiness(
         frame,
         bottom[1],
         view,
         state,
-        "UNSUPPORTED FACTS",
+        "LIVE READINESS",
         focused == 3,
     );
 }
@@ -144,7 +142,7 @@ fn render_repositories(
     render_lines(frame, area, title, state, focused, lines);
 }
 
-fn render_unsupported(
+fn render_live_readiness(
     frame: &mut Frame<'_>,
     area: Rect,
     view: &SystemView,
@@ -152,20 +150,119 @@ fn render_unsupported(
     title: &str,
     focused: bool,
 ) {
-    let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
-        || {
-            vec![
-                Line::from("Backup status: [?] UNAVAILABLE - Not in the SystemView contract."),
-                Line::from("Recovery status: [?] UNAVAILABLE - Not in the SystemView contract."),
-                Line::from(
-                    "Notification status: [?] UNAVAILABLE - Not in the SystemView contract.",
-                ),
-                Line::from("[i] READ ONLY - This panel reports facts; it exposes no controls."),
-            ]
-        },
-        |message| vec![Line::from(message)],
+    let palette = state.theme.palette();
+    let mut lines = Vec::with_capacity(
+        14 + view
+            .live_transition_plan
+            .as_ref()
+            .map_or(0, |plan| plan.orders.len()),
     );
-    render_lines(frame, area, title, state, focused, lines);
+    let gates = [
+        ("BROKER", &view.live_readiness.broker),
+        ("ACCOUNT", &view.live_readiness.account),
+        ("DATA", &view.live_readiness.data),
+        ("MODEL", &view.live_readiness.model),
+        ("STRATEGY", &view.live_readiness.strategy),
+        ("RISK", &view.live_readiness.risk),
+        ("RECONCILIATION", &view.live_readiness.reconciliation),
+        ("INCIDENT", &view.live_readiness.incident),
+        ("AUTHORITY", &view.live_readiness.authority),
+    ];
+    let (live_badge, live_style) = if view.live_readiness.enabled {
+        ("[OK] READY", palette.resolved)
+    } else if gates
+        .iter()
+        .any(|(_, gate)| gate.state == ReadinessState::Blocked)
+    {
+        ("[!] BLOCKED", palette.urgent)
+    } else if gates
+        .iter()
+        .any(|(_, gate)| gate.state == ReadinessState::Stale)
+    {
+        ("[~] STALE", palette.waiting)
+    } else {
+        ("[?] UNAVAILABLE", base_style(state))
+    };
+    lines.push(Line::from(vec![
+        Span::raw("LIVE: "),
+        Span::styled(live_badge, live_style),
+    ]));
+    for (name, gate) in gates {
+        lines.push(readiness_line(name, gate, state));
+    }
+    if let Some(account) = &view.live_account {
+        if state.mask_account_details {
+            lines.push(Line::from(
+                "Privacy: MASKED [p show] | Name HIDDEN | Number HIDDEN",
+            ));
+            lines.push(Line::from("Funds | Balance HIDDEN | Capital HIDDEN"));
+        } else {
+            lines.push(Line::from(format!(
+                "Privacy: SHOWN [p hide] | {} | {}",
+                sanitize(account.name.as_str()),
+                sanitize(account.number.as_str())
+            )));
+            lines.push(Line::from(format!(
+                "Funds | Balance {} | Capital {}",
+                account.balance.as_str(),
+                account.capital.as_str()
+            )));
+        }
+    } else {
+        lines.push(Line::from("Account: [?] UNAVAILABLE"));
+    }
+    if let Some(plan) = &view.live_transition_plan {
+        lines.push(Line::from(format!(
+            "Transition {} | {} | Orders {}",
+            plan.desired_portfolio_id.as_str(),
+            format_eastern_time(&plan.broker_positions_as_of_utc),
+            plan.orders.len()
+        )));
+        for order in &plan.orders {
+            let side = match order.side {
+                OrderSide::Buy => "BUY",
+                OrderSide::Sell => "SELL",
+            };
+            lines.push(Line::from(format!(
+                "{side} {} {} | APPROVAL REQUIRED",
+                order.symbol.as_str(),
+                order.quantity.as_str()
+            )));
+        }
+    } else {
+        lines.push(Line::from(
+            "Transition: [?] UNAVAILABLE - No broker-backed plan.",
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(state))
+            .scroll((
+                if focused {
+                    u16::try_from(state.scroll_offset).unwrap_or(u16::MAX)
+                } else {
+                    0
+                },
+                0,
+            ))
+            .block(panel(focus_title(title, focused), state)),
+        area,
+    );
+}
+
+fn readiness_line(name: &'static str, gate: &ReadinessGate, state: &ScreenState) -> Line<'static> {
+    let palette = state.theme.palette();
+    let (badge, style) = match gate.state {
+        ReadinessState::Ready => ("[OK] READY", palette.resolved),
+        ReadinessState::Blocked => ("[!] BLOCKED", palette.urgent),
+        ReadinessState::Unavailable => ("[?] UNAVAILABLE", base_style(state)),
+        ReadinessState::Stale => ("[~] STALE", palette.waiting),
+    };
+    Line::from(vec![
+        Span::raw(format!("{name}: ")),
+        Span::styled(badge, style),
+        Span::raw(format!(" | {}", sanitize(gate.reason.as_str()))),
+    ])
 }
 
 fn render_lines(

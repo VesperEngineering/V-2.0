@@ -85,6 +85,109 @@ fn consumes_shared_console_snapshot_fixture_byte_for_byte() {
 }
 
 #[test]
+fn live_readiness_account_and_transition_are_strict_and_fail_closed() {
+    let base: Value = serde_json::from_slice(&shared_snapshot_fixture()).unwrap();
+    let readiness = &base["system"]["live_readiness"];
+    for name in [
+        "broker",
+        "account",
+        "data",
+        "model",
+        "strategy",
+        "risk",
+        "reconciliation",
+        "incident",
+        "authority",
+    ] {
+        assert_eq!(readiness[name]["state"], "unavailable");
+    }
+    assert_eq!(readiness["enabled"], false);
+    assert!(base["system"]["live_account"].is_null());
+    assert!(base["system"]["live_transition_plan"].is_null());
+
+    let mut ready = base.clone();
+    for gate in ready["system"]["live_readiness"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .filter(|value| value.is_object())
+    {
+        gate["state"] = serde_json::json!("ready");
+        gate["reason"] = serde_json::json!("Reviewed test evidence.");
+    }
+    ready["system"]["live_readiness"]["enabled"] = serde_json::json!(true);
+    ready["system"]["live_account"] = serde_json::json!({
+        "name": "Primary brokerage",
+        "number": "123456789",
+        "balance": "1000.25",
+        "capital": "900"
+    });
+    ready["system"]["live_transition_plan"] = serde_json::json!({
+        "broker_positions_as_of_utc": "2026-08-04T12:00:00Z",
+        "desired_portfolio_id": "portfolio:candidate",
+        "orders": [{
+            "symbol": "NVDA",
+            "side": "buy",
+            "quantity": "2.5",
+            "approval_required": true
+        }]
+    });
+    assert!(serde_json::from_value::<ConsoleSnapshot>(ready.clone()).is_ok());
+
+    let invalid = [
+        {
+            let mut value = base.clone();
+            value["system"]["live_readiness"]["enabled"] = serde_json::json!(true);
+            value
+        },
+        {
+            let mut value = ready.clone();
+            value["system"]["live_readiness"]
+                .as_object_mut()
+                .unwrap()
+                .remove("authority");
+            value
+        },
+        {
+            let mut value = base.clone();
+            value["system"]
+                .as_object_mut()
+                .unwrap()
+                .remove("live_account");
+            value
+        },
+        {
+            let mut value = base.clone();
+            value["system"]
+                .as_object_mut()
+                .unwrap()
+                .remove("live_transition_plan");
+            value
+        },
+        {
+            let mut value = ready.clone();
+            value["system"]["live_account"]["credential"] = serde_json::json!("forbidden");
+            value
+        },
+        {
+            let mut value = ready.clone();
+            value["system"]["live_transition_plan"]["orders"][0]["approval_required"] =
+                serde_json::json!(false);
+            value
+        },
+        {
+            let mut value = ready.clone();
+            value["system"]["live_transition_plan"]["orders"][0]["quantity"] =
+                serde_json::json!("0");
+            value
+        },
+    ];
+    for value in invalid {
+        assert!(serde_json::from_value::<ConsoleSnapshot>(value).is_err());
+    }
+}
+
+#[test]
 fn event_payload_is_keyed_closed_and_checks_operation_type_and_id() {
     let valid = serde_json::json!({
         "schema_version": 1,
@@ -589,7 +692,8 @@ fn rust_contract_descriptor() -> Vec<u8> {
         "envelope_required": ["schema_version", "message_id", "sequence", "state_version", "timestamp_utc", "message_type", "payload"],
         "field_catalog_scope": [
             "envelope", "payloads", "shell", "snapshot-observability-metadata",
-            "event-presentation-metadata", "repository-status", "governed-command-contracts"
+            "event-presentation-metadata", "repository-status", "governed-command-contracts",
+            "live-readiness"
         ],
         "integer_fields": [
             "envelope.sequence",
@@ -655,6 +759,7 @@ fn rust_contract_descriptor() -> Vec<u8> {
             "snapshot.data.as_of_utc", "snapshot.data.error",
             "snapshot.memory.as_of_utc", "snapshot.memory.error",
             "snapshot.system.as_of_utc", "snapshot.system.error",
+            "snapshot.system.live_account", "snapshot.system.live_transition_plan",
             "event.presentation.header.operating_mode_reason",
             "event.presentation.header.data_age_seconds",
             "event.presentation.header.regime_confidence",

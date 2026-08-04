@@ -12,6 +12,7 @@ pub enum InputEvent {
     Right,
     OpenSearchResult(usize),
     OpenBrowseRow { panel: usize, index: usize },
+    FocusBrowsePanel { panel: usize },
     TakeControl,
     LockTui,
     Reconnect,

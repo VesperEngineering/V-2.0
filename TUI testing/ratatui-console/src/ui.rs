@@ -672,7 +672,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: P
                 "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter"
             }
             Screen::Memory => "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter",
-            Screen::System => "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter",
+            Screen::System => {
+                "Up/Down Rows | Left/Right Panels | p Account Privacy | o Open | q Close | f Filter"
+            }
         }
     } else {
         "1-9,0 Screens | / Search | q Close TUI only"

@@ -18,19 +18,19 @@ expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::d
 │                                                          ││                                                          │
 │                                                          ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
-┌SOURCE CONTROL────────────────────────────────────────────────────────┐┌UNSUPPORTED FACTS─────────────────────────────┐
-│[OK] FRESH repository:v20 | Source git | Branch                       ││Backup status: [?] UNAVAILABLE - Not in the   │
-│codex/vesper/ratatui-console | Revision 0123456789abcdef | [!] DIRTY |││SystemView contract.                          │
-│Worktrees C:/Users/bgonn/Desktop/v20, C:/tmp/worktree | Unpushed 2 |  ││Recovery status: [?] UNAVAILABLE - Not in the │
-│2026-07-15 08:34:56 EDT                                               ││SystemView contract.                          │
-│[?] UNAVAILABLE repository:missing | Repository unavailable           ││Notification status: [?] UNAVAILABLE - Not in │
-│                                                                      ││the SystemView contract.                      │
-│                                                                      ││[i] READ ONLY - This panel reports facts; it  │
-│                                                                      ││exposes no controls.                          │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-└──────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────┘
+┌SOURCE CONTROL──────────────────────────────────────┐┌LIVE READINESS──────────────────────────────────────────────────┐
+│[OK] FRESH repository:v20 | Source git | Branch     ││LIVE: [!] BLOCKED                                               │
+│codex/vesper/ratatui-console | Revision             ││BROKER: [OK] READY | Reviewed broker connection.                │
+│0123456789abcdef | [!] DIRTY | Worktrees            ││ACCOUNT: [OK] READY | Reviewed account identity.                │
+│C:/Users/bgonn/Desktop/v20, C:/tmp/worktree |       ││DATA: [OK] READY | Reviewed market data.                        │
+│Unpushed 2 | 2026-07-15 08:34:56 EDT                ││MODEL: [OK] READY | Reviewed active model.                      │
+│[?] UNAVAILABLE repository:missing | Repository     ││STRATEGY: [OK] READY | Reviewed strategy.                       │
+│unavailable                                         ││RISK: [OK] READY | Reviewed risk limits.                        │
+│                                                    ││RECONCILIATION: [OK] READY | Reviewed position match.           │
+│                                                    ││INCIDENT: [OK] READY | No blocking incident.                    │
+│                                                    ││AUTHORITY: [!] BLOCKED | Live authority is not granted.         │
+│                                                    ││Privacy: SHOWN [p hide] | Primary brokerage | ACCT-12345        │
+│                                                    ││Funds | Balance 1000.25 | Capital 900                           │
+│                                                    ││Transition portfolio:candidate | 2026-07-15 08:34:56 EDT | Order│
+│                                                    ││BUY NVDA 2.5 | APPROVAL REQUIRED                                │
+└────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘

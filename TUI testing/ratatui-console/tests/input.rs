@@ -10,7 +10,9 @@ use std::time::Duration;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::Rect;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::layout::{Constraint, Layout, Rect};
 use serde_json::json;
 
 use vesper_ratatui_console::app::{
@@ -217,6 +219,7 @@ impl TempCheckout {
             "vesper/platform/tui/contracts.py",
             "vesper/platform/tui/event_store.py",
             "vesper/platform/tui/gateway.py",
+            "vesper/platform/tui/live_readiness.py",
             "vesper/platform/tui/notes.py",
             "vesper/platform/tui/outbox.py",
             "vesper/platform/tui/pipe_security.py",
@@ -602,6 +605,102 @@ fn models_header_click_without_typed_selection_does_not_open_a_detail() {
 }
 
 #[test]
+fn system_mouse_boundary_matches_the_rendered_source_and_live_panel_split() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot_envelope(1)).unwrap();
+    state.handle(InputEvent::Char('0'));
+    let area = Rect::new(0, 0, 140, 40);
+    let body = shell_layout(area, state.display_mode()).body;
+    let rows =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(body);
+    let bottom =
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
+    let click = |column| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row: bottom[0].y + 1,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    assert_eq!(
+        mouse_to_input(click(bottom[0].right() - 2), area, &state),
+        Some(InputEvent::OpenBrowseRow { panel: 2, index: 0 })
+    );
+    assert_eq!(mouse_to_input(click(bottom[1].x), area, &state), None);
+}
+
+#[test]
+fn system_live_panel_background_click_then_mouse_wheel_reaches_the_final_order() {
+    let mut snapshot: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../contracts/v1/console_snapshot_empty_command_specs.json"
+    ))
+    .expect("valid shared console snapshot");
+    snapshot["system"]["live_transition_plan"] = json!({
+        "broker_positions_as_of_utc": "2026-08-04T12:00:00Z",
+        "desired_portfolio_id": "portfolio:candidate",
+        "orders": (0..8).map(|index| json!({
+            "symbol": format!("SYM{index}"),
+            "side": "buy",
+            "quantity": "1",
+            "approval_required": true
+        })).collect::<Vec<_>>()
+    });
+    let mut state = AppState::controller();
+    state
+        .reduce(inbound_envelope(
+            1,
+            "snapshot",
+            json!({"snapshot": snapshot}),
+        ))
+        .unwrap();
+    state.handle(InputEvent::Char('0'));
+
+    let area = Rect::new(0, 0, 140, 40);
+    let body = shell_layout(area, state.display_mode()).body;
+    let rows =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(body);
+    let bottom =
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
+    let live_column = bottom[1].x + 2;
+    let live_row = bottom[1].y + 1;
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: live_column,
+        row: live_row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    let focus = mouse_to_input(click, area, &state);
+    assert_eq!(focus, Some(InputEvent::FocusBrowsePanel { panel: 3 }));
+    state.handle(focus.unwrap());
+    for _ in 0..20 {
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: live_column,
+            row: live_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        state.handle(mouse_to_input(wheel, area, &state).unwrap());
+    }
+
+    assert_eq!(state.screen_state().narrow_panel, 3);
+    assert!(state.screen_state().scroll_offset >= 8);
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| vesper_ratatui_console::ui::render(frame, &state))
+        .unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("SYM7"), "{text}");
+}
+
+#[test]
 fn terminal_input_batches_are_bounded_and_keep_key_order() {
     let mut client = FoundationClient::from_app(App::new(AppState::controller()));
     let mut inputs = (0..MAX_EVENTS_PER_TICK)
@@ -718,6 +817,7 @@ fn repository_root_rejects_missing_live_projection_dependencies() {
     let fallback = TempCheckout::new("dependency-missing-fallback", false);
     for (index, required) in [
         "vesper/platform/agent_profiles.py",
+        "vesper/platform/tui/live_readiness.py",
         "vesper/platform/tui/snapshot.py",
         "vesper/platform/tui/process_capture.py",
         "vesper/platform/tui/projections/windows_system.py",

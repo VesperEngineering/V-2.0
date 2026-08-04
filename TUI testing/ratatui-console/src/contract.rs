@@ -1550,6 +1550,99 @@ pub enum Freshness {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+pub enum ReadinessState {
+    Ready,
+    Blocked,
+    Unavailable,
+    Stale,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessGate {
+    pub state: ReadinessState,
+    pub reason: NonEmptyString,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct LiveReadinessView {
+    pub broker: ReadinessGate,
+    pub account: ReadinessGate,
+    pub data: ReadinessGate,
+    pub model: ReadinessGate,
+    pub strategy: ReadinessGate,
+    pub risk: ReadinessGate,
+    pub reconciliation: ReadinessGate,
+    pub incident: ReadinessGate,
+    pub authority: ReadinessGate,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLiveReadinessView {
+    broker: ReadinessGate,
+    account: ReadinessGate,
+    data: ReadinessGate,
+    model: ReadinessGate,
+    strategy: ReadinessGate,
+    risk: ReadinessGate,
+    reconciliation: ReadinessGate,
+    incident: ReadinessGate,
+    authority: ReadinessGate,
+    enabled: bool,
+}
+
+impl<'de> Deserialize<'de> for LiveReadinessView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawLiveReadinessView::deserialize(deserializer)?;
+        let all_ready = [
+            &raw.broker,
+            &raw.account,
+            &raw.data,
+            &raw.model,
+            &raw.strategy,
+            &raw.risk,
+            &raw.reconciliation,
+            &raw.incident,
+            &raw.authority,
+        ]
+        .into_iter()
+        .all(|gate| gate.state == ReadinessState::Ready);
+        if raw.enabled != all_ready {
+            return Err(serde::de::Error::custom(
+                "Live readiness enabled must be true if and only if all gates are ready",
+            ));
+        }
+        Ok(Self {
+            broker: raw.broker,
+            account: raw.account,
+            data: raw.data,
+            model: raw.model,
+            strategy: raw.strategy,
+            risk: raw.risk,
+            reconciliation: raw.reconciliation,
+            incident: raw.incident,
+            authority: raw.authority,
+            enabled: raw.enabled,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSummaryView {
+    pub name: NonEmptyString,
+    pub number: NonEmptyString,
+    pub balance: DecimalString,
+    pub capital: DecimalString,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum OperatingMode {
     Unknown,
     Stopped,
@@ -1751,6 +1844,87 @@ pub struct FillRow {
 pub enum OrderSide {
     Buy,
     Sell,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TransitionOrderView {
+    pub symbol: SafeId,
+    pub side: OrderSide,
+    pub quantity: DecimalString,
+    pub approval_required: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTransitionOrderView {
+    symbol: SafeId,
+    side: OrderSide,
+    quantity: DecimalString,
+    approval_required: bool,
+}
+
+impl<'de> Deserialize<'de> for TransitionOrderView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawTransitionOrderView::deserialize(deserializer)?;
+        let quantity = raw.quantity.as_str();
+        if !raw.approval_required {
+            return Err(serde::de::Error::custom(
+                "transition orders must require approval",
+            ));
+        }
+        if quantity.starts_with('-') || !quantity.bytes().any(|byte| matches!(byte, b'1'..=b'9')) {
+            return Err(serde::de::Error::custom(
+                "transition order quantity must be positive",
+            ));
+        }
+        Ok(Self {
+            symbol: raw.symbol,
+            side: raw.side,
+            quantity: raw.quantity,
+            approval_required: true,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TransitionPlanView {
+    pub broker_positions_as_of_utc: UtcTimestamp,
+    pub desired_portfolio_id: SafeId,
+    pub orders: Vec<TransitionOrderView>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTransitionPlanView {
+    broker_positions_as_of_utc: UtcTimestamp,
+    desired_portfolio_id: SafeId,
+    orders: Vec<TransitionOrderView>,
+}
+
+impl<'de> Deserialize<'de> for TransitionPlanView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawTransitionPlanView::deserialize(deserializer)?;
+        if raw.orders.iter().enumerate().any(|(index, order)| {
+            raw.orders[..index]
+                .iter()
+                .any(|prior| prior.symbol == order.symbol)
+        }) {
+            return Err(serde::de::Error::custom(
+                "transition plan order symbols must be unique",
+            ));
+        }
+        Ok(Self {
+            broker_positions_as_of_utc: raw.broker_positions_as_of_utc,
+            desired_portfolio_id: raw.desired_portfolio_id,
+            orders: raw.orders,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -2313,11 +2487,24 @@ screen_view!(MemoryView {
     rows: Vec<MemoryRow>,
     history: Vec<TimelineRow>,
 });
-screen_view!(SystemView {
-    services: Vec<ServiceRow>,
-    metrics: Vec<MetricRow>,
-    repositories: Vec<RepositoryRow>,
-});
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemView {
+    pub freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub as_of_utc: Option<UtcTimestamp>,
+    pub source: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub error: Option<String>,
+    pub services: Vec<ServiceRow>,
+    pub metrics: Vec<MetricRow>,
+    pub repositories: Vec<RepositoryRow>,
+    pub live_readiness: LiveReadinessView,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub live_account: Option<AccountSummaryView>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub live_transition_plan: Option<TransitionPlanView>,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]

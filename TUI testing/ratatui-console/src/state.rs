@@ -348,6 +348,7 @@ impl AppState {
         let mut state = self.screen_state.clone();
         state.theme = self.theme();
         state.display_mode = self.display_mode();
+        state.mask_account_details = self.preferences.mask_account_details;
         state
     }
 
@@ -437,6 +438,12 @@ impl AppState {
             self.preferences_save_pending = true;
             self.dirty = true;
         }
+    }
+
+    pub fn toggle_account_details_mask(&mut self) {
+        self.preferences.mask_account_details = !self.preferences.mask_account_details;
+        self.preferences_save_pending = true;
+        self.dirty = true;
     }
 
     pub fn set_screen_preferences(&mut self, screen: ScreenId, mut preferences: ScreenPreferences) {
@@ -1136,6 +1143,10 @@ impl AppState {
                 self.open_browse_row(panel, index);
                 return Vec::new();
             }
+            InputEvent::FocusBrowsePanel { panel } => {
+                self.focus_browse_panel(panel);
+                return Vec::new();
+            }
             InputEvent::Up => {
                 self.move_vertical(false);
                 return Vec::new();
@@ -1169,6 +1180,7 @@ impl AppState {
             '8' => self.select_screen(Screen::DataEvidence),
             '9' => self.select_screen(Screen::Memory),
             '0' => self.select_screen(Screen::System),
+            'p' if self.screen == Screen::System => self.toggle_account_details_mask(),
             'o' => self.open_selected(),
             'n' if self.mode == LocalMode::Open && self.current_note_target().is_some() => {
                 self.mode = LocalMode::NoteEditor;
@@ -1341,7 +1353,14 @@ impl AppState {
                     0 => snapshot.system.services.len(),
                     1 => snapshot.system.metrics.len(),
                     2 => snapshot.system.repositories.len(),
-                    _ => 0,
+                    _ => {
+                        12 + usize::from(snapshot.system.live_account.is_some())
+                            + snapshot
+                                .system
+                                .live_transition_plan
+                                .as_ref()
+                                .map_or(0, |plan| plan.orders.len())
+                    }
                 },
                 Screen::ModelsRegime => {
                     let spacing = match self.display_mode() {
@@ -1589,7 +1608,7 @@ impl AppState {
                         )
                     })
                     .collect(),
-                _ => Vec::new(),
+                _ => return None,
             },
             Screen::Timeline => snapshot
                 .timeline
@@ -1707,6 +1726,16 @@ impl AppState {
         } else {
             (self.screen_state.narrow_panel + count - 1) % count
         };
+        self.screen_state.scroll_offset = 0;
+        self.screen_state.selected_id = None;
+        self.screen_state.selected_kind = None;
+    }
+
+    fn focus_browse_panel(&mut self, panel: usize) {
+        if self.screen != Screen::System || panel != 3 {
+            return;
+        }
+        self.screen_state.narrow_panel = panel;
         self.screen_state.scroll_offset = 0;
         self.screen_state.selected_id = None;
         self.screen_state.selected_kind = None;

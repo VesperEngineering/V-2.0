@@ -40,7 +40,8 @@ from .contracts import (
 )
 from .outbox import OutboundQueue
 from .search import GlobalSearchService
-from .snapshot import diff_snapshots
+from .live_readiness import unavailable_live_readiness
+from .snapshot import diff_snapshots, requires_full_snapshot
 from .views import (
     AgentsView,
     ConsoleSnapshot,
@@ -248,11 +249,7 @@ class Gateway:
         previous: ConsoleSnapshot,
         current: ConsoleSnapshot,
     ) -> bool:
-        return (
-            previous.command_specs == current.command_specs
-            and previous.shell.capabilities == current.shell.capabilities
-            and (previous.shell.alerts is None) == (current.shell.alerts is None)
-        )
+        return not requires_full_snapshot(previous, current)
 
     def publish_event(self, event: EventPayload) -> None:
         """Publish one validated event without calling a runtime or broker."""
@@ -520,6 +517,9 @@ class Gateway:
             services=(),
             metrics=(),
             repositories=(),
+            live_readiness=unavailable_live_readiness(),
+            live_account=None,
+            live_transition_plan=None,
         )
         command_views: dict[str, ScreenView] = {
             "portfolio": portfolio,

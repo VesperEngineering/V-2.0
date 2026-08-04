@@ -15,7 +15,7 @@ use crate::layout::DisplayMode;
 use crate::screens::PerformancePeriod;
 use crate::theme::Theme;
 
-pub const PREFERENCES_VERSION: u16 = 1;
+pub const PREFERENCES_VERSION: u16 = 2;
 const MAX_PREFERENCES_BYTES: u64 = 64 * 1024;
 const MAX_VISIBLE_COLUMNS: usize = 32;
 const MAX_COLUMN_NAME_BYTES: usize = 64;
@@ -53,6 +53,7 @@ pub struct UiPreferences {
     pub version: u16,
     pub theme: Theme,
     pub display_mode: DisplayMode,
+    pub mask_account_details: bool,
     pub screens: BTreeMap<ScreenId, ScreenPreferences>,
 }
 
@@ -62,9 +63,26 @@ impl Default for UiPreferences {
             version: PREFERENCES_VERSION,
             theme: Theme::WarmWhite,
             display_mode: DisplayMode::Standard,
+            mask_account_details: false,
             screens: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UiPreferencesV1 {
+    version: u16,
+    theme: Theme,
+    display_mode: DisplayMode,
+    screens: BTreeMap<ScreenId, ScreenPreferences>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PreferencesDocument {
+    V2(UiPreferences),
+    V1(UiPreferencesV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,8 +134,24 @@ pub fn load_preferences_from(path: &Path) -> LoadedPreferences {
 
 fn load_valid_preferences(path: &Path) -> std::io::Result<UiPreferences> {
     let bytes = read_bounded_preferences(File::open(path)?)?;
-    let preferences: UiPreferences = serde_json::from_slice(&bytes)
+    let document: PreferencesDocument = serde_json::from_slice(&bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let preferences = match document {
+        PreferencesDocument::V2(preferences) => preferences,
+        PreferencesDocument::V1(preferences) if preferences.version == 1 => UiPreferences {
+            version: PREFERENCES_VERSION,
+            theme: preferences.theme,
+            display_mode: preferences.display_mode,
+            mask_account_details: false,
+            screens: preferences.screens,
+        },
+        PreferencesDocument::V1(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported preferences version",
+            ));
+        }
+    };
     validate_preferences(&preferences)?;
     Ok(preferences)
 }
