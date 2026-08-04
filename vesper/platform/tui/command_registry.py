@@ -26,6 +26,7 @@ from .command_contracts import (
     CommandRequest,
     CommandType,
     CompressMemoryPayload,
+    SourceControlPushPayload,
     NoteAddPayload,
     ReceiptStatus,
     RuntimeStartPayload,
@@ -47,6 +48,7 @@ from .command_ports import (
     PortResult,
     RuntimeCommandPort,
     ServiceCommandPort,
+    SourceControlCommandPort,
 )
 from .command_store import (
     CommandClaim,
@@ -76,6 +78,7 @@ _HANDLER_KEYS: Mapping[CommandType, str] = MappingProxyType(
         "runtime.prepare-shutdown": "runtime.prepare-shutdown",
         "backup.create": "backup.create",
         "backup.restore": "backup.restore",
+        "source-control.push": "source-control.push",
     }
 )
 _EXTERNAL_HANDLERS = {
@@ -90,6 +93,7 @@ _EXTERNAL_HANDLERS = {
     "runtime.prepare-shutdown",
     "backup.create",
     "backup.restore",
+    "source-control.push",
 }
 _RUNTIME_HANDLERS = frozenset(
     {
@@ -101,6 +105,7 @@ _RUNTIME_HANDLERS = frozenset(
 )
 _SERVICE_HANDLERS = frozenset({"service.pause", "service.restart"})
 _BACKUP_HANDLERS = frozenset({"backup.create", "backup.restore"})
+_SOURCE_CONTROL_HANDLERS = frozenset({"source-control.push"})
 _RECOVERY_STATES = {"not-started", "completed", "failed", "unknown"}
 _MANUAL_INTERVENTION_MESSAGE = "Downstream command state is unknown; inspect it before any retry."
 _UTC = TypeAdapter(UtcDateTime)
@@ -165,6 +170,7 @@ class CommandRegistry:
         runtime_port: RuntimeCommandPort | None = None,
         service_port: ServiceCommandPort | None = None,
         backup_port: BackupCommandPort | None = None,
+        source_control_port: SourceControlCommandPort | None = None,
         policy: CommandPolicy | None = None,
         specs: tuple[CommandSpecView, ...] = COMMAND_SPECS,
         clock: Callable[[], datetime] = _utc_now,
@@ -188,6 +194,7 @@ class CommandRegistry:
         self._runtime_port = runtime_port
         self._service_port = service_port
         self._backup_port = backup_port
+        self._source_control_port = source_control_port
         self._policy = CommandPolicy() if policy is None else policy
         if type(self._policy) is not CommandPolicy:
             raise TypeError("policy must be CommandPolicy")
@@ -624,6 +631,20 @@ class CommandRegistry:
                     ),
                 )
             return self._backup_result(backup_receipt, request)
+        if request.command_type in _SOURCE_CONTROL_HANDLERS:
+            source_control_port = self._source_control_port
+            if source_control_port is None:
+                raise LedgerCorruptionError("enabled source-control port disappeared")
+            payload = cast(SourceControlPushPayload, request.payload)
+            confirmation = request.confirmation
+            if confirmation is None:
+                raise LedgerCorruptionError("accepted source-control.push has no confirmation")
+            push_receipt = source_control_port.push(
+                request.command_id,
+                payload.expected_revision,
+                confirmation,
+            )
+            return self._source_control_result(push_receipt, request)
         raise LedgerCorruptionError("claimed command has no reviewed external handler")
 
     def _recover_external(self, request: CommandRequest) -> str:
@@ -633,6 +654,8 @@ class CommandRegistry:
             port = self._service_port
         elif request.command_type in _BACKUP_HANDLERS:
             port = self._backup_port
+        elif request.command_type in _SOURCE_CONTROL_HANDLERS:
+            port = self._source_control_port
         else:
             port = self._port
         if port is None:
@@ -750,6 +773,39 @@ class CommandRegistry:
         )
 
     @staticmethod
+    def _source_control_result(receipt: object, request: CommandRequest) -> PortResult:
+        from .git_port import GitReceipt
+
+        if type(receipt) is not GitReceipt:
+            raise TypeError("source-control port must return GitReceipt")
+        validated = GitReceipt.model_validate(
+            receipt.model_dump(mode="python", warnings=False),
+            strict=True,
+        )
+        payload = cast(SourceControlPushPayload, request.payload)
+        if (
+            validated.operation != "push"
+            or validated.diff_hash is not None
+            or validated.command_id != request.command_id
+            or (validated.accepted and validated.revision != payload.expected_revision)
+        ):
+            raise ValueError("source-control receipt does not match the command")
+        return PortResult(
+            ok=validated.accepted,
+            code=validated.code,
+            safe_message=(
+                "Source-control push completed."
+                if validated.accepted
+                else "Source-control push was not completed."
+            ),
+            result=(
+                {"revision": validated.revision}
+                if validated.accepted and validated.revision is not None
+                else None
+            ),
+        )
+
+    @staticmethod
     def _require_memory_agent(request: CommandRequest) -> str:
         payload = cast(CompressMemoryPayload, request.payload)
         try:
@@ -790,6 +846,8 @@ class CommandRegistry:
             return self._optional_port_capability(command_type, self._service_port)
         if command_type in _BACKUP_HANDLERS:
             return self._optional_port_capability(command_type, self._backup_port)
+        if command_type in _SOURCE_CONTROL_HANDLERS:
+            return self._optional_port_capability(command_type, self._source_control_port)
         enabled = command_type in _HANDLER_KEYS
         return CapabilityView(
             capability_id=command_type,

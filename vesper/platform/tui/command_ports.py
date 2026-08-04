@@ -17,6 +17,8 @@ from vesper.platform.tui.command_contracts import (
     ApprovalPayload,
     CommandRequest,
     CommandType,
+    ConfirmationProof,
+    GitRevision,
 )
 from vesper.platform.tui.compression import CompressionReceipt
 from vesper.platform.tui.views import CapabilityView, SafeId
@@ -24,6 +26,7 @@ from vesper.platform.tui.views import CapabilityView, SafeId
 if TYPE_CHECKING:
     from vesper.platform.ops.services import RuntimeReceipt, ServiceReceipt
     from vesper.platform.tui.backup import BackupManifest, RestoreConfirmation, RestoreReceipt
+    from vesper.platform.tui.git_port import GitReceipt
 
 
 RecoveryStatus = Literal["not-started", "completed", "failed", "unknown"]
@@ -58,7 +61,7 @@ DISABLED_COMMAND_REASONS: Mapping[str, str] = MappingProxyType(
         "memory.compress-now": "No controller-owned context compression port is configured.",
         "backup.create": "No controller-owned backup command adapter is configured.",
         "backup.restore": "No controller-owned backup command adapter is configured.",
-        "source-control.push": "Source-control command port is not installed.",
+        "source-control.push": "No reviewed source-control push adapter is configured.",
     }
 )
 
@@ -177,6 +180,21 @@ class BackupCommandPort(Protocol):
         safety_backup_receipt_id: SafeId,
         confirmation: RestoreConfirmation,
     ) -> RestoreReceipt: ...
+
+    def recover(self, command_id: str, request: CommandRequest) -> RecoveryStatus: ...
+
+
+class SourceControlCommandPort(Protocol):
+    """Optional manual push adapter; never used by automatic maintenance."""
+
+    def available(self, command_type: CommandType) -> CapabilityView: ...
+
+    def push(
+        self,
+        command_id: SafeId,
+        expected_revision: GitRevision,
+        confirmation: ConfirmationProof,
+    ) -> GitReceipt: ...
 
     def recover(self, command_id: str, request: CommandRequest) -> RecoveryStatus: ...
 

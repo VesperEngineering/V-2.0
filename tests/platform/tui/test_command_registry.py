@@ -28,6 +28,7 @@ from vesper.platform.tui.command_ports import (
     PortResult,
 )
 from vesper.platform.tui.command_registry import CommandRegistry
+from vesper.platform.tui.git_port import GitReceipt
 from vesper.platform.tui.command_store import (
     CommandClaimError,
     CommandConflict,
@@ -246,6 +247,49 @@ class BackupPort:
             preview_hash=preview_hash,
             safety_backup_receipt_id=safety_backup_receipt_id,
             restored_paths=("state/config.json",),
+        )
+
+    def recover(self, command_id: str, request: CommandRequest) -> str:
+        del request
+        return "completed" if command_id in self.effects else "not-started"
+
+
+class SourceControlPort:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, ConfirmationProof]] = []
+        self.effects: set[str] = set()
+        self.raise_after_effect: set[str] = set()
+        self.omit_receipt_command_id = False
+        self.wrong_receipt_command_id: str | None = None
+
+    def available(self, command_type: str) -> CapabilityView:
+        return CapabilityView(
+            capability_id=command_type,
+            state=CapabilityState.ENABLED,
+            reason=None,
+        )
+
+    def push(
+        self,
+        command_id: str,
+        expected_revision: str,
+        confirmation: ConfirmationProof,
+    ) -> GitReceipt:
+        self.calls.append((command_id, expected_revision, confirmation))
+        self.effects.add(command_id)
+        if command_id in self.raise_after_effect:
+            raise RuntimeError("crash after push effect")
+        return GitReceipt(
+            operation="push",
+            accepted=True,
+            code="push-completed",
+            revision=expected_revision,
+            diff_hash=None,
+            command_id=(
+                None
+                if self.omit_receipt_command_id
+                else (self.wrong_receipt_command_id or command_id)
+            ),
         )
 
     def recover(self, command_id: str, request: CommandRequest) -> str:
@@ -507,6 +551,87 @@ def test_backup_recovery_never_repeats_an_effect_after_registry_crash(tmp_path) 
 
     assert recovered[0].status is ReceiptStatus.COMPLETED
     assert [call[0] for call in backup.calls] == ["create"]
+    registry.close()
+
+
+def test_source_control_push_requires_an_injected_healthy_port(tmp_path) -> None:
+    request = _request("source-control.push")
+    disabled = CommandRegistry(tmp_path / "push-disabled.db", PortSpy(), clock=MutableClock())
+
+    rejected = disabled.execute(_context(request), request)
+
+    assert rejected.status is ReceiptStatus.REJECTED
+    assert rejected.code == "capability-disabled"
+    disabled.close()
+
+    source = SourceControlPort()
+    enabled = CommandRegistry(
+        tmp_path / "push-enabled.db",
+        PortSpy(),
+        source_control_port=source,
+        clock=MutableClock(),
+    )
+    completed = enabled.execute(_context(request), request)
+
+    assert completed.status is ReceiptStatus.COMPLETED
+    assert completed.result == {"revision": "a" * 40}
+    assert source.calls == [
+        (
+            request.command_id,
+            "a" * 40,
+            ConfirmationProof(first_confirmed=True),
+        )
+    ]
+    enabled.close()
+
+
+def test_source_control_recovery_never_repeats_a_completed_push(tmp_path) -> None:
+    source = SourceControlPort()
+    clock = MutableClock()
+    request = _request("source-control.push", command_id="client:push:crash")
+    source.raise_after_effect.add(request.command_id)
+    registry = CommandRegistry(
+        tmp_path / "push-recovery.db",
+        PortSpy(),
+        source_control_port=source,
+        clock=clock,
+        claim_lease=timedelta(seconds=1),
+    )
+
+    with pytest.raises(RuntimeError, match="after push effect"):
+        registry.execute(_context(request), request)
+    clock.advance(seconds=2)
+    recovered = registry.recover_running(clock.now)
+
+    assert recovered[0].status is ReceiptStatus.COMPLETED
+    assert len(source.calls) == 1
+    registry.close()
+
+
+@pytest.mark.parametrize("receipt_binding", ["missing", "mismatch"])
+def test_source_control_receipt_must_bind_the_exact_ledger_command(
+    tmp_path, receipt_binding: str
+) -> None:
+    source = SourceControlPort()
+    if receipt_binding == "missing":
+        source.omit_receipt_command_id = True
+    else:
+        source.wrong_receipt_command_id = "client:push:other"
+    request = _request(
+        "source-control.push",
+        command_id=f"client:push:{receipt_binding}",
+    )
+    registry = CommandRegistry(
+        tmp_path / f"push-{receipt_binding}.db",
+        PortSpy(),
+        source_control_port=source,
+        clock=MutableClock(),
+    )
+
+    with pytest.raises(ValueError, match="does not match the command"):
+        registry.execute(_context(request), request)
+
+    assert [call[0] for call in source.calls] == [request.command_id]
     registry.close()
 
 
