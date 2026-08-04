@@ -1424,7 +1424,7 @@ impl AppState {
                 self.local_input.clear();
                 self.chat_feedback = None;
             } else if self.mode == LocalMode::AgentSelector {
-                self.mode = LocalMode::Browse;
+                self.mode = self.chat_return_mode;
                 self.chat_feedback = None;
             } else if self.mode == LocalMode::NoteEditor {
                 self.mode = LocalMode::Open;
@@ -1655,6 +1655,7 @@ impl AppState {
             }
             'i' if self.mode == LocalMode::Browse && self.screen == Screen::Agents => {
                 self.mode = LocalMode::AgentSelector;
+                self.chat_return_mode = LocalMode::Browse;
                 self.local_input.clear();
                 self.chat_feedback = None;
             }
@@ -1665,8 +1666,14 @@ impl AppState {
     }
 
     fn selected_approved_agent(&self) -> Option<AgentId> {
+        if self.mode != LocalMode::Open {
+            return None;
+        }
+        self.selected_approved_agent_from_selection()
+    }
+
+    fn selected_approved_agent_from_selection(&self) -> Option<AgentId> {
         if self.screen != Screen::Agents
-            || self.mode != LocalMode::Open
             || self.screen_state.selected_kind != Some(DetailKind::Agent)
         {
             return None;
@@ -1689,7 +1696,7 @@ impl AppState {
             return Vec::new();
         };
         self.chat_selector_index = index;
-        self.open_chat(agent_id, LocalMode::Browse)
+        self.open_chat(agent_id, self.chat_return_mode)
     }
 
     fn open_chat(&mut self, agent_id: AgentId, return_mode: LocalMode) -> Vec<ClientAction> {
@@ -2064,6 +2071,23 @@ impl AppState {
         }
         if !self.control_pair_matches(&button) {
             return self.reject_stale_control(button.label);
+        }
+        if button.command_type == CommandType::AgentSendMessage {
+            let selected_agent = self.selected_approved_agent_from_selection();
+            let return_mode = if self.screen_state.detail_open {
+                LocalMode::Open
+            } else {
+                LocalMode::Browse
+            };
+            self.close_control_overlay();
+            if let Some(agent_id) = selected_agent {
+                return self.open_chat(agent_id, return_mode);
+            }
+            self.mode = LocalMode::AgentSelector;
+            self.chat_return_mode = return_mode;
+            self.local_input.clear();
+            self.chat_feedback = None;
+            return Vec::new();
         }
         if matches!(
             button.command_type,

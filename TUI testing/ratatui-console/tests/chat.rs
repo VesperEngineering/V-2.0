@@ -1924,3 +1924,91 @@ fn chat_history_focus_follows_tail_and_pages_without_sending() {
     );
     assert!(input.contains("VISIBLE-TAIL"), "{input}");
 }
+
+#[test]
+fn maximum_size_chat_uses_a_bounded_narrow_tail_window() {
+    const RENDER_WINDOW_ROWS: usize = 4_096;
+    const CHUNK_BYTES: usize = 64 * 1024;
+    const CHUNK_COUNT: usize = MAX_RETAINED_CHAT_BYTES / CHUNK_BYTES;
+    const NEWEST_TAIL: &str = "4MIB-TAIL";
+
+    let product = agent("v20-product");
+    let mut state = AppState::controller();
+    state.snapshot = Some(chat_snapshot(product.as_str()));
+    open_agent_selector(&mut state);
+    state.handle(InputEvent::Enter);
+
+    let ordinary_chunk = "x".repeat(CHUNK_BYTES);
+    let final_chunk = format!(
+        "{}{}",
+        "x".repeat(CHUNK_BYTES - NEWEST_TAIL.len()),
+        NEWEST_TAIL
+    );
+    let mut complete_content = String::with_capacity(MAX_RETAINED_CHAT_BYTES);
+    for chunk_index in 0..CHUNK_COUNT {
+        let chunk = if chunk_index + 1 == CHUNK_COUNT {
+            &final_chunk
+        } else {
+            &ordinary_chunk
+        };
+        complete_content.push_str(chunk);
+        state
+            .reduce(chat_envelope(
+                u64::try_from(chunk_index + 1).unwrap(),
+                &format!("event:max:{chunk_index}:chunk"),
+                product.as_str(),
+                "message:max",
+                "agent",
+                (
+                    "chunk",
+                    Some(u64::try_from(chunk_index + 1).unwrap()),
+                    Some(chunk),
+                ),
+            ))
+            .unwrap();
+    }
+    assert_eq!(complete_content.len(), MAX_RETAINED_CHAT_BYTES);
+    state
+        .reduce(complete_chat_envelope(
+            u64::try_from(CHUNK_COUNT + 1).unwrap(),
+            "event:max:complete",
+            product.as_str(),
+            "message:max",
+            "agent",
+            &complete_content,
+        ))
+        .unwrap();
+    state
+        .reduce(chat_history_result_envelope(
+            u64::try_from(CHUNK_COUNT + 2).unwrap(),
+            product.as_str(),
+            None,
+        ))
+        .unwrap();
+
+    let area = Rect::new(0, 0, 34, 30);
+    state.set_terminal_area(area);
+    let rendered = render_state(&state, area.width, area.height);
+    assert!(
+        rendered.contains(NEWEST_TAIL),
+        "newest tail must be visible:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("TAIL WINDOW"),
+        "bounded tail must be labeled"
+    );
+
+    state.handle(InputEvent::PageUp);
+    assert!(!state.chat_follows_tail(product));
+    assert!(
+        state.chat_scroll_offset(product) <= RENDER_WINDOW_ROWS,
+        "scroll offset must stay within the bounded render window"
+    );
+    assert_eq!(
+        state.chat_store().thread(product).messages()[0]
+            .content()
+            .len(),
+        MAX_RETAINED_CHAT_BYTES,
+        "render virtualization must not truncate durable chat state"
+    );
+}

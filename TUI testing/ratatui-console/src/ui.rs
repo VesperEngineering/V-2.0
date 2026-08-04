@@ -36,6 +36,15 @@ use crate::theme::Palette;
 const EASTERN_TIME_ZONE: &str = "Eastern Standard Time";
 static EASTERN_ZONE: OnceLock<Option<DYNAMIC_TIME_ZONE_INFORMATION>> = OnceLock::new();
 pub(crate) const CONTROL_CELL_WIDTH: u16 = 26;
+/// Chat rendering is a bounded view over retained controller history.
+///
+/// The store keeps the complete verified message. The TUI only formats this many wrapped rows
+/// from the newest tail so Ratatui's `u16` scroll coordinate can always reach the real tail.
+pub const MAX_CHAT_RENDER_ROWS: usize = 4_096;
+/// Maximum retained message bytes inspected while building one chat frame.
+pub const MAX_CHAT_RENDER_BYTES: usize = 256 * 1024;
+
+const OMITTED_CHAT_MARKER: &str = "OLDER CHAT CONTENT HIDDEN - retained in controller history.";
 
 pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     let palette = state.theme().palette();
@@ -977,32 +986,39 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Pal
         );
         return;
     };
-    let lines = chat_lines(state, agent_id);
-    let maximum = chat_scroll_maximum(state, area);
+    let width = area.width.saturating_sub(2).max(1);
+    let rendered_chat = chat_lines(state, agent_id, width);
+    let paragraph = Paragraph::new(rendered_chat.lines)
+        .style(base_style(palette))
+        .wrap(Wrap { trim: false });
+    let maximum = paragraph
+        .line_count(width)
+        .saturating_sub(usize::from(area.height.saturating_sub(2)).max(1));
     let offset = if state.chat_follows_tail(agent_id) {
         maximum
     } else {
         state.chat_scroll_offset(agent_id).min(maximum)
     };
-    let tail = if state.chat_follows_tail(agent_id) {
-        "FOLLOW TAIL"
+    let title = if state.chat_follows_tail(agent_id) && rendered_chat.omitted {
+        format!("TAIL WINDOW - {} - FOLLOW TAIL", agent_id.as_str())
+    } else if state.chat_follows_tail(agent_id) {
+        format!("CHAT - {} - FOLLOW TAIL", agent_id.as_str())
     } else {
-        "SCROLLED"
+        format!("CHAT - {} - SCROLLED", agent_id.as_str())
     };
+    let offset = u16::try_from(offset).expect("bounded chat render rows fit Ratatui scroll");
     frame.render_widget(
-        Paragraph::new(lines)
-            .style(base_style(palette))
-            .wrap(Wrap { trim: false })
-            .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
-            .block(panel(
-                format!("CHAT - {} - {tail}", agent_id.as_str()),
-                palette,
-            )),
+        paragraph.scroll((offset, 0)).block(panel(title, palette)),
         area,
     );
 }
 
-fn chat_lines(state: &AppState, agent_id: AgentId) -> Vec<Line<'static>> {
+struct RenderedChatLines {
+    lines: Vec<Line<'static>>,
+    omitted: bool,
+}
+
+fn chat_lines(state: &AppState, agent_id: AgentId, width: u16) -> RenderedChatLines {
     let messages = state.chat_store().thread(agent_id).messages();
     let mut lines = vec![Line::from("Human and agent messages only.")];
     lines.extend(match state.chat_store().history_status(agent_id) {
@@ -1017,7 +1033,30 @@ fn chat_lines(state: &AppState, agent_id: AgentId) -> Vec<Line<'static>> {
         )],
         ChatHistoryStatus::NotRequested | ChatHistoryStatus::Available => Vec::new(),
     });
-    lines.extend(messages.iter().map(|message| {
+    let fixed_rows = lines
+        .iter()
+        .map(|line| wrapped_rows(line.width(), width))
+        .sum::<usize>();
+    let marker_rows = wrapped_rows(UnicodeWidthStr::width(OMITTED_CHAT_MARKER), width);
+    let fixed_bytes = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.len())
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    let mut remaining_rows = MAX_CHAT_RENDER_ROWS
+        .saturating_sub(fixed_rows)
+        .saturating_sub(marker_rows);
+    let mut remaining_bytes = MAX_CHAT_RENDER_BYTES
+        .saturating_sub(fixed_bytes)
+        .saturating_sub(OMITTED_CHAT_MARKER.len());
+    let mut selected = Vec::new();
+    let mut omitted = false;
+
+    for message in messages.iter().rev() {
         let role = match message.role() {
             ChatRole::Human => "HUMAN",
             ChatRole::Agent => "AGENT",
@@ -1027,12 +1066,53 @@ fn chat_lines(state: &AppState, agent_id: AgentId) -> Vec<Line<'static>> {
             ChatMessageStatus::Complete => "COMPLETE",
             ChatMessageStatus::Interrupted => "INTERRUPTED",
         };
-        Line::from(format!(
-            "[{role} {status}] {}",
+        let prefix = format!("[{role} {status}] ");
+        let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+        let available_width = remaining_rows
+            .saturating_mul(usize::from(width))
+            .saturating_sub(prefix_width);
+        let available_bytes = remaining_bytes.saturating_sub(prefix.len());
+        if available_width == 0 || available_bytes == 0 {
+            omitted = true;
+            break;
+        }
+        let content_will_be_trimmed =
+            message.content().len() > available_width || message.content().len() > available_bytes;
+        let tail_marker = if content_will_be_trimmed {
+            "[...] "
+        } else {
+            ""
+        };
+        let content = if content_will_be_trimmed {
+            sanitize_chat_tail(
+                message.content(),
+                available_width.saturating_sub(UnicodeWidthStr::width(tail_marker)),
+                available_bytes.saturating_sub(tail_marker.len()),
+            )
+        } else {
             sanitize_text(message.content())
-        ))
-    }));
-    lines
+        };
+        let rendered = format!("{prefix}{tail_marker}{content}");
+        let used_rows = wrapped_rows(UnicodeWidthStr::width(rendered.as_str()), width);
+        if used_rows > remaining_rows || rendered.len() > remaining_bytes {
+            omitted = true;
+            break;
+        }
+        remaining_rows = remaining_rows.saturating_sub(used_rows);
+        remaining_bytes = remaining_bytes.saturating_sub(rendered.len());
+        selected.push(Line::from(rendered));
+        if content_will_be_trimmed {
+            omitted = true;
+            break;
+        }
+    }
+    selected.reverse();
+    omitted |= selected.len() < messages.len();
+    if omitted {
+        lines.push(Line::from(OMITTED_CHAT_MARKER));
+    }
+    lines.extend(selected);
+    RenderedChatLines { lines, omitted }
 }
 
 pub(crate) fn chat_scroll_maximum(state: &AppState, area: Rect) -> usize {
@@ -1040,10 +1120,33 @@ pub(crate) fn chat_scroll_maximum(state: &AppState, area: Rect) -> usize {
         return 0;
     };
     let width = area.width.saturating_sub(2).max(1);
-    let line_count = Paragraph::new(chat_lines(state, agent_id))
+    let line_count = Paragraph::new(chat_lines(state, agent_id, width).lines)
         .wrap(Wrap { trim: false })
         .line_count(width);
     line_count.saturating_sub(usize::from(area.height.saturating_sub(2)).max(1))
+}
+
+fn wrapped_rows(width: usize, viewport_width: u16) -> usize {
+    width.div_ceil(usize::from(viewport_width.max(1))).max(1)
+}
+
+fn sanitize_chat_tail(value: &str, max_width: usize, max_bytes: usize) -> String {
+    let mut start = value.len();
+    let mut used_width = 0_usize;
+    let mut used_bytes = 0_usize;
+    for (index, character) in value.char_indices().rev() {
+        let character_width = sanitized_character(character).width().unwrap_or(1);
+        let character_bytes = character.len_utf8();
+        if used_width.saturating_add(character_width) > max_width
+            || used_bytes.saturating_add(character_bytes) > max_bytes
+        {
+            break;
+        }
+        start = index;
+        used_width += character_width;
+        used_bytes += character_bytes;
+    }
+    sanitize_text(&value[start..])
 }
 
 fn render_agent_input(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
@@ -1204,19 +1307,16 @@ fn available_text(value: &str) -> String {
 }
 
 fn sanitize_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_control()
-                || is_unicode_format(character)
-                || character.width().unwrap_or(0) == 0
-            {
-                '?'
-            } else {
-                character
-            }
-        })
-        .collect()
+    value.chars().map(sanitized_character).collect()
+}
+
+fn sanitized_character(character: char) -> char {
+    if character.is_control() || is_unicode_format(character) || character.width().unwrap_or(0) == 0
+    {
+        '?'
+    } else {
+        character
+    }
 }
 
 fn bounded_text(value: &str, max_width: usize) -> String {

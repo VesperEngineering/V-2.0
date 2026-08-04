@@ -21,7 +21,7 @@ use vesper_ratatui_console::controls::{
 };
 use vesper_ratatui_console::input::InputEvent;
 use vesper_ratatui_console::layout::DisplayMode;
-use vesper_ratatui_console::state::{AccessState, Screen};
+use vesper_ratatui_console::state::{AccessState, LocalMode, Screen};
 use vesper_ratatui_console::state::{AppState, ClientAction, ReduceOutcome};
 use vesper_ratatui_console::theme::Theme;
 use vesper_ratatui_console::ui::{
@@ -90,6 +90,13 @@ fn controls_snapshot_with_only_enabled(command: CommandType) -> ConsoleSnapshot 
         })
         .collect();
     snapshot
+}
+
+fn approved_agent_send_snapshot() -> ConsoleSnapshot {
+    let snapshot = controls_snapshot_with_only_enabled(CommandType::AgentSendMessage);
+    let mut value = serde_json::to_value(snapshot).expect("serialize controls snapshot");
+    value["agents"]["rows"][0]["agent"] = serde_json::json!("v20-product");
+    serde_json::from_value(value).expect("approved-agent controls snapshot")
 }
 
 fn receipt(command_id: &str, status: &str, code: &str, message: &str) -> CommandReceipt {
@@ -783,6 +790,135 @@ fn required_screen_controls_are_visible_and_the_action_bar_is_mouse_reachable() 
     let actions =
         risk.handle(mouse_to_input(confirm_click, area, &risk).expect("confirmation hit"));
     assert!(matches!(actions.as_slice(), [ClientAction::Command(_)]));
+}
+
+#[test]
+fn agent_send_button_uses_chat_route_and_disabled_capability_stays_inert() {
+    let area = Rect::new(0, 0, 140, 42);
+    let send_click = |state: &AppState| {
+        let action_bar = split_control_area(
+            vesper_ratatui_console::layout::shell_layout(area, state.display_mode()).body,
+            state.display_mode(),
+        )
+        .1;
+        mouse_to_input(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: action_bar.x + 2,
+                row: action_bar.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+            state,
+        )
+        .expect("Send button hit")
+    };
+
+    let mut keyboard = AppState::controller();
+    keyboard.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::AgentSendMessage,
+    ));
+    keyboard.handle(InputEvent::Char('4'));
+    assert!(keyboard.handle(InputEvent::Char('i')).is_empty());
+    assert_eq!(keyboard.mode, LocalMode::AgentSelector);
+
+    let mut enabled = AppState::controller();
+    enabled.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::AgentSendMessage,
+    ));
+    enabled.handle(InputEvent::Char('4'));
+    let click = send_click(&enabled);
+    assert_eq!(click, InputEvent::ActivateControl(0));
+    assert!(enabled.handle(click).is_empty());
+    assert_eq!(enabled.mode, keyboard.mode);
+    assert!(enabled.control_overlay().is_none());
+    assert!(matches!(
+        enabled.handle(InputEvent::SelectChatAgent(0)).as_slice(),
+        [ClientAction::ChatHistoryRequest(_)]
+    ));
+    assert_eq!(enabled.mode, LocalMode::AgentChat);
+    assert!(enabled.handle(InputEvent::FocusChatInput).is_empty());
+    assert_eq!(enabled.mode, LocalMode::AgentInput);
+
+    let mut disabled = AppState::controller();
+    disabled.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::AgentEnqueue,
+    ));
+    disabled.handle(InputEvent::Char('4'));
+    let click = send_click(&disabled);
+    assert!(disabled.handle(click).is_empty());
+    assert_eq!(disabled.mode, LocalMode::Menu);
+    assert!(disabled.selected_chat_agent().is_none());
+    assert!(matches!(
+        disabled.control_overlay(),
+        Some(ControlOverlay::DisabledReason { label, reason })
+            if label == "Send" && reason == "No reviewed adapter is configured."
+    ));
+}
+
+#[test]
+fn selected_agent_send_button_restores_exact_browse_or_open_origin() {
+    for origin in [LocalMode::Browse, LocalMode::Open] {
+        let mut state = AppState::controller();
+        state.snapshot = Some(approved_agent_send_snapshot());
+        state.handle(InputEvent::Char('4'));
+        state.handle(InputEvent::OpenBrowseRow { panel: 1, index: 0 });
+        if origin == LocalMode::Browse {
+            state.handle(InputEvent::Escape);
+        }
+        assert_eq!(state.mode, origin);
+
+        state.handle(InputEvent::Char(':'));
+        let send = state
+            .control_menu()
+            .expect("agent controls")
+            .command_index(CommandType::AgentSendMessage)
+            .expect("Send button");
+        assert!(matches!(
+            state.handle(InputEvent::ActivateControl(send)).as_slice(),
+            [ClientAction::ChatHistoryRequest(_)]
+        ));
+        assert_eq!(state.mode, LocalMode::AgentChat);
+        assert_eq!(
+            state.selected_chat_agent().map(|agent| agent.as_str()),
+            Some("v20-product")
+        );
+
+        assert!(state.handle(InputEvent::Escape).is_empty());
+        assert_eq!(state.mode, origin, "Esc must restore {origin:?}");
+    }
+}
+
+#[test]
+fn send_selector_fallback_preserves_open_origin_through_escape_or_chat() {
+    for select_chat in [false, true] {
+        let mut state = AppState::controller();
+        state.snapshot = Some(controls_snapshot_with_only_enabled(
+            CommandType::AgentSendMessage,
+        ));
+        state.handle(InputEvent::Char('4'));
+        state.handle(InputEvent::OpenBrowseRow { panel: 1, index: 0 });
+        assert_eq!(state.mode, LocalMode::Open);
+
+        state.handle(InputEvent::Char(':'));
+        let send = state
+            .control_menu()
+            .expect("agent controls")
+            .command_index(CommandType::AgentSendMessage)
+            .expect("Send button");
+        assert!(state.handle(InputEvent::ActivateControl(send)).is_empty());
+        assert_eq!(state.mode, LocalMode::AgentSelector);
+
+        if select_chat {
+            assert!(matches!(
+                state.handle(InputEvent::SelectChatAgent(0)).as_slice(),
+                [ClientAction::ChatHistoryRequest(_)]
+            ));
+            assert_eq!(state.mode, LocalMode::AgentChat);
+        }
+        assert!(state.handle(InputEvent::Escape).is_empty());
+        assert_eq!(state.mode, LocalMode::Open);
+    }
 }
 
 #[test]
