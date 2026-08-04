@@ -1,6 +1,8 @@
 from datetime import date, datetime, timedelta, timezone
 
-from vesper.platform.agent_queue import AgentWorkQueue
+import pytest
+
+from vesper.platform.agent_queue import AgentWorkQueue, WorkQueueConflict
 from vesper.platform.cadence import CadencePolicy
 from vesper.platform.contracts import AgentRole
 from vesper.platform.persistence import PlatformPaths, open_persistence
@@ -14,9 +16,21 @@ def test_queue_is_priority_fifo_deduplicated_and_persistent(tmp_path):
     paths = PlatformPaths.below(tmp_path / "state")
     with open_persistence(paths) as persistence:
         queue = AgentWorkQueue(persistence.store)
-        queue.enqueue("normal", AgentRole.MODEL_RESEARCHER, "session", "normal", 10, NOW)
-        queue.enqueue("urgent", AgentRole.QUANT_RESEARCH_LEAD, "session", "urgent", 90, NOW)
-        queue.enqueue("normal", AgentRole.MODEL_RESEARCHER, "session", "changed", 10, NOW)
+        queue.enqueue(
+            "normal", AgentRole.MODEL_RESEARCHER, "session", "normal", "normal", 10, NOW
+        )
+        queue.enqueue(
+            "urgent",
+            AgentRole.QUANT_RESEARCH_LEAD,
+            "session",
+            "urgent",
+            "urgent",
+            90,
+            NOW,
+        )
+        queue.enqueue(
+            "normal", AgentRole.MODEL_RESEARCHER, "session", "normal", "normal", 10, NOW
+        )
         claimed = queue.claim("worker-1", NOW, lease_seconds=60)
         assert claimed.work_id == "urgent"
         assert len(queue.list()) == 2
@@ -27,11 +41,69 @@ def test_queue_is_priority_fifo_deduplicated_and_persistent(tmp_path):
 def test_expired_queue_claim_can_be_reclaimed(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         queue = AgentWorkQueue(persistence.store)
-        queue.enqueue("work", AgentRole.PRODUCT, "session", "objective", 10, NOW)
+        queue.enqueue(
+            "work",
+            AgentRole.MODEL_RESEARCHER,
+            "session",
+            "objective",
+            "objective",
+            10,
+            NOW,
+        )
         queue.claim("worker-1", NOW, lease_seconds=1)
         reclaimed = queue.claim("worker-2", NOW + timedelta(seconds=2), lease_seconds=1)
         assert reclaimed.claimed_by == "worker-2"
         assert reclaimed.attempt == 2
+
+
+def test_legacy_queue_row_without_title_decodes_across_all_operations(tmp_path):
+    paths = PlatformPaths.below(tmp_path / "state")
+    with open_persistence(paths) as persistence:
+        persistence.store.put(
+            ("agent-work", "items"),
+            "legacy-work",
+            {
+                "work_id": "legacy-work",
+                "role": AgentRole.MODEL_RESEARCHER.value,
+                "session_id": "legacy-session",
+                "objective": "Legacy objective",
+                "priority": 50,
+                "created_at": NOW.isoformat(),
+                "status": "queued",
+                "attempt": 0,
+                "claimed_by": None,
+                "lease_expires_at": None,
+            },
+        )
+        queue = AgentWorkQueue(persistence.store)
+
+        loaded = queue.get("legacy-work")
+        assert loaded is not None
+        assert loaded.title == "Legacy objective"
+        assert queue.list() == (loaded,)
+        claimed = queue.claim("worker-1", NOW, lease_seconds=60)
+        assert claimed.title == "Legacy objective"
+        completed = queue.complete("legacy-work", "worker-1")
+        assert completed.title == "Legacy objective"
+        assert queue.enqueue(
+            "legacy-work",
+            AgentRole.MODEL_RESEARCHER,
+            "legacy-session",
+            "Legacy objective",
+            "Legacy objective",
+            50,
+            NOW,
+        ) == completed
+        with pytest.raises(WorkQueueConflict, match="conflicting agent work"):
+            queue.enqueue(
+                "legacy-work",
+                AgentRole.MODEL_RESEARCHER,
+                "legacy-session",
+                "Changed title",
+                "Legacy objective",
+                50,
+                NOW,
+            )
 
 
 def test_cadence_is_decision_only_and_digest_is_close_plus_fifteen():

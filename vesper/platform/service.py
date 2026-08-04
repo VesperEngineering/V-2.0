@@ -30,7 +30,7 @@ from .contracts import (
     TaskRequest,
 )
 from .control import RuntimeControl
-from .journals import AgentJournal
+from .journals import AgentJournal, JournalConflictError
 from .ollama import OllamaClient, QWEN_MODEL, QwenSpecialistAdapter
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
@@ -49,11 +49,14 @@ from .sandbox_runtime import DockerCodexRuntime
 from .validation import LocalDeterministicValidator, validate_acceptance_checks
 from .worktree import inspect_worktree
 from .workflow import (
+    APPROVAL_DECISION_NAMESPACE,
     APPROVAL_REQUEST_NAMESPACE,
     WorkflowController,
     WorkflowView,
     build_workflow,
 )
+
+_TUI_APPROVAL_BINDING_NAMESPACE = ("tui-command-approvals", "by-approval-id")
 
 RUN_RUNTIME_NAMESPACE = ("system", "run-runtime")
 M2_APPROVED_WORKSPACE = Path("docs/m2-controlled-exercise")
@@ -454,6 +457,156 @@ class LocalPlatformService:
         payload["resume_required"] = True
         return payload
 
+    def record_tui_approval_decision(
+        self,
+        *,
+        command_id: str,
+        approval_id: str,
+        run_id: str,
+        checkpoint_id: str,
+        operator_id: str,
+        decision: ApprovalDecision,
+        reason: str,
+        decided_at: datetime,
+    ) -> dict[str, object]:
+        """Persist one exact TUI decision without resuming or reconciling execution."""
+        with open_persistence(self.paths) as persistence:
+            with self._tui_decision_lease(persistence, run_id):
+                if self.control.active_execution(run_id) is not None:
+                    raise SpecialistRuntimeUnavailable(
+                        "TUI approval is blocked while the run has an active execution"
+                    )
+                controller = self._controller_for_run(persistence, run_id)
+                view = controller.inspect(run_id)
+                request = view.pending_approval
+                if (
+                    request is None
+                    or view.state.status is not RunStatus.AWAITING_APPROVAL
+                    or request.run_id != run_id
+                    or request.checkpoint_id != checkpoint_id
+                    or view.checkpoint_id != checkpoint_id
+                ):
+                    raise SpecialistRuntimeUnavailable(
+                        "TUI approval does not match the exact pending checkpoint"
+                    )
+                raw = persistence.store.get(APPROVAL_DECISION_NAMESPACE, run_id)
+                existing = (
+                    None
+                    if raw is None
+                    else HumanApprovalDecision.model_validate_json(json.dumps(raw))
+                )
+                stable_decided_at = (
+                    existing.decided_at
+                    if existing is not None and existing.approval_id == approval_id
+                    else decided_at
+                )
+                candidate = HumanApprovalDecision(
+                    run_id=request.run_id,
+                    task_id=request.task_id,
+                    repository_revision=request.repository_revision,
+                    created_at=request.created_at,
+                    approval_id=approval_id,
+                    request_id=request.request_id,
+                    checkpoint_id=checkpoint_id,
+                    operator_id=operator_id,
+                    decision=decision,
+                    reason=reason,
+                    decided_at=stable_decided_at,
+                )
+                binding = {
+                    "approval_id": approval_id,
+                    "run_id": run_id,
+                }
+                existing_binding = persistence.store.get(
+                    _TUI_APPROVAL_BINDING_NAMESPACE,
+                    approval_id,
+                )
+                if existing_binding is not None and dict(existing_binding) != binding:
+                    raise SpecialistRuntimeUnavailable(
+                        f"conflicting TUI approval binding for command {command_id}"
+                    )
+                if existing is not None:
+                    if existing != candidate:
+                        raise SpecialistRuntimeUnavailable(
+                            f"conflicting TUI approval decision for command {command_id}"
+                        )
+                    recorded = existing
+                else:
+                    recorded = controller.record_decision(run_id, candidate)
+                if existing_binding is None:
+                    persistence.store.put(
+                        _TUI_APPROVAL_BINDING_NAMESPACE,
+                        approval_id,
+                        binding,
+                    )
+                self._journal_operator_decision(persistence, recorded)
+        return {
+            "command_id": command_id,
+            "approval_id": recorded.approval_id,
+            "run_id": recorded.run_id,
+            "checkpoint_id": recorded.checkpoint_id,
+            "decision": recorded.decision.value,
+            "reason": recorded.reason,
+            "decided_at": recorded.decided_at.isoformat(),
+            "resume_required": recorded.decision is ApprovalDecision.APPROVE,
+        }
+
+    def recover_tui_approval(
+        self,
+        *,
+        approval_id: str,
+        run_id: str,
+        checkpoint_id: str,
+        operator_id: str,
+        decision: ApprovalDecision,
+        reason: str,
+    ) -> str:
+        """Validate deterministic approval evidence and repair its exact journal event."""
+        with open_persistence(self.paths) as persistence:
+            with self._tui_decision_lease(persistence, run_id):
+                binding = persistence.store.get(
+                    _TUI_APPROVAL_BINDING_NAMESPACE,
+                    approval_id,
+                )
+                expected_binding = {
+                    "approval_id": approval_id,
+                    "run_id": run_id,
+                }
+                raw = persistence.store.get(APPROVAL_DECISION_NAMESPACE, run_id)
+                if raw is None:
+                    return "not-started" if binding is None else "unknown"
+                try:
+                    persisted = HumanApprovalDecision.model_validate_json(
+                        json.dumps(raw)
+                    )
+                except (TypeError, ValueError):
+                    return "failed"
+                if (
+                    persisted.approval_id != approval_id
+                    or persisted.run_id != run_id
+                    or persisted.checkpoint_id != checkpoint_id
+                    or persisted.operator_id != operator_id
+                    or persisted.decision is not decision
+                    or persisted.reason != reason
+                ):
+                    return "unknown"
+                if binding is not None and dict(binding) != expected_binding:
+                    return "unknown"
+                try:
+                    if binding is None:
+                        persistence.store.put(
+                            _TUI_APPROVAL_BINDING_NAMESPACE,
+                            approval_id,
+                            expected_binding,
+                        )
+                    self._journal_operator_decision(persistence, persisted)
+                    journal = AgentJournal(persistence.store)
+                    if not journal.verify(AgentRole.RISK_REVIEW, persisted.run_id):
+                        return "failed"
+                except (JournalConflictError, TypeError, ValueError):
+                    return "failed"
+                return "completed"
+
     def reject_run(
         self,
         run_id: str,
@@ -620,9 +773,47 @@ class LocalPlatformService:
         work_id = self._id_factory()
         with open_persistence(self.paths) as persistence:
             item = AgentWorkQueue(persistence.store).enqueue(
-                work_id, agent_role, session_id, objective, priority, self._clock()
+                work_id,
+                agent_role,
+                session_id,
+                objective,
+                objective,
+                priority,
+                self._clock(),
             )
         return item.model_dump(mode="json")
+
+    def enqueue_tui_agent_work(
+        self,
+        *,
+        work_id: str,
+        role: AgentRole,
+        session_id: str,
+        title: str,
+        objective: str,
+        priority: int,
+        created_at: datetime,
+    ) -> dict[str, object]:
+        if role not in AUTONOMOUS_AGENT_ROLES:
+            raise SpecialistRuntimeUnavailable(
+                "TUI queue requires an approved autonomous quant role"
+            )
+        with open_persistence(self.paths) as persistence:
+            item = AgentWorkQueue(persistence.store).enqueue(
+                work_id,
+                role,
+                session_id,
+                title,
+                objective,
+                priority,
+                created_at,
+            )
+        return item.model_dump(mode="json")
+
+    def get_tui_agent_work(self, work_id: str) -> dict[str, object] | None:
+        with open_persistence(self.paths) as persistence:
+            item = AgentWorkQueue(persistence.store).get(work_id)
+        return None if item is None else item.model_dump(mode="json")
 
     def list_agent_work(self) -> dict[str, object]:
         with open_persistence(self.paths) as persistence:
@@ -1061,6 +1252,26 @@ class LocalPlatformService:
                         control=self.control,
                     ).reconcile_sandbox(sandbox_name)
                     self.control.clear_active(run_id, execution_id)
+            yield
+
+    @contextmanager
+    def _tui_decision_lease(
+        self,
+        persistence: PlatformPersistence,
+        run_id: str,
+    ):
+        """Serialize a decision without invoking active-runtime reconciliation."""
+        runtime = persistence.store.get(RUN_RUNTIME_NAMESPACE, run_id)
+        if runtime is None:
+            yield
+            return
+        try:
+            repository_root = Path(str(runtime["repository_root"])).resolve()
+        except KeyError as exc:
+            raise SpecialistRuntimeUnavailable(
+                "persisted run runtime metadata is malformed"
+            ) from exc
+        with _repository_lease(repository_root):
             yield
 
     @staticmethod
