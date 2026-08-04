@@ -79,31 +79,48 @@ fn render_rows(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            view.rows
-                .iter()
-                .filter(|row| row.status == wanted)
-                .skip(if focused {
-                    memory_offset(view, state, wanted)
-                } else {
-                    0
-                })
-                .map(|row| {
-                    let (badge, style) = match row.status {
-                        MemoryStatus::Core => ("[OK] CORE", state.theme.palette().resolved),
-                        MemoryStatus::Archived => ("[A] ARCHIVED", base_style(state)),
-                    };
-                    Line::from(vec![
-                        Span::raw(marker(state, row.memory_id.as_str(), DetailKind::Memory)),
-                        Span::styled(badge, style),
-                        Span::raw(format!(
-                            " {} | {} | {} | Evidence {}",
-                            row.memory_id.as_str(),
-                            sanitize(row.summary.as_str()),
-                            format_eastern_time(&row.updated_at_utc),
-                            ids(&row.evidence_ids)
-                        )),
-                    ])
-                })
+            let policy = match wanted {
+                MemoryStatus::Core => vec![
+                    Line::from("V20 ONLY | 2,000-WORD CORE"),
+                    Line::from("CONTROLLER CURATED | NO PINS"),
+                ],
+                MemoryStatus::Archived => {
+                    vec![Line::from("SEARCHABLE | REVERSIBLE | NEVER DELETED")]
+                }
+            };
+            policy
+                .into_iter()
+                .chain(
+                    view.rows
+                        .iter()
+                        .filter(|row| row.status == wanted)
+                        .skip(if focused {
+                            memory_offset(view, state, wanted)
+                        } else {
+                            0
+                        })
+                        .map(|row| {
+                            let (badge, style) = match row.status {
+                                MemoryStatus::Core => ("[OK] CORE", state.theme.palette().resolved),
+                                MemoryStatus::Archived => ("[A] ARCHIVED", base_style(state)),
+                            };
+                            Line::from(vec![
+                                Span::raw(marker(
+                                    state,
+                                    row.memory_id.as_str(),
+                                    DetailKind::Memory,
+                                )),
+                                Span::styled(badge, style),
+                                Span::raw(format!(
+                                    " {} | {} | {} | Evidence {}",
+                                    row.memory_id.as_str(),
+                                    sanitize(row.summary.as_str()),
+                                    format_eastern_time(&row.updated_at_utc),
+                                    ids(&row.evidence_ids)
+                                )),
+                            ])
+                        }),
+                )
                 .collect()
         },
         |message| vec![Line::from(message)],

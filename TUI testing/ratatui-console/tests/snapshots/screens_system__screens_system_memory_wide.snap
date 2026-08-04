@@ -3,11 +3,11 @@ source: tests/screens_system.rs
 expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::default();\n    render_text(w, h, |frame|\n    { render_memory(frame, frame.area(), &snapshot.memory, &state) })\n} (120, 28)"
 ---
 ┌> CORE MEMORY───────────────────────────┐┌ARCHIVE─────────────────────────────────┐┌CHANGE HISTORY────────────────────┐
-│[OK] CORE memory:core | Use             ││[A] ARCHIVED memory:archive | Older     ││Reasons/agent use: [?] UNAVAILABLE│
-│controller?truth. | 2026-07-15 08:34:56 ││reviewed note. | 2026-01-15 07:34:56 EST││[i] INFO 2026-07-15 08:34:56 EDT |│
-│EDT | Evidence evidence:1               ││| Evidence NONE                         ││Memory archived?with review |     │
-│                                        ││                                        ││Evidence evidence:1               │
-│                                        ││                                        ││                                  │
+│V20 ONLY | 2,000-WORD CORE              ││SEARCHABLE | REVERSIBLE | NEVER DELETED ││Reasons/agent use: [?] UNAVAILABLE│
+│CONTROLLER CURATED | NO PINS            ││[A] ARCHIVED memory:archive | Older     ││[i] INFO 2026-07-15 08:34:56 EDT |│
+│[OK] CORE memory:core | Use             ││reviewed note. | 2026-01-15 07:34:56 EST││Memory archived?with review |     │
+│controller?truth. | 2026-07-15 08:34:56 ││| Evidence NONE                         ││Evidence evidence:1               │
+│EDT | Evidence evidence:1               ││                                        ││                                  │
 │                                        ││                                        ││                                  │
 │                                        ││                                        ││                                  │
 │                                        ││                                        ││                                  │
