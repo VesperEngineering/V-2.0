@@ -12,6 +12,7 @@ from vesper.platform.tui.ports import (
     RiskFacts,
     SourceSample,
     SystemFacts,
+    TimelineFacts,
     UnavailablePort,
 )
 from vesper.platform.tui.views import Freshness
@@ -182,6 +183,25 @@ def test_legacy_risk_facts_can_never_claim_broker_reconciliation() -> None:
     )
     assert valid.broker_reconciled is False
     with pytest.raises(ValidationError):
-        RiskFacts.model_validate(
-            {**valid.model_dump(mode="python"), "broker_reconciled": True}
+        RiskFacts.model_validate({**valid.model_dump(mode="python"), "broker_reconciled": True})
+
+
+def test_timeline_facts_carry_exact_window_and_admission_cursor() -> None:
+    facts = TimelineFacts(
+        rows=(),
+        hidden_event_count=7,
+        hidden_impact_event_count=3,
+        last_sequence=12,
+    )
+
+    assert facts.hidden_event_count == 7
+    assert facts.hidden_impact_event_count == 3
+    assert facts.last_sequence == 12
+
+    with pytest.raises(ValidationError):
+        TimelineFacts(
+            rows=(),
+            hidden_event_count=1,
+            hidden_impact_event_count=2,
+            last_sequence=12,
         )

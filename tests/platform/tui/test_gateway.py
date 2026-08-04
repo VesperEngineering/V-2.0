@@ -22,6 +22,16 @@ from vesper.platform.tui.contracts import (
     decode_payload,
 )
 from vesper.platform.tui.gateway import Gateway
+from vesper.platform.tui.protocol import MAX_FRAME_BYTES
+from vesper.platform.tui.views import (
+    AlertRow,
+    CommandSpecView,
+    EventPayload,
+    EventPresentation,
+    MetricRow,
+    ScreenMeta,
+    TimelineRow,
+)
 
 
 NOW = datetime(2026, 8, 3, tzinfo=timezone.utc)
@@ -40,7 +50,9 @@ def envelope(message_type: MessageType, sequence: int, payload: dict[str, object
     )
 
 
-def send(gateway: Gateway, client_id: str, message_type: MessageType, sequence: int, **payload: object):
+def send(
+    gateway: Gateway, client_id: str, message_type: MessageType, sequence: int, **payload: object
+):
     responses = gateway.handle(client_id, envelope(message_type, sequence, payload))
     assert len(responses) == 1
     return responses[0]
@@ -93,6 +105,82 @@ def unlock(gateway: Gateway, client_id: str, start: int = 1) -> None:
     )
 
 
+def presentation(gateway: Gateway) -> EventPresentation:
+    snapshot = gateway.snapshot()
+
+    def meta(view) -> ScreenMeta:
+        return ScreenMeta(
+            freshness=view.freshness,
+            as_of_utc=view.as_of_utc,
+            source=view.source,
+            error=view.error,
+        )
+
+    return EventPresentation(
+        generated_at_utc=snapshot.shell.generated_at_utc,
+        header=snapshot.shell.header,
+        control_version=snapshot.control_version,
+        control_hash=snapshot.control_hash,
+        window_omissions=snapshot.window_omissions,
+        impact=meta(snapshot.impact),
+        portfolio=meta(snapshot.portfolio),
+        orders=meta(snapshot.orders),
+        agents=meta(snapshot.agents),
+        models=meta(snapshot.models),
+        timeline=meta(snapshot.timeline),
+        risk=meta(snapshot.risk),
+        data=meta(snapshot.data),
+        memory=meta(snapshot.memory),
+        system=meta(snapshot.system),
+        portfolio_rank_source=snapshot.portfolio.rank_source,
+        timeline_hidden_event_count=snapshot.timeline.hidden_event_count,
+    )
+
+
+def metric_event(gateway: Gateway, value: float) -> EventPayload:
+    return EventPayload(
+        entity_type="metric-row",
+        entity_id="metric:cpu",
+        operation="upsert",
+        entity=MetricRow(
+            metric_id="metric:cpu",
+            value=value,
+            unit="percent",
+            freshness=Freshness.FRESH,
+            observed_at_utc=NOW,
+            error=None,
+        ),
+        targets=("system.metrics",),
+        presentation=presentation(gateway),
+    )
+
+
+def alert_event(gateway: Gateway) -> EventPayload:
+    return EventPayload(
+        entity_type="alert-row",
+        entity_id="alert:required",
+        operation="upsert",
+        entity=AlertRow(
+            alert_id="alert:required",
+            severity="urgent",
+            summary="Required alert",
+            created_at_utc=NOW,
+            resolved_at_utc=None,
+        ),
+        targets=("shell.alerts",),
+        presentation=presentation(gateway),
+    )
+
+
+def subscribe(gateway: Gateway, client_id: str = "subscriber") -> None:
+    setup(gateway, client_id)
+    assert gateway.poll(client_id) is not None
+    assert gateway.poll(client_id) is not None
+    response = send(gateway, client_id, MessageType.SNAPSHOT_REQUEST, 3)
+    assert gateway.poll(client_id) == response
+    assert gateway.poll(client_id) is None
+
+
 @pytest.fixture
 def gateway(tmp_path: Path) -> Gateway:
     return Gateway(tmp_path, clock=lambda: NOW)
@@ -121,15 +209,23 @@ def test_setup_is_first_run_only_and_every_new_session_unlocks(gateway: Gateway)
         confirmation="different",
     )
     assert decode_payload(denied).success is False
-    assert send(gateway, "second", MessageType.SNAPSHOT_REQUEST, 3).message_type is MessageType.PROTOCOL_ERROR
+    assert (
+        send(gateway, "second", MessageType.SNAPSHOT_REQUEST, 3).message_type
+        is MessageType.PROTOCOL_ERROR
+    )
 
 
-@pytest.mark.parametrize("message_type,payload", [
-    (MessageType.SNAPSHOT_REQUEST, {}),
-    (MessageType.LEASE_REQUEST, {"action": "take-control"}),
-    (MessageType.LOCK_REQUEST, {"action": "lock"}),
-])
-def test_locked_session_rejects_state_lease_and_lock(gateway: Gateway, message_type: MessageType, payload: dict[str, object]) -> None:
+@pytest.mark.parametrize(
+    "message_type,payload",
+    [
+        (MessageType.SNAPSHOT_REQUEST, {}),
+        (MessageType.LEASE_REQUEST, {"action": "take-control"}),
+        (MessageType.LOCK_REQUEST, {"action": "lock"}),
+    ],
+)
+def test_locked_session_rejects_state_lease_and_lock(
+    gateway: Gateway, message_type: MessageType, payload: dict[str, object]
+) -> None:
     response = send(gateway, "locked", message_type, 1, **payload)
     error = decode_payload(response)
     assert response.message_type is MessageType.PROTOCOL_ERROR
@@ -171,8 +267,14 @@ def test_lock_releases_lease_and_requires_fresh_unlock(gateway: Gateway) -> None
     assert locked.message_type is MessageType.LOCK_RESULT
     assert gateway.controller_id is None
 
-    assert send(gateway, "owner", MessageType.SNAPSHOT_REQUEST, 5).message_type is MessageType.PROTOCOL_ERROR
-    assert send(gateway, "owner", MessageType.LEASE_REQUEST, 6, action="take-control").message_type is MessageType.PROTOCOL_ERROR
+    assert (
+        send(gateway, "owner", MessageType.SNAPSHOT_REQUEST, 5).message_type
+        is MessageType.PROTOCOL_ERROR
+    )
+    assert (
+        send(gateway, "owner", MessageType.LEASE_REQUEST, 6, action="take-control").message_type
+        is MessageType.PROTOCOL_ERROR
+    )
     unlocked = send(gateway, "owner", MessageType.AUTH_UNLOCK, 7, password="correct horse")
     assert decode_payload(unlocked).success is True
 
@@ -191,7 +293,10 @@ def test_initial_snapshot_is_unknown_unavailable(gateway: Gateway) -> None:
     assert shell.header.rebalance_blockers is None
     assert shell.alerts is None
     assert len(shell.capabilities) == 31
-    assert all(item.state.value == "disabled" and item.reason == PHASE_ONE_REASON for item in shell.capabilities)
+    assert all(
+        item.state.value == "disabled" and item.reason == PHASE_ONE_REASON
+        for item in shell.capabilities
+    )
     assert snapshot.command_specs == ()
     views = {
         name: getattr(snapshot, name)
@@ -235,6 +340,250 @@ def test_state_version_zero_snapshot_is_one_cached_immutable_value(gateway: Gate
     second = gateway.snapshot()
     assert first is second
     assert first.model_dump_json() == second.model_dump_json()
+
+
+def test_push_requires_authentication_and_an_initial_snapshot(gateway: Gateway) -> None:
+    greet(gateway, "locked")
+    assert gateway.poll("locked") is not None
+    gateway.publish_event(metric_event(gateway, 1.0))
+    assert gateway.poll("locked") is None
+
+    setup(gateway, "viewer")
+    assert gateway.poll("viewer") is not None
+    assert gateway.poll("viewer") is not None
+    gateway.publish_event(metric_event(gateway, 2.0))
+    assert gateway.poll("viewer") is None
+
+    snapshot = send(gateway, "viewer", MessageType.SNAPSHOT_REQUEST, 3)
+    assert gateway.poll("viewer") == snapshot
+    gateway.publish_event(metric_event(gateway, 3.0))
+    pushed = gateway.poll("viewer")
+    assert pushed is not None
+    assert pushed.message_type is MessageType.EVENT
+    assert decode_payload(pushed).entity.value == 3.0
+
+
+def test_pending_metric_replacements_reuse_one_admitted_sequence(gateway: Gateway) -> None:
+    subscribe(gateway)
+
+    gateway.publish_event(metric_event(gateway, 1.0))
+    gateway.publish_event(metric_event(gateway, 2.0))
+    gateway.publish_event(metric_event(gateway, 3.0))
+    response = send(gateway, "subscriber", MessageType.PING, 4, nonce="after-metrics")
+
+    metric = gateway.poll("subscriber")
+    pong = gateway.poll("subscriber")
+    assert metric is not None and pong is not None
+    assert [metric.sequence, pong.sequence] == [4, 5]
+    assert metric.message_type is MessageType.EVENT
+    assert decode_payload(metric).entity.value == 3.0
+    assert pong == response
+    assert gateway.poll("subscriber") is None
+
+
+def test_pending_full_snapshots_replace_without_a_sequence_gap(gateway: Gateway) -> None:
+    subscribe(gateway)
+    original = gateway.snapshot()
+    for version in (1, 2, 3):
+        shell = original.shell.model_copy(update={"state_version": version})
+        gateway.publish_snapshot(original.model_copy(update={"shell": shell}))
+    response = send(gateway, "subscriber", MessageType.PING, 4, nonce="after-snapshots")
+
+    snapshot = gateway.poll("subscriber")
+    pong = gateway.poll("subscriber")
+    assert snapshot is not None and pong is not None
+    assert [snapshot.sequence, pong.sequence] == [4, 5]
+    assert snapshot.message_type is MessageType.SNAPSHOT
+    assert decode_payload(snapshot).snapshot.shell.state_version == 3
+    assert pong == response
+
+
+def test_projection_snapshot_uses_full_baseline_then_incremental_row_event(
+    gateway: Gateway,
+) -> None:
+    subscribe(gateway)
+    original = gateway.snapshot()
+    first_metric = MetricRow(
+        metric_id="metric:cpu",
+        value=10.0,
+        unit="percent",
+        freshness=Freshness.FRESH,
+        observed_at_utc=NOW,
+        error=None,
+    )
+    first = original.model_copy(
+        update={
+            "shell": original.shell.model_copy(update={"state_version": 1}),
+            "system": original.system.model_copy(update={"metrics": (first_metric,)}),
+        }
+    )
+    gateway.publish_snapshot(first)
+    baseline = gateway.poll("subscriber")
+    assert baseline is not None
+    assert baseline.message_type is MessageType.SNAPSHOT
+    assert gateway.poll("subscriber") is None
+
+    second_metric = first_metric.model_copy(update={"value": 20.0})
+    second = first.model_copy(
+        update={
+            "shell": first.shell.model_copy(update={"state_version": 2}),
+            "system": first.system.model_copy(update={"metrics": (second_metric,)}),
+        }
+    )
+    gateway.publish_snapshot(second)
+
+    incremental = gateway.poll("subscriber")
+    assert incremental is not None
+    assert incremental.message_type is MessageType.EVENT
+    assert incremental.state_version == 2
+    assert decode_payload(incremental).entity == second_metric
+    assert gateway.poll("subscriber") is None
+
+
+def test_projection_snapshot_uses_full_snapshot_when_command_specs_and_rows_change(
+    gateway: Gateway,
+) -> None:
+    subscribe(gateway)
+    original = gateway.snapshot()
+    first_metric = MetricRow(
+        metric_id="metric:cpu",
+        value=10.0,
+        unit="percent",
+        freshness=Freshness.FRESH,
+        observed_at_utc=NOW,
+        error=None,
+    )
+    first = original.model_copy(
+        update={
+            "shell": original.shell.model_copy(update={"state_version": 1}),
+            "system": original.system.model_copy(update={"metrics": (first_metric,)}),
+        }
+    )
+    gateway.publish_snapshot(first)
+    assert gateway.poll("subscriber") is not None
+
+    second_metric = first_metric.model_copy(update={"value": 20.0})
+    command_spec = CommandSpecView(
+        command_type="note.add",
+        payload_model="NotePayload",
+        capability_id="note.add",
+        reason_rule="optional",
+        confirmation_level="none",
+    )
+    second = first.model_copy(
+        update={
+            "shell": first.shell.model_copy(update={"state_version": 2}),
+            "command_specs": (command_spec,),
+            "system": first.system.model_copy(update={"metrics": (second_metric,)}),
+        }
+    )
+    gateway.publish_snapshot(second)
+
+    replacement = gateway.poll("subscriber")
+    assert replacement is not None
+    assert replacement.message_type is MessageType.SNAPSHOT
+    assert decode_payload(replacement).snapshot == second
+    assert gateway.poll("subscriber") is None
+
+
+def test_projection_snapshot_rejects_nonadvancing_state_changes_before_mutation(
+    gateway: Gateway,
+) -> None:
+    subscribe(gateway)
+    original = gateway.snapshot()
+    first = original.model_copy(
+        update={"shell": original.shell.model_copy(update={"state_version": 2})}
+    )
+    gateway.publish_snapshot(first)
+    assert gateway.poll("subscriber") is not None
+
+    gateway.publish_snapshot(first)
+    assert gateway.poll("subscriber") is None
+
+    same_version_change = first.model_copy(
+        update={
+            "shell": first.shell.model_copy(update={"generated_at_utc": NOW.replace(microsecond=1)})
+        }
+    )
+    with pytest.raises(ValueError, match="state version must advance"):
+        gateway.publish_snapshot(same_version_change)
+    regressive = first.model_copy(
+        update={"shell": first.shell.model_copy(update={"state_version": 1})}
+    )
+    with pytest.raises(ValueError, match="state version must advance"):
+        gateway.publish_snapshot(regressive)
+
+    assert gateway.snapshot() == first
+    assert gateway.poll("subscriber") is None
+
+
+def test_required_event_overflow_sends_resnapshot_required_then_closes(gateway: Gateway) -> None:
+    subscribe(gateway)
+    event = alert_event(gateway)
+
+    for _ in range(257):
+        gateway.publish_event(event)
+
+    terminal = gateway.poll("subscriber")
+    assert terminal is not None
+    assert terminal.sequence == 4
+    assert terminal.message_type is MessageType.PROTOCOL_ERROR
+    assert decode_payload(terminal) == ProtocolErrorPayload(
+        code="resnapshot-required",
+        safe_message="Outbound state was not preserved; request a new snapshot.",
+    )
+    with pytest.raises(ConnectionAbortedError, match="resnapshot-required"):
+        gateway.poll("subscriber")
+
+
+def test_oversized_projection_snapshot_is_rejected_before_queueing(
+    gateway: Gateway,
+) -> None:
+    subscribe(gateway)
+    original = gateway.snapshot()
+    rows = tuple(
+        TimelineRow(
+            event_id=f"event:{index}",
+            occurred_at_utc=NOW,
+            impact=False,
+            severity="active",
+            summary="x" * 512,
+            agent_id=None,
+            symbol=None,
+            model_id=None,
+            approval_id=None,
+            order_id=None,
+            evidence_ids=(),
+        )
+        for index in range(2_100)
+    )
+    oversized = original.model_copy(
+        update={
+            "shell": original.shell.model_copy(update={"state_version": 1}),
+            "timeline": original.timeline.model_copy(update={"rows": rows}),
+        }
+    )
+    assert len(SnapshotPayload(snapshot=oversized).model_dump_json().encode("utf-8")) > (
+        MAX_FRAME_BYTES
+    )
+
+    gateway.publish_snapshot(oversized)
+
+    terminal = gateway.poll("subscriber")
+    assert terminal is not None
+    assert terminal.message_type is MessageType.PROTOCOL_ERROR
+    assert decode_payload(terminal).code == "resnapshot-required"
+    with pytest.raises(ConnectionAbortedError, match="resnapshot-required"):
+        gateway.poll("subscriber")
+
+
+def test_lock_stops_future_pushes(gateway: Gateway) -> None:
+    subscribe(gateway, "owner")
+    locked = send(gateway, "owner", MessageType.LOCK_REQUEST, 4, action="lock")
+    gateway.publish_event(metric_event(gateway, 9.0))
+
+    assert gateway.poll("owner") == locked
+    assert gateway.poll("owner") is None
 
 
 def test_sequences_are_strict_incoming_and_monotonic_outgoing(gateway: Gateway) -> None:
@@ -285,23 +634,33 @@ def test_concurrent_outputs_receive_unique_monotonic_sequences(gateway: Gateway)
     assert results == [1] * 12
 
 
-def test_malformed_state_transition_does_not_call_snapshot(gateway: Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_malformed_state_transition_does_not_call_snapshot(
+    gateway: Gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(gateway, "snapshot", lambda: pytest.fail("state was accessed"))
     response = send(gateway, "new", MessageType.SNAPSHOT_REQUEST, 1)
     assert decode_payload(response).code == "locked"
 
 
-def test_authenticated_session_rejects_repeated_auth_without_losing_access(gateway: Gateway) -> None:
+def test_authenticated_session_rejects_repeated_auth_without_losing_access(
+    gateway: Gateway,
+) -> None:
     setup(gateway, "owner")
     repeated = send(gateway, "owner", MessageType.AUTH_UNLOCK, 3, password="wrong")
     assert decode_payload(repeated).code == "state"
-    assert send(gateway, "owner", MessageType.SNAPSHOT_REQUEST, 4).message_type is MessageType.SNAPSHOT
+    assert (
+        send(gateway, "owner", MessageType.SNAPSHOT_REQUEST, 4).message_type is MessageType.SNAPSHOT
+    )
 
 
-def test_cli_print_pipe_name_is_exclusive_and_opens_no_state(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_print_pipe_name_is_exclusive_and_opens_no_state(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     from vesper.platform.tui import cli
 
-    monkeypatch.setattr(cli, "default_pipe_name", lambda: r"\\.\pipe\vesper-v20-tui-0123456789abcdef")
+    monkeypatch.setattr(
+        cli, "default_pipe_name", lambda: r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
+    )
     monkeypatch.setattr(cli, "Gateway", lambda *args, **kwargs: pytest.fail("state opened"))
     monkeypatch.setattr(cli, "_default_state_root", lambda: pytest.fail("LocalAppData touched"))
     assert cli.main(["--print-pipe-name"]) == 0
@@ -319,19 +678,23 @@ def test_cli_parser_rejects_unapproved_arguments() -> None:
         cli.main(["--state", "C:\\safe"])
 
 
-def test_cli_requires_exact_current_pipe_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_cli_requires_exact_current_pipe_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from vesper.platform.tui import cli
 
     expected = r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
     monkeypatch.setattr(cli, "default_pipe_name", lambda: expected)
     monkeypatch.setattr(cli, "Gateway", lambda *args, **kwargs: pytest.fail("state opened"))
     with pytest.raises(SystemExit):
-        cli.main([
-            "--state-root",
-            str(tmp_path.resolve()),
-            "--pipe-name",
-            r"\\.\pipe\vesper-v20-tui-fedcba9876543210",
-        ])
+        cli.main(
+            [
+                "--state-root",
+                str(tmp_path.resolve()),
+                "--pipe-name",
+                r"\\.\pipe\vesper-v20-tui-fedcba9876543210",
+            ]
+        )
 
 
 def test_serving_state_root_must_equal_canonical_local_appdata(
@@ -367,6 +730,201 @@ def test_serving_state_root_rejects_reparse_alias(
     monkeypatch.setattr(cli, "_contains_reparse_point", lambda path: path == canonical)
     with pytest.raises(ValueError, match="reparse"):
         cli._serving_state_root(canonical)
+
+
+def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+    from vesper.platform.tui.ports import UnavailablePort
+    from vesper.platform.tui.projections import (
+        EventTimelineProjection,
+        LegacyStateProjection,
+        NativePlatformProjection,
+    )
+    from vesper.platform.tui.projections.repository import RepositoryProjection
+    from vesper.platform.tui.projections.windows_system import WindowsSystemProjection
+    from vesper.platform.tui.sqlite_ledger import LedgerClosedError
+
+    runtime = cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+    sources = runtime.loop._sources
+    assert tuple(sources) == (
+        "native.agents",
+        "native.portfolio",
+        "native.orders",
+        "native.models",
+        "legacy.risk",
+        "native.data",
+        "native.memory",
+        "repository.system",
+        "windows.system",
+        "events.timeline",
+    )
+    assert isinstance(sources["native.agents"], NativePlatformProjection)
+    assert isinstance(sources["native.portfolio"], UnavailablePort)
+    assert isinstance(sources["native.orders"], UnavailablePort)
+    assert isinstance(sources["native.models"], UnavailablePort)
+    assert isinstance(sources["legacy.risk"], LegacyStateProjection)
+    assert sources["legacy.risk"]._state_path == Path("data/engine_state.json")
+    assert isinstance(sources["native.data"], UnavailablePort)
+    assert isinstance(sources["native.memory"], UnavailablePort)
+    assert isinstance(sources["repository.system"], RepositoryProjection)
+    assert isinstance(sources["windows.system"], WindowsSystemProjection)
+    assert isinstance(sources["events.timeline"], EventTimelineProjection)
+    assert runtime.event_store._ledger.path == tmp_path / "operations.sqlite3"
+
+    runtime.close()
+    with pytest.raises(LedgerClosedError):
+        runtime.event_store.latest(1)
+
+
+def test_projection_runtime_degrades_corrupt_ledger_without_losing_other_sources(
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+    from vesper.platform.tui.ports import UnavailablePort
+    from vesper.platform.tui.projections import NativePlatformProjection
+
+    (tmp_path / "operations.sqlite3").write_bytes(b"not sqlite")
+    runtime = cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+
+    assert runtime.event_store is None
+    assert isinstance(runtime.loop._sources["events.timeline"], UnavailablePort)
+    assert isinstance(runtime.loop._sources["native.agents"], NativePlatformProjection)
+    runtime.close()
+
+
+def test_projection_runtime_degrades_one_adapter_initialization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+    from vesper.platform.tui.ports import UnavailablePort
+    from vesper.platform.tui.projections import NativePlatformProjection
+
+    def fail_windows(**kwargs):
+        raise OSError("host API unavailable")
+
+    monkeypatch.setattr(cli, "WindowsSystemProjection", fail_windows)
+    runtime = cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+
+    assert isinstance(runtime.loop._sources["windows.system"], UnavailablePort)
+    assert isinstance(runtime.loop._sources["native.agents"], NativePlatformProjection)
+    runtime.close()
+
+
+def test_projection_runtime_does_not_hide_adapter_programmer_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+
+    def fail_native(_repository_root: Path):
+        raise TypeError("adapter wiring bug")
+
+    monkeypatch.setattr(cli, "NativePlatformProjection", fail_native)
+
+    with pytest.raises(TypeError, match="adapter wiring bug"):
+        cli._build_projection_runtime(tmp_path, Gateway(tmp_path / "auth"))
+
+
+def test_cli_starts_projection_loop_and_closes_it_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+
+    expected_pipe = r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
+    started = threading.Event()
+    stopped = threading.Event()
+    closed = threading.Event()
+
+    class FakeLoop:
+        def run(self, stop_event: threading.Event) -> None:
+            started.set()
+            stop_event.wait(2)
+            stopped.set()
+
+    class FakeRuntime:
+        loop = FakeLoop()
+
+        def close(self) -> None:
+            assert stopped.is_set()
+            closed.set()
+
+    class FakeServer:
+        def __init__(self, name: str) -> None:
+            assert name == expected_pipe
+            self.ready_event = threading.Event()
+            self.ready_event.set()
+            self.active_client_count = 0
+
+        def serve(self, handler, stop_event, *, connection_factory) -> None:
+            assert connection_factory is not None
+            assert started.wait(1)
+            stop_event.set()
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(cli, "default_pipe_name", lambda: expected_pipe)
+    monkeypatch.setattr(cli, "WindowsPipeServer", FakeServer)
+    monkeypatch.setattr(
+        cli,
+        "_build_projection_runtime",
+        lambda state_root, gateway: FakeRuntime(),
+    )
+
+    assert cli.main([]) == 0
+    assert stopped.is_set()
+    assert closed.is_set()
+
+
+def test_projection_invariant_failure_stops_server_and_closes_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+
+    expected_pipe = r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
+    closed = threading.Event()
+
+    class FailingLoop:
+        def run(self, stop_event: threading.Event) -> None:
+            raise AssertionError("projection invariant")
+
+    class FakeRuntime:
+        loop = FailingLoop()
+
+        def close(self) -> None:
+            closed.set()
+
+    class FakeServer:
+        def __init__(self, name: str) -> None:
+            self.ready_event = threading.Event()
+            self.active_client_count = 0
+            self.stopped = threading.Event()
+
+        def serve(self, handler, stop_event, *, connection_factory) -> None:
+            assert stop_event.wait(1)
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(cli, "default_pipe_name", lambda: expected_pipe)
+    monkeypatch.setattr(cli, "WindowsPipeServer", FakeServer)
+    monkeypatch.setattr(
+        cli,
+        "_build_projection_runtime",
+        lambda state_root, gateway: FakeRuntime(),
+    )
+
+    with pytest.raises(RuntimeError, match="projection loop failed") as failure:
+        cli.main([])
+    assert isinstance(failure.value.__cause__, AssertionError)
+    assert closed.is_set()
 
 
 def test_coordinator_closes_admission_before_shutdown_sentinel(tmp_path: Path) -> None:
@@ -531,6 +1089,48 @@ def test_connection_close_releases_controller_and_new_context_starts_at_sequence
     coordinator.stop()
 
 
+def test_connection_factory_uses_one_fifo_for_responses_and_idle_pushes(
+    gateway: Gateway,
+) -> None:
+    from vesper.platform.tui.cli import _GatewayCoordinator, _gateway_connection_factory
+
+    setup(gateway, "seed")
+    gateway.disconnect("seed")
+    coordinator = _GatewayCoordinator(gateway)
+    connection, close = _gateway_connection_factory(coordinator)()
+
+    def receive(message: WireEnvelope) -> WireEnvelope:
+        body = connection(message.model_dump_json().encode("utf-8"))
+        assert body is not None
+        return WireEnvelope.model_validate_json(body)
+
+    receive(
+        envelope(
+            MessageType.CLIENT_HELLO,
+            1,
+            {
+                "client_version": "0.1.0",
+                "supported_schema_versions": [1],
+            },
+        )
+    )
+    receive(envelope(MessageType.AUTH_UNLOCK, 2, {"password": "correct horse"}))
+    receive(envelope(MessageType.SNAPSHOT_REQUEST, 3, {}))
+
+    gateway.publish_event(metric_event(gateway, 42.0))
+    first = receive(envelope(MessageType.PING, 4, {"nonce": "queued-after-push"}))
+    assert first.message_type is MessageType.EVENT
+    assert first.sequence == 4
+    pushed_response = connection.poll()
+    assert pushed_response is not None
+    pong = WireEnvelope.model_validate_json(pushed_response)
+    assert pong.message_type is MessageType.PONG
+    assert pong.sequence == 5
+
+    close()
+    coordinator.stop()
+
+
 def test_connection_close_after_coordinator_stop_releases_controller_exactly_once(
     gateway: Gateway,
     monkeypatch: pytest.MonkeyPatch,
@@ -555,7 +1155,13 @@ def test_connection_close_after_coordinator_stop_releases_controller_exactly_onc
         assert body is not None
         return WireEnvelope.model_validate_json(body)
 
-    round_trip(envelope(MessageType.CLIENT_HELLO, 1, {"client_version": "0.1.0", "supported_schema_versions": [1]}))
+    round_trip(
+        envelope(
+            MessageType.CLIENT_HELLO,
+            1,
+            {"client_version": "0.1.0", "supported_schema_versions": [1]},
+        )
+    )
     round_trip(envelope(MessageType.AUTH_UNLOCK, 2, {"password": "correct horse"}))
     round_trip(envelope(MessageType.LEASE_REQUEST, 3, {"action": "take-control"}))
     assert gateway.controller_id is not None

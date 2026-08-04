@@ -182,8 +182,7 @@ def test_schema_validation_rejects_inert_triggers_and_fake_fts(tmp_path) -> None
     with sqlite3.connect(inert_trigger) as connection:
         connection.execute("DROP TRIGGER events_no_update")
         connection.execute(
-            "CREATE TRIGGER events_no_update BEFORE UPDATE ON events "
-            "BEGIN SELECT 1; END"
+            "CREATE TRIGGER events_no_update BEFORE UPDATE ON events BEGIN SELECT 1; END"
         )
     with pytest.raises(LedgerSchemaError, match="schema"):
         TuiLedger(inert_trigger)
@@ -274,6 +273,37 @@ def test_since_validates_bounds_and_pages_ten_thousand_rows_without_gaps(tmp_pat
         with pytest.raises((TypeError, ValueError)):
             store.since(sequence, limit)  # type: ignore[arg-type]
     ledger.close()
+
+
+def test_latest_returns_newest_admission_window_and_exact_hidden_counts(tmp_path) -> None:
+    store = EventStore(tmp_path / "events.db")
+    for index in range(1, 6):
+        store.append(_event(index))
+
+    window = store.latest(2)
+
+    assert tuple(item.sequence for item in window.events) == (4, 5)
+    assert tuple(item.event_id for item in window.events) == ("event:4", "event:5")
+    assert window.hidden_event_count == 3
+    assert window.hidden_impact_event_count == 1
+    assert window.last_sequence == 5
+
+    for limit in (0, True, 10_001):
+        with pytest.raises((TypeError, ValueError)):
+            store.latest(limit)  # type: ignore[arg-type]
+    store.close()
+
+
+def test_latest_empty_store_has_zero_cursor_and_no_hidden_events(tmp_path) -> None:
+    store = EventStore(tmp_path / "events.db")
+
+    window = store.latest(100)
+
+    assert window.events == ()
+    assert window.hidden_event_count == 0
+    assert window.hidden_impact_event_count == 0
+    assert window.last_sequence == 0
+    store.close()
 
 
 def test_search_is_bounded_filtered_deterministic_and_fts_safe(tmp_path) -> None:

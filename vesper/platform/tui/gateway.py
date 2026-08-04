@@ -36,10 +36,13 @@ from .contracts import (
     WireEnvelope,
     decode_payload,
 )
+from .outbox import OutboundQueue
+from .snapshot import diff_snapshots
 from .views import (
     AgentsView,
     ConsoleSnapshot,
     DataView,
+    EventPayload,
     ImpactView,
     MemoryView,
     ModelsView,
@@ -99,7 +102,8 @@ class GatewaySession:
         self._authenticated = False
         self._greeted = False
         self._input_sequence = 0
-        self._output_sequence = 0
+        self._subscribed = False
+        self._outbox = OutboundQueue()
         self._lock = threading.RLock()
 
     @property
@@ -124,6 +128,7 @@ class GatewaySession:
     def lock(self) -> None:
         self._lease.release(self.client_id)
         self._authenticated = False
+        self._subscribed = False
 
 
 class Gateway:
@@ -141,7 +146,9 @@ class Gateway:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sessions: dict[str, GatewaySession] = {}
         self._sessions_lock = threading.Lock()
+        self._publication_lock = threading.RLock()
         self._snapshot = self._unavailable_snapshot()
+        self._has_projection_snapshot = False
 
     @property
     def controller_id(self) -> str | None:
@@ -162,6 +169,123 @@ class Gateway:
         if session is not None:
             with session._lock:
                 session.lock()
+                session._outbox.close()
+
+    def poll(self, client_id: SafeId) -> WireEnvelope | None:
+        """Return the next admitted frame without running any V20 service."""
+
+        client_id = _SAFE_ID_ADAPTER.validate_python(client_id, strict=True)
+        with self._sessions_lock:
+            session = self._sessions.get(client_id)
+        if session is None:
+            raise ConnectionAbortedError("connection-closed")
+        return session._outbox.pop()
+
+    def publish_snapshot(self, snapshot: ConsoleSnapshot) -> None:
+        """Atomically publish a complete projection to subscribed sessions."""
+
+        if not isinstance(snapshot, ConsoleSnapshot):
+            raise TypeError("snapshot must be a ConsoleSnapshot")
+        with self._publication_lock:
+            previous = self._snapshot
+            if self._has_projection_snapshot:
+                if snapshot == previous:
+                    return
+                if snapshot.shell.state_version <= previous.shell.state_version:
+                    raise ValueError("snapshot state version must advance")
+            events: tuple[EventPayload, ...] = ()
+            if self._has_projection_snapshot and self._can_publish_incrementally(
+                previous,
+                snapshot,
+            ):
+                try:
+                    events = diff_snapshots(previous, snapshot)
+                except (TypeError, ValueError):
+                    events = ()
+            self._snapshot = snapshot
+            first_projection = not self._has_projection_snapshot
+            self._has_projection_snapshot = True
+            if first_projection or not events:
+                self._publish_to_subscribers(
+                    MessageType.SNAPSHOT,
+                    SnapshotPayload(snapshot=snapshot),
+                    state_version=snapshot.shell.state_version,
+                    replace_key=("snapshot",),
+                )
+                return
+            for event in events:
+                self._publish_event_to_subscribers(
+                    event,
+                    state_version=snapshot.shell.state_version,
+                )
+
+    @staticmethod
+    def _can_publish_incrementally(
+        previous: ConsoleSnapshot,
+        current: ConsoleSnapshot,
+    ) -> bool:
+        return (
+            previous.command_specs == current.command_specs
+            and previous.shell.capabilities == current.shell.capabilities
+            and (previous.shell.alerts is None) == (current.shell.alerts is None)
+        )
+
+    def publish_event(self, event: EventPayload) -> None:
+        """Publish one validated event without calling a runtime or broker."""
+
+        if not isinstance(event, EventPayload):
+            raise TypeError("event must be an EventPayload")
+        with self._publication_lock:
+            self._publish_event_to_subscribers(
+                event,
+                state_version=self._snapshot.shell.state_version,
+            )
+
+    def _publish_event_to_subscribers(
+        self,
+        event: EventPayload,
+        *,
+        state_version: int,
+    ) -> None:
+        replace_key = (
+            ("metric", event.entity_id, *event.targets)
+            if event.entity_type == "metric-row"
+            else None
+        )
+        self._publish_to_subscribers(
+            MessageType.EVENT,
+            event,
+            state_version=state_version,
+            replace_key=replace_key,
+        )
+
+    def _publish_to_subscribers(
+        self,
+        message_type: MessageType,
+        payload: object,
+        *,
+        state_version: int,
+        replace_key: tuple[str, ...] | None,
+    ) -> None:
+        with self._sessions_lock:
+            sessions = tuple(self._sessions.values())
+        for session in sessions:
+            with session._lock:
+                if not session._authenticated or not session._subscribed:
+                    continue
+                try:
+                    admitted = self._emit(
+                        session,
+                        message_type,
+                        payload,
+                        state_version=state_version,
+                        replace_key=replace_key,
+                    )
+                except ConnectionAbortedError:
+                    session._subscribed = False
+                    continue
+                if admitted.message_type is MessageType.PROTOCOL_ERROR:
+                    session._subscribed = False
 
     def handle(
         self,
@@ -209,13 +333,16 @@ class Gateway:
                 payload = self._payload(envelope, object, session)
                 if isinstance(payload, WireEnvelope):
                     return (payload,)
-                return (
-                    self._emit(
-                        session,
-                        MessageType.SNAPSHOT,
-                        SnapshotPayload(snapshot=self.snapshot()),
-                    ),
+                snapshot = self.snapshot()
+                response = self._emit(
+                    session,
+                    MessageType.SNAPSHOT,
+                    SnapshotPayload(snapshot=snapshot),
+                    state_version=snapshot.shell.state_version,
                 )
+                if response.message_type is MessageType.SNAPSHOT:
+                    session._subscribed = True
+                return (response,)
             if envelope.message_type is MessageType.LEASE_REQUEST:
                 try:
                     decode_payload(envelope)
@@ -241,7 +368,9 @@ class Gateway:
                         LockResultPayload(locked=True),
                     ),
                 )
-            return (self._error(session, "direction", "Message type is not accepted from clients."),)
+            return (
+                self._error(session, "direction", "Message type is not accepted from clients."),
+            )
 
     def snapshot(self) -> ConsoleSnapshot:
         return self._snapshot
@@ -389,7 +518,9 @@ class Gateway:
         try:
             payload = decode_payload(envelope)
             if envelope.message_type is MessageType.AUTH_SETUP:
-                if not isinstance(payload, AuthSetupPayload) or os.path.lexists(self._verifier_path):
+                if not isinstance(payload, AuthSetupPayload) or os.path.lexists(
+                    self._verifier_path
+                ):
                     reason = "Password setup is unavailable."
                 else:
                     self._password_store.setup(payload.password, payload.confirmation)
@@ -440,16 +571,19 @@ class Gateway:
         )
 
     @staticmethod
-    def _emit(session: GatewaySession, message_type: MessageType, payload: object) -> WireEnvelope:
-        session._output_sequence += 1
-        sequence = session._output_sequence
+    def _emit(
+        session: GatewaySession,
+        message_type: MessageType,
+        payload: object,
+        *,
+        state_version: int = 0,
+        replace_key: tuple[str, ...] | None = None,
+    ) -> WireEnvelope:
         assert hasattr(payload, "model_dump")
-        return WireEnvelope(
-            schema_version=1,
-            message_id=f"server:{sequence}",
-            sequence=sequence,
-            state_version=0,
-            timestamp_utc=datetime.now(timezone.utc),
-            message_type=message_type,
-            payload=payload.model_dump(mode="json"),
+        return session._outbox.admit(
+            message_type,
+            payload,
+            state_version,
+            datetime.now(timezone.utc),
+            replace_key=replace_key,
         )

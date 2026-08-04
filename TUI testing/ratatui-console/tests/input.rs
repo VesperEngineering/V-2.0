@@ -202,19 +202,38 @@ impl TempCheckout {
         )
         .unwrap();
         fs::write(root.join("uv.lock"), "version = 1\n").unwrap();
-        let package = root.join("vesper/platform/tui");
-        fs::create_dir_all(&package).unwrap();
-        for file in [
-            "__init__.py",
-            "auth.py",
-            "cli.py",
-            "contracts.py",
-            "gateway.py",
-            "pipe_security.py",
-            "pipe_server.py",
-            "protocol.py",
-        ] {
-            fs::write(package.join(file), "# test module\n").unwrap();
+        let required_runtime_files = [
+            "vesper/__init__.py",
+            "vesper/platform/__init__.py",
+            "vesper/platform/agent_profiles.py",
+            "vesper/platform/contracts.py",
+            "vesper/platform/tui/__init__.py",
+            "vesper/platform/tui/auth.py",
+            "vesper/platform/tui/cli.py",
+            "vesper/platform/tui/contracts.py",
+            "vesper/platform/tui/event_store.py",
+            "vesper/platform/tui/gateway.py",
+            "vesper/platform/tui/outbox.py",
+            "vesper/platform/tui/pipe_security.py",
+            "vesper/platform/tui/pipe_server.py",
+            "vesper/platform/tui/ports.py",
+            "vesper/platform/tui/process_capture.py",
+            "vesper/platform/tui/protocol.py",
+            "vesper/platform/tui/snapshot.py",
+            "vesper/platform/tui/sqlite_ledger.py",
+            "vesper/platform/tui/stream.py",
+            "vesper/platform/tui/views.py",
+            "vesper/platform/tui/projections/__init__.py",
+            "vesper/platform/tui/projections/legacy_state.py",
+            "vesper/platform/tui/projections/native_platform.py",
+            "vesper/platform/tui/projections/repository.py",
+            "vesper/platform/tui/projections/timeline.py",
+            "vesper/platform/tui/projections/windows_system.py",
+        ];
+        for file in required_runtime_files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "# test module\n").unwrap();
         }
     }
 }
@@ -616,6 +635,31 @@ fn repository_root_rejects_marker_only_or_incomplete_lookalikes() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn repository_root_rejects_missing_live_projection_dependencies() {
+    let fallback = TempCheckout::new("dependency-missing-fallback", false);
+    for (index, required) in [
+        "vesper/platform/agent_profiles.py",
+        "vesper/platform/tui/snapshot.py",
+        "vesper/platform/tui/process_capture.py",
+        "vesper/platform/tui/projections/windows_system.py",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let checkout = TempCheckout::new(&format!("dependency-missing-{index}"), true);
+        fs::remove_file(checkout.root.join(required)).unwrap();
+        assert!(
+            resolve_repo_root_from(
+                &checkout.root.join("nested/deeper"),
+                &fallback.root.join("nested/deeper"),
+            )
+            .is_err(),
+            "accepted checkout missing {required}"
+        );
+    }
 }
 
 #[test]

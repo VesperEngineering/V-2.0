@@ -2,5 +2,6 @@
 
 from .legacy_state import LegacyStateProjection
 from .native_platform import NativePlatformProjection
+from .timeline import EventTimelineProjection
 
-__all__ = ["LegacyStateProjection", "NativePlatformProjection"]
+__all__ = ["EventTimelineProjection", "LegacyStateProjection", "NativePlatformProjection"]

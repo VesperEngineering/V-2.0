@@ -91,9 +91,7 @@ class WindowsPipeServer:
         """Count workers plus connected listeners not yet dispatched."""
 
         with self._lock:
-            count = self._dispatching_clients + sum(
-                worker.is_alive() for worker in self._workers
-            )
+            count = self._dispatching_clients + sum(worker.is_alive() for worker in self._workers)
             for listener in self._visible_listeners.values():
                 if listener.already_connected:
                     count += 1
@@ -255,11 +253,7 @@ class WindowsPipeServer:
         first_instance: bool,
         security_attributes: object | None = None,
     ) -> object:
-        access = (
-            win32pipe.PIPE_ACCESS_DUPLEX
-            | win32file.FILE_FLAG_OVERLAPPED
-            | win32con.WRITE_DAC
-        )
+        access = win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_OVERLAPPED | win32con.WRITE_DAC
         if first_instance:
             access |= win32pipe.FILE_FLAG_FIRST_PIPE_INSTANCE
         attributes = security_attributes or current_user_security_attributes()
@@ -346,14 +340,32 @@ class WindowsPipeServer:
         try:
             if connection_factory is not None:
                 connection_handler, close = connection_factory()
+            outbound = getattr(connection_handler, "poll", None)
+
+            def write_pending() -> bool:
+                if not callable(outbound):
+                    return True
+                for _ in range(256):
+                    try:
+                        pending = outbound()
+                    except BaseException:
+                        return False
+                    if pending is None:
+                        return True
+                    if not isinstance(pending, bytes) or not 0 < len(pending) <= MAX_FRAME_BYTES:
+                        return False
+                    if not self._write_all(handle, _LENGTH.pack(len(pending)) + pending):
+                        return False
+                return True
+
             while not self._stop_requested.is_set():
-                header = self._read_exact(handle, _LENGTH.size)
+                header = self._read_exact(handle, _LENGTH.size, write_pending)
                 if header is None:
                     return
                 size = _LENGTH.unpack(header)[0]
                 if not 0 < size <= MAX_FRAME_BYTES:
                     return
-                body = self._read_exact(handle, size)
+                body = self._read_exact(handle, size, write_pending)
                 if body is None:
                     return
                 try:
@@ -377,16 +389,28 @@ class WindowsPipeServer:
                 except BaseException:
                     pass
 
-    def _read_exact(self, handle: object, size: int) -> bytes | None:
+    def _read_exact(
+        self,
+        handle: object,
+        size: int,
+        idle_writer: Callable[[], bool] | None = None,
+    ) -> bytes | None:
         data = bytearray()
         while len(data) < size:
-            chunk = self._read_once(handle, size - len(data))
+            if idle_writer is not None and not idle_writer():
+                return None
+            chunk = self._read_once(handle, size - len(data), idle_writer)
             if not chunk:
                 return None
             data.extend(chunk)
         return bytes(data)
 
-    def _read_once(self, handle: object, size: int) -> bytes | None:
+    def _read_once(
+        self,
+        handle: object,
+        size: int,
+        idle_writer: Callable[[], bool] | None = None,
+    ) -> bytes | None:
         overlapped, event = self._new_overlapped()
         try:
             try:
@@ -396,7 +420,7 @@ class WindowsPipeServer:
                     return None
                 raise
             if status == winerror.ERROR_IO_PENDING:
-                transferred = self._finish_overlapped(handle, overlapped)
+                transferred = self._finish_overlapped(handle, overlapped, idle_writer)
                 if transferred is None:
                     return None
             elif status == 0:
@@ -435,10 +459,18 @@ class WindowsPipeServer:
                     win32file.CloseHandle(event)
         return True
 
-    def _finish_overlapped(self, handle: object, overlapped: object) -> int | None:
+    def _finish_overlapped(
+        self,
+        handle: object,
+        overlapped: object,
+        idle_writer: Callable[[], bool] | None = None,
+    ) -> int | None:
         event = overlapped.hEvent
         while True:
-            if win32event.WaitForSingleObject(event, _POLL_MILLISECONDS) == win32event.WAIT_OBJECT_0:
+            if (
+                win32event.WaitForSingleObject(event, _POLL_MILLISECONDS)
+                == win32event.WAIT_OBJECT_0
+            ):
                 try:
                     return win32file.GetOverlappedResult(handle, overlapped, False)
                 except pywintypes.error as error:
@@ -446,6 +478,9 @@ class WindowsPipeServer:
                         return None
                     raise
             if self._stop_requested.is_set():
+                self._cancel_and_finish(handle, overlapped, event)
+                return None
+            if idle_writer is not None and not idle_writer():
                 self._cancel_and_finish(handle, overlapped, event)
                 return None
 

@@ -26,7 +26,9 @@ from vesper.platform.tui.views import (
     ServiceRow,
     SourceRow,
     StrictModel,
+    TimelineRow,
     UtcDateTime,
+    WireUInt,
 )
 
 
@@ -53,9 +55,7 @@ class SourceSample(StrictModel, Generic[T]):
         elif self.freshness is Freshness.UNAVAILABLE:
             if self.value is not None or self.observed_at_utc is not None or self.error is None:
                 raise ValueError("unavailable samples require only an error reason")
-        elif any(
-            item is not None for item in (self.value, self.observed_at_utc, self.error)
-        ):
+        elif any(item is not None for item in (self.value, self.observed_at_utc, self.error)):
             raise ValueError("loading samples cannot report a value, time, or error")
         return self
 
@@ -120,6 +120,19 @@ class DataFacts(StrictModel):
 
 class MemoryFacts(StrictModel):
     rows: tuple[MemoryRow, ...]
+
+
+class TimelineFacts(StrictModel):
+    rows: tuple[TimelineRow, ...]
+    hidden_event_count: WireUInt
+    hidden_impact_event_count: WireUInt
+    last_sequence: WireUInt
+
+    @model_validator(mode="after")
+    def require_bounded_impact_count(self) -> TimelineFacts:
+        if self.hidden_impact_event_count > self.hidden_event_count:
+            raise ValueError("hidden impact events cannot exceed all hidden events")
+        return self
 
 
 class SystemFacts(StrictModel):
@@ -201,6 +214,11 @@ class DataReadPort(Protocol):
 @runtime_checkable
 class MemoryReadPort(Protocol):
     def read(self) -> SourceSample[MemoryFacts]: ...
+
+
+@runtime_checkable
+class TimelineReadPort(Protocol):
+    def read(self) -> SourceSample[TimelineFacts]: ...
 
 
 @runtime_checkable

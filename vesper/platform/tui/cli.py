@@ -14,12 +14,20 @@ from pathlib import Path
 from typing import Literal, Sequence
 
 from .contracts import SafeId, WireEnvelope
+from .event_store import EventStore
 from .gateway import Gateway
 from .pipe_security import current_logon_sid, pipe_name
 from .pipe_server import ConnectionFactory, WindowsPipeServer
+from .ports import UnavailablePort
+from .projections import EventTimelineProjection, LegacyStateProjection, NativePlatformProjection
+from .projections.repository import RepositoryProjection
+from .projections.windows_system import WindowsSystemProjection
+from .snapshot import SnapshotBuilder
+from .stream import ProjectionLoop
 
 _PARENT_IDLE_SECONDS = 30.0
 _COORDINATOR_WAIT_SECONDS = 10.0
+_OPERATIONAL_ADAPTER_ERRORS = (OSError, RuntimeError, ValueError)
 
 
 def default_pipe_name() -> str:
@@ -75,6 +83,109 @@ def _serving_state_root(value: Path | None) -> Path:
     return canonical
 
 
+@dataclass(frozen=True, slots=True)
+class _ProjectionRuntime:
+    loop: ProjectionLoop
+    event_store: EventStore | None
+
+    def close(self) -> None:
+        if self.event_store is not None:
+            self.event_store.close()
+
+
+def _build_projection_runtime(state_root: Path, gateway: Gateway) -> _ProjectionRuntime:
+    repository_root = Path(__file__).resolve().parents[3]
+    event_store: EventStore | None = None
+    try:
+        try:
+            event_store = EventStore(state_root / "operations.sqlite3")
+        except _OPERATIONAL_ADAPTER_ERRORS:
+            pass
+
+        try:
+            native = NativePlatformProjection(repository_root)
+            agents = native
+            portfolio = native.portfolio_port
+            orders = native.order_port
+        except _OPERATIONAL_ADAPTER_ERRORS:
+            agents = UnavailablePort(
+                "Native agent projection could not be initialized.",
+                source="native platform",
+            )
+            portfolio = UnavailablePort(
+                "No typed reconciled portfolio source is configured.",
+                source="native platform",
+            )
+            orders = UnavailablePort(
+                "No controller-owned typed order source is configured.",
+                source="native platform",
+            )
+
+        def unavailable(reason: str, source: str) -> UnavailablePort:
+            return UnavailablePort(reason, source=source)
+
+        try:
+            risk = LegacyStateProjection(repository_root, Path("data/engine_state.json"))
+        except _OPERATIONAL_ADAPTER_ERRORS:
+            risk = unavailable(
+                "Legacy risk projection could not be initialized.",
+                "legacy saved engine state",
+            )
+        try:
+            repository = RepositoryProjection(repository_root)
+        except _OPERATIONAL_ADAPTER_ERRORS:
+            repository = unavailable(
+                "Repository projection could not be initialized.",
+                "repository",
+            )
+        try:
+            windows = WindowsSystemProjection(disk_paths={"workspace": repository_root})
+        except _OPERATIONAL_ADAPTER_ERRORS:
+            windows = unavailable(
+                "Windows system projection could not be initialized.",
+                "windows-system",
+            )
+        timeline = (
+            EventTimelineProjection(event_store, limit=10_000)
+            if event_store is not None
+            else unavailable(
+                "Timeline event storage is unavailable.",
+                "tui event store",
+            )
+        )
+        sources = {
+            "native.agents": agents,
+            "native.portfolio": portfolio,
+            "native.orders": orders,
+            "native.models": UnavailablePort(
+                "No controller-owned typed model source is configured.",
+                source="native platform",
+            ),
+            "legacy.risk": risk,
+            "native.data": UnavailablePort(
+                "No controller-owned typed data-status source is configured.",
+                source="native platform",
+            ),
+            "native.memory": UnavailablePort(
+                "No controller-owned typed memory-status source is configured.",
+                source="native platform",
+            ),
+            "repository.system": repository,
+            "windows.system": windows,
+            "events.timeline": timeline,
+        }
+        loop = ProjectionLoop(
+            sources=sources,
+            builder=SnapshotBuilder(),
+            publisher=gateway,
+        )
+    except BaseException:
+        if event_store is not None:
+            event_store.close()
+        raise
+    return _ProjectionRuntime(loop=loop, event_store=event_store)
+
+
 @dataclass
 class _Request:
     client_id: SafeId
@@ -119,6 +230,11 @@ class _GatewayCoordinator:
         if request.error is not None:
             raise request.error
 
+    def poll(self, client_id: SafeId) -> WireEnvelope | None:
+        """Drain only the bounded connection outbox on the transport thread."""
+
+        return self._gateway.poll(client_id)
+
     def disconnect_after_stop(self, client_id: SafeId) -> None:
         """Release a late-closing session only after queued work is fully drained."""
 
@@ -160,6 +276,27 @@ class _GatewayCoordinator:
                 request.completed.set()
 
 
+class _GatewayConnection:
+    """One callable request path plus nonblocking idle-push polling."""
+
+    def __init__(self, coordinator: _GatewayCoordinator, client_id: SafeId) -> None:
+        self._coordinator = coordinator
+        self._client_id = client_id
+
+    def __call__(self, body: bytes) -> bytes | None:
+        envelope = WireEnvelope.model_validate_json(body)
+        responses = self._coordinator.handle(self._client_id, envelope)
+        if len(responses) != 1:
+            raise RuntimeError("gateway emitted an invalid response count")
+        return self.poll()
+
+    def poll(self) -> bytes | None:
+        envelope = self._coordinator.poll(self._client_id)
+        if envelope is None:
+            return None
+        return envelope.model_dump_json().encode("utf-8")
+
+
 def _gateway_connection_factory(coordinator: _GatewayCoordinator) -> ConnectionFactory:
     """Create one explicit authenticated-session boundary per pipe connection."""
 
@@ -168,12 +305,7 @@ def _gateway_connection_factory(coordinator: _GatewayCoordinator) -> ConnectionF
         close_lock = threading.Lock()
         closed = False
 
-        def handle(body: bytes) -> bytes | None:
-            envelope = WireEnvelope.model_validate_json(body)
-            responses = coordinator.handle(client_id, envelope)
-            if len(responses) != 1:
-                raise RuntimeError("phase-1 gateway emitted an invalid response count")
-            return responses[0].model_dump_json().encode("utf-8")
+        connection = _GatewayConnection(coordinator, client_id)
 
         def close() -> None:
             nonlocal closed
@@ -186,7 +318,7 @@ def _gateway_connection_factory(coordinator: _GatewayCoordinator) -> ConnectionF
             except CoordinatorClosedError:
                 coordinator.disconnect_after_stop(client_id)
 
-        return handle, close
+        return connection, close
 
     return factory
 
@@ -245,41 +377,77 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as error:
         parser.error(str(error))
     gateway = Gateway(state_root)
-    coordinator = _GatewayCoordinator(gateway)
-    server = WindowsPipeServer(selected_pipe)
+    runtime = _build_projection_runtime(state_root, gateway)
     stop_event = threading.Event()
-    connection_factory = _gateway_connection_factory(coordinator)
+    coordinator: _GatewayCoordinator | None = None
+    server: WindowsPipeServer | None = None
+    watcher: threading.Thread | None = None
+    projection_thread: threading.Thread | None = None
+    projection_errors: list[BaseException] = []
+    try:
+        coordinator = _GatewayCoordinator(gateway)
+        server = WindowsPipeServer(selected_pipe)
+        connection_factory = _gateway_connection_factory(coordinator)
 
-    def watch_parent() -> None:
-        exit_latch = _ParentExitLatch()
-        while not stop_event.is_set() and not server.ready_event.wait(0.1):
-            pass
-        while not stop_event.wait(0.1):
-            parent_alive = args.parent_pid is None or _parent_exists(args.parent_pid)
-            if exit_latch.observe(
-                parent_alive=parent_alive,
-                client_count=server.active_client_count,
-                now=time.monotonic(),
-            ):
+        def watch_parent() -> None:
+            exit_latch = _ParentExitLatch()
+            while not stop_event.is_set() and not server.ready_event.wait(0.1):
+                pass
+            while not stop_event.wait(0.1):
+                parent_alive = args.parent_pid is None or _parent_exists(args.parent_pid)
+                if exit_latch.observe(
+                    parent_alive=parent_alive,
+                    client_count=server.active_client_count,
+                    now=time.monotonic(),
+                ):
+                    stop_event.set()
+                    server.stop()
+                    return
+
+        def run_projection() -> None:
+            try:
+                runtime.loop.run(stop_event)
+            except BaseException as error:
+                projection_errors.append(error)
                 stop_event.set()
                 server.stop()
-                return
 
-    watcher = threading.Thread(target=watch_parent, name="v20-tui-parent-watch", daemon=True)
-    watcher.start()
-    try:
-        server.serve(
-            lambda body: body,
-            stop_event,
-            connection_factory=connection_factory,
+        projection_thread = threading.Thread(
+            target=run_projection,
+            name="v20-tui-projection",
+            daemon=True,
         )
-    except KeyboardInterrupt:
-        stop_event.set()
-        server.stop()
+        projection_thread.start()
+        watcher = threading.Thread(
+            target=watch_parent,
+            name="v20-tui-parent-watch",
+            daemon=True,
+        )
+        watcher.start()
+        try:
+            server.serve(
+                lambda body: body,
+                stop_event,
+                connection_factory=connection_factory,
+            )
+        except KeyboardInterrupt:
+            stop_event.set()
+            server.stop()
     finally:
         stop_event.set()
-        coordinator.stop()
-        watcher.join(timeout=1)
+        if server is not None:
+            server.stop()
+        if coordinator is not None:
+            coordinator.stop()
+        if watcher is not None:
+            watcher.join(timeout=1)
+        if projection_thread is not None:
+            projection_thread.join(timeout=2)
+        runtime.close()
+    if projection_thread is not None and projection_thread.is_alive():
+        raise RuntimeError("projection loop did not stop")
+    if projection_errors:
+        raise RuntimeError("projection loop failed") from projection_errors[0]
     return 0
 
 

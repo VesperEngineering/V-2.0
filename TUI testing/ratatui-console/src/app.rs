@@ -30,6 +30,34 @@ pub const SEND_TIMEOUT: Duration = Duration::from_millis(50);
 pub const MAX_EVENTS_PER_TICK: usize = 32;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(50);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
+const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
+    "vesper/__init__.py",
+    "vesper/platform/__init__.py",
+    "vesper/platform/agent_profiles.py",
+    "vesper/platform/contracts.py",
+    "vesper/platform/tui/__init__.py",
+    "vesper/platform/tui/auth.py",
+    "vesper/platform/tui/cli.py",
+    "vesper/platform/tui/contracts.py",
+    "vesper/platform/tui/event_store.py",
+    "vesper/platform/tui/gateway.py",
+    "vesper/platform/tui/outbox.py",
+    "vesper/platform/tui/pipe_security.py",
+    "vesper/platform/tui/pipe_server.py",
+    "vesper/platform/tui/ports.py",
+    "vesper/platform/tui/process_capture.py",
+    "vesper/platform/tui/protocol.py",
+    "vesper/platform/tui/snapshot.py",
+    "vesper/platform/tui/sqlite_ledger.py",
+    "vesper/platform/tui/stream.py",
+    "vesper/platform/tui/views.py",
+    "vesper/platform/tui/projections/__init__.py",
+    "vesper/platform/tui/projections/legacy_state.py",
+    "vesper/platform/tui/projections/native_platform.py",
+    "vesper/platform/tui/projections/repository.py",
+    "vesper/platform/tui/projections/timeline.py",
+    "vesper/platform/tui/projections/windows_system.py",
+];
 
 pub fn key_to_input(key: KeyEvent) -> Option<InputEvent> {
     if key.kind != KeyEventKind::Press {
@@ -665,18 +693,9 @@ fn is_v20_repo_root(candidate: &Path) -> bool {
     {
         return false;
     }
-    [
-        "__init__.py",
-        "auth.py",
-        "cli.py",
-        "contracts.py",
-        "gateway.py",
-        "pipe_security.py",
-        "pipe_server.py",
-        "protocol.py",
-    ]
-    .iter()
-    .all(|file| candidate.join("vesper/platform/tui").join(file).is_file())
+    REQUIRED_GATEWAY_RUNTIME_FILES
+        .iter()
+        .all(|file| candidate.join(file).is_file())
 }
 
 fn has_exact_declaration(document: &str, section: &str, declaration: &str) -> bool {

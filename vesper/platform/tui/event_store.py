@@ -38,6 +38,15 @@ class StoredEvent(EventInput):
     sequence: WireUInt
 
 
+class EventWindow(StrictModel):
+    """Newest bounded admission window plus exact omitted-event counts."""
+
+    events: tuple[StoredEvent, ...]
+    hidden_event_count: WireUInt
+    hidden_impact_event_count: WireUInt
+    last_sequence: WireUInt
+
+
 class EventFilters(StrictModel):
     """Exact, optional filters applied to full-text event search."""
 
@@ -197,6 +206,54 @@ class EventStore:
             ).fetchall()
         return tuple(self._decode_row(row) for row in rows)
 
+    def latest(self, limit: int) -> EventWindow:
+        """Return the newest admission window in ascending sequence order."""
+
+        self._require_open()
+        page_size = _require_plain_int(limit, name="limit", minimum=1, maximum=10_000)
+        with self._ledger.read() as connection:
+            rows = connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        events.*,
+                        COUNT(*) OVER () AS window_total_count,
+                        COALESCE(SUM(impact) OVER (), 0) AS window_impact_count,
+                        COALESCE(MAX(sequence) OVER (), 0) AS window_last_sequence,
+                        ROW_NUMBER() OVER (ORDER BY sequence DESC) AS newest_rank
+                    FROM events
+                )
+                SELECT *
+                FROM ranked
+                WHERE newest_rank <= ?
+                ORDER BY sequence ASC
+                """,
+                (page_size,),
+            ).fetchall()
+        if not rows:
+            return EventWindow(
+                events=(),
+                hidden_event_count=0,
+                hidden_impact_event_count=0,
+                last_sequence=0,
+            )
+        events = tuple(self._decode_row(row) for row in rows)
+        total_count = rows[0]["window_total_count"]
+        impact_count = rows[0]["window_impact_count"]
+        last_sequence = rows[0]["window_last_sequence"]
+        if any(
+            type(value) is not int or value < 0
+            for value in (total_count, impact_count, last_sequence)
+        ):
+            raise LedgerCorruptionError("stored event window metadata is invalid")
+        visible_impact_count = sum(int(event.impact) for event in events)
+        return EventWindow(
+            events=events,
+            hidden_event_count=total_count - len(events),
+            hidden_impact_event_count=impact_count - visible_impact_count,
+            last_sequence=last_sequence,
+        )
+
     def search(
         self,
         query: str,
@@ -241,7 +298,7 @@ class EventStore:
             SELECT e.*
             FROM event_search
             JOIN events AS e ON e.sequence = event_search.rowid
-            WHERE {' AND '.join(clauses)}
+            WHERE {" AND ".join(clauses)}
             ORDER BY bm25(event_search), e.sequence DESC
             LIMIT ?
         """

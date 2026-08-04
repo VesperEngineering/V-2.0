@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import struct
 import sys
 import threading
@@ -385,6 +386,113 @@ def test_none_handler_response_sends_no_frame_and_connection_can_continue() -> N
 
     assert not thread.is_alive()
     assert server.active_handle_count == 0
+
+
+def test_one_connection_worker_writes_push_without_client_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending: queue.Queue[bytes] = queue.Queue()
+    writes: list[tuple[int, bytes]] = []
+
+    class StreamingHandler:
+        def __call__(self, body: bytes) -> bytes:
+            return b"response:" + body
+
+        def poll(self) -> bytes | None:
+            try:
+                return pending.get_nowait()
+            except queue.Empty:
+                return None
+
+    handler = StreamingHandler()
+    pending.put(b"idle-push")
+
+    def factory():
+        return handler, lambda: None
+
+    server = WindowsPipeServer(pipe_name(current_logon_sid()))
+
+    def record_write(handle: object, data: bytes) -> bool:
+        writes.append((threading.get_ident(), data))
+        return True
+
+    def idle_read(handle: object, size: int, idle_writer) -> bytes | None:
+        assert idle_writer()
+        return None
+
+    monkeypatch.setattr(server, "_write_all", record_write)
+    monkeypatch.setattr(server, "_read_exact", idle_read)
+
+    server._serve_connection(object(), lambda body: body, factory)
+
+    assert writes == [(threading.get_ident(), _LENGTH.pack(len(b"idle-push")) + b"idle-push")]
+
+
+def test_real_pipe_delivers_idle_push_before_any_client_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = pipe_name(current_logon_sid())
+    pending: queue.Queue[bytes] = queue.Queue()
+    writer_threads: list[int] = []
+
+    class StreamingHandler:
+        def __call__(self, body: bytes) -> bytes:
+            return b"response:" + body
+
+        def poll(self) -> bytes | None:
+            try:
+                return pending.get_nowait()
+            except queue.Empty:
+                return None
+
+    handler = StreamingHandler()
+    server = WindowsPipeServer(name)
+    original_write = server._write_all
+
+    def record_write(handle: object, data: bytes) -> bool:
+        writer_threads.append(threading.get_ident())
+        return original_write(handle, data)
+
+    monkeypatch.setattr(server, "_write_all", record_write)
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=server.serve,
+        args=(lambda body: body, stop),
+        kwargs={"connection_factory": lambda: (handler, lambda: None)},
+    )
+    thread.start()
+    assert server.ready_event.wait(5)
+    client = _connect(name)
+    received: list[bytes] = []
+    read_errors: list[BaseException] = []
+
+    def read_push() -> None:
+        try:
+            received.append(_read_frame(client))
+        except BaseException as error:
+            read_errors.append(error)
+
+    reader = threading.Thread(target=read_push, daemon=True)
+    reader.start()
+    pending.put(b"idle-push")
+    reader.join(timeout=2)
+    delivered_without_input = not reader.is_alive() and received == [b"idle-push"]
+    try:
+        if delivered_without_input:
+            _write_frame(client, b"request")
+            assert _read_frame(client) == b"response:request"
+    finally:
+        stop.set()
+        server.stop()
+        thread.join(timeout=5)
+        win32file.CloseHandle(client)
+        reader.join(timeout=2)
+
+    assert delivered_without_input
+    assert read_errors == []
+    assert len(writer_threads) == 2
+    assert len(set(writer_threads)) == 1
+    assert not thread.is_alive()
 
 
 def test_external_stop_event_cancels_waiting_listener_without_leaks() -> None:
