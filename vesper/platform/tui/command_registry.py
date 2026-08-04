@@ -12,6 +12,8 @@ from typing import cast
 
 from pydantic import TypeAdapter
 
+from vesper.platform.contracts import AgentRole
+
 from .command_contracts import (
     COMMAND_SPECS,
     MAX_COMMAND_PAYLOAD_BYTES,
@@ -21,6 +23,7 @@ from .command_contracts import (
     CommandReceipt,
     CommandRequest,
     CommandType,
+    CompressMemoryPayload,
     NoteAddPayload,
     ReceiptStatus,
 )
@@ -31,7 +34,13 @@ from .command_policy import (
     EvaluatedPrerequisites,
     canonical_request_hash,
 )
-from .command_ports import DISABLED_COMMAND_REASONS, PlatformCommandPort, PortResult
+from .compression import CompressionReceipt
+from .command_ports import (
+    DISABLED_COMMAND_REASONS,
+    MemoryCommandPort,
+    PlatformCommandPort,
+    PortResult,
+)
 from .command_store import (
     CommandClaim,
     CommandStore,
@@ -51,6 +60,7 @@ _HANDLER_KEYS: Mapping[CommandType, str] = MappingProxyType(
         "approval.hold": "approval.hold",
         "approval.reject": "approval.reject",
         "agent.enqueue": "agent.enqueue",
+        "memory.compress-now": "memory.compress-now",
     }
 )
 _EXTERNAL_HANDLERS = {
@@ -113,13 +123,14 @@ def _sanitize_result(
 
 
 class CommandRegistry:
-    """Authorize, persist, execute, and recover the five reviewed handlers."""
+    """Authorize, persist, execute, and recover reviewed command handlers."""
 
     def __init__(
         self,
         ledger: Path | TuiLedger,
         port: PlatformCommandPort,
         *,
+        memory_port: MemoryCommandPort | None = None,
         policy: CommandPolicy | None = None,
         specs: tuple[CommandSpecView, ...] = COMMAND_SPECS,
         clock: Callable[[], datetime] = _utc_now,
@@ -139,6 +150,7 @@ class CommandRegistry:
         if type(claim_lease) is not timedelta or claim_lease <= timedelta(0):
             raise ValueError("claim lease must be a positive timedelta")
         self._port = port
+        self._memory_port = memory_port
         self._policy = CommandPolicy() if policy is None else policy
         if type(self._policy) is not CommandPolicy:
             raise TypeError("policy must be CommandPolicy")
@@ -160,6 +172,15 @@ class CommandRegistry:
     def specs(self) -> tuple[CommandSpecView, ...]:
         self._require_open()
         return tuple(self._specs.values())
+
+    @property
+    def enabled_command_types(self) -> tuple[CommandType, ...]:
+        """Return handlers currently backed by a reviewed healthy adapter."""
+
+        self._require_open()
+        return tuple(
+            command_type for command_type in self._specs if self._handler_enabled(command_type)
+        )
 
     def __enter__(self) -> CommandRegistry:
         self._require_open()
@@ -192,6 +213,16 @@ class CommandRegistry:
             raise TypeError("context must be CommandContext")
         if type(request) is not CommandRequest:
             raise TypeError("request must be CommandRequest")
+        context = CommandContext.model_validate(
+            context.model_dump(mode="python", warnings=False),
+            strict=True,
+        )
+        request = CommandRequest.model_validate(
+            request.model_dump(mode="python", warnings=False),
+            strict=True,
+        )
+        if request.command_type == "memory.compress-now":
+            self._require_memory_agent(request)
         handler_key = _HANDLER_KEYS.get(request.command_type)
         if context.authenticated and context.owns_control_lease:
             reconnect_receipt = self._store.exact_operator_replay(
@@ -210,7 +241,7 @@ class CommandRegistry:
             )
         else:
             decision = self._policy.authorize(context, request, spec)
-        if decision.allowed and request.command_type not in _HANDLER_KEYS:
+        if decision.allowed and not self._handler_enabled(request.command_type):
             decision = AuthorizationDecision(
                 allowed=False,
                 code="capability-disabled",
@@ -271,6 +302,15 @@ class CommandRegistry:
                     continue
                 recovered.append(self._execute_claimed(request, context, claim))
                 continue
+            if request.command_type == "memory.compress-now":
+                recovered.append(
+                    self._recover_memory_command(
+                        request,
+                        context,
+                        max(now, self._now()),
+                    )
+                )
+                continue
             if request.command_type not in _EXTERNAL_HANDLERS:
                 raise LedgerCorruptionError("recoverable command has no reviewed handler")
             state = self._port.recover(request.command_id, request)
@@ -329,6 +369,58 @@ class CommandRegistry:
             self._worker_id,
             now,
             now + self._claim_lease,
+        )
+
+    def _recover_memory_command(
+        self,
+        request: CommandRequest,
+        context: CommandContext,
+        now: datetime,
+    ) -> CommandReceipt:
+        recovered_receipt: CompressionReceipt | None = None
+        recovery_conflict = False
+        memory_port = self._memory_port
+        try:
+            self._require_memory_agent(request)
+        except ValueError:
+            recovery_conflict = True
+        if not recovery_conflict:
+            if not self._memory_port_healthy() or memory_port is None:
+                recovery_conflict = True
+            else:
+                try:
+                    candidate = memory_port.lookup_receipt(request.command_id)
+                    if candidate is not None:
+                        recovered_receipt = self._validate_compression_receipt(
+                            candidate,
+                            request,
+                        )
+                except Exception:
+                    recovery_conflict = True
+        claim = self._claim_for_recovery(request.command_id, now)
+        if claim is None:
+            return self._current_receipt(request.command_id)
+        if recovery_conflict:
+            return self._store.finish(
+                request.command_id,
+                claim.claim_token,
+                ReceiptStatus.FAILED,
+                None,
+                max(now, self._now()),
+                code="manual-intervention-required",
+                safe_message=_MANUAL_INTERVENTION_MESSAGE,
+            )
+        if recovered_receipt is None:
+            return self._execute_claimed(request, context, claim)
+        result = _sanitize_result(recovered_receipt.model_dump(mode="json"))
+        return self._store.finish(
+            request.command_id,
+            claim.claim_token,
+            ReceiptStatus.COMPLETED,
+            result,
+            max(now, self._now()),
+            code="completed",
+            safe_message="Context compression completed.",
         )
 
     def _execute_claimed(
@@ -408,7 +500,73 @@ class CommandRegistry:
                 request.command_id,
                 cast(AgentEnqueuePayload, request.payload),
             )
+        if request.command_type == "memory.compress-now":
+            if not self._memory_port_healthy():
+                return PortResult(
+                    ok=False,
+                    code="capability-disabled",
+                    safe_message=DISABLED_COMMAND_REASONS["memory.compress-now"],
+                )
+            payload = cast(CompressMemoryPayload, request.payload)
+            memory_port = self._memory_port
+            if memory_port is None:
+                raise LedgerCorruptionError("healthy memory port disappeared")
+            receipt = self._validate_compression_receipt(
+                memory_port.compress_now(request.command_id, payload.agent_id),
+                request,
+            )
+            return PortResult(
+                ok=True,
+                code="completed",
+                safe_message="Context compression completed.",
+                result=receipt.model_dump(mode="json"),
+            )
         raise LedgerCorruptionError("claimed command has no reviewed external handler")
+
+    @staticmethod
+    def _require_memory_agent(request: CommandRequest) -> str:
+        payload = cast(CompressMemoryPayload, request.payload)
+        try:
+            return AgentRole(payload.agent_id).value
+        except ValueError as exc:
+            raise ValueError("agent_id must name an approved V20 agent") from exc
+
+    @staticmethod
+    def _validate_compression_receipt(
+        receipt: object,
+        request: CommandRequest,
+    ) -> CompressionReceipt:
+        if type(receipt) is not CompressionReceipt:
+            raise TypeError("memory port must return CompressionReceipt")
+        validated = CompressionReceipt.model_validate(
+            receipt.model_dump(mode="python"),
+            strict=True,
+        )
+        payload = cast(CompressMemoryPayload, request.payload)
+        if validated.command_id != request.command_id or validated.agent_id != payload.agent_id:
+            raise ValueError("memory port receipt does not match the command")
+        return validated
+
+    def _handler_enabled(self, command_type: CommandType) -> bool:
+        if command_type == "memory.compress-now":
+            return self._memory_port_healthy()
+        return command_type in _HANDLER_KEYS
+
+    def _memory_port_healthy(self) -> bool:
+        if self._memory_port is None:
+            return False
+        try:
+            healthy = self._memory_port.healthy
+            compress_now = getattr(self._memory_port, "compress_now", None)
+            lookup_receipt = getattr(self._memory_port, "lookup_receipt", None)
+        except Exception:
+            return False
+        return (
+            type(healthy) is bool
+            and healthy
+            and callable(compress_now)
+            and callable(lookup_receipt)
+        )
 
     def _recovery_context(self, accepted) -> CommandContext:
         request = accepted.request

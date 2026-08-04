@@ -16,6 +16,8 @@ from vesper.platform.tui.command_contracts import (
     ApprovalPayload,
     CommandRequest,
 )
+from vesper.platform.tui.compression import CompressionReceipt
+from vesper.platform.tui.views import SafeId
 
 
 RecoveryStatus = Literal["not-started", "completed", "failed", "unknown"]
@@ -101,6 +103,24 @@ class PlatformCommandPort(RecoverableCommandPort, Protocol):
     ) -> PortResult: ...
 
     def enqueue(self, command_id: str, payload: AgentEnqueuePayload) -> PortResult: ...
+
+
+class MemoryCommandPort(Protocol):
+    """Injected context-compression adapter; absent and unhealthy mean disabled."""
+
+    @property
+    def healthy(self) -> bool: ...
+
+    def compress_now(
+        self,
+        command_id: SafeId,
+        agent_id: SafeId,
+    ) -> CompressionReceipt: ...
+
+    def lookup_receipt(
+        self,
+        command_id: SafeId,
+    ) -> CompressionReceipt | None: ...
 
 
 class LocalPlatformCommandPort:
