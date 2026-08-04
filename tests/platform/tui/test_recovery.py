@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from vesper.platform.tui.gateway import Gateway
 from vesper.platform.tui.recovery import (
     RECOVERY_CHECK_IDS,
+    RecoveryAuthorizationGate,
     RecoveryCheck,
     RecoveryCheckId,
+    RecoveryConfirmation,
+    RecoveryConfirmationChallenge,
     RecoveryService,
 )
 
@@ -132,3 +135,98 @@ def test_gateway_exposes_read_only_recovery_report(tmp_path: Path) -> None:
 
     assert first.mode == second.mode == "recovery"
     assert first.broker_actions_enabled is second.broker_actions_enabled is False
+
+
+def _explicit_confirmation(
+    challenge: RecoveryConfirmationChallenge,
+) -> RecoveryConfirmation:
+    return RecoveryConfirmation(
+        challenge_id=challenge.challenge_id,
+        report_fingerprint=challenge.report_fingerprint,
+        confirmed=True,
+    )
+
+
+def test_fully_reconciled_unclean_report_requires_exact_confirmation() -> None:
+    report = RecoveryService(_Probe(), clock=lambda: NOW).inspect()
+    gate = RecoveryAuthorizationGate(
+        clock=lambda: NOW,
+        id_factory=lambda: "recovery-confirmation-1",
+    )
+
+    assert gate.authorize(report, None).authorized is False
+
+    challenge = gate.begin_confirmation(report)
+
+    assert challenge is not None
+    assert gate.authorize(report, _explicit_confirmation(challenge)).authorized is True
+    assert report.broker_actions_enabled is False
+
+
+def test_unknown_or_incomplete_report_cannot_start_confirmation() -> None:
+    unknown = RecoveryService(
+        _Probe(stop_failure=True),
+        clock=lambda: NOW,
+    ).inspect()
+    unavailable = RecoveryService(
+        _Probe(states={RecoveryCheckId.ACTIVE_WORK: "unavailable"}),
+        clock=lambda: NOW,
+    ).inspect()
+    mismatch = RecoveryService(
+        _Probe(states={RecoveryCheckId.BROKER_RECONCILIATION: "failed"}),
+        clock=lambda: NOW,
+    ).inspect()
+    gate = RecoveryAuthorizationGate(
+        clock=lambda: NOW,
+        id_factory=lambda: "recovery-confirmation-1",
+    )
+
+    assert gate.begin_confirmation(unknown) is None
+    assert gate.begin_confirmation(unavailable) is None
+    assert gate.begin_confirmation(mismatch) is None
+    assert gate.authorize(unknown, None).reason == "recovery-report-not-eligible"
+
+
+def test_confirmation_is_bound_to_exact_report_and_latest_challenge() -> None:
+    report = RecoveryService(_Probe(), clock=lambda: NOW).inspect()
+    changed_report = RecoveryService(
+        _Probe(),
+        clock=lambda: NOW + timedelta(seconds=1),
+    ).inspect()
+    ids = iter(("recovery-confirmation-1", "recovery-confirmation-2"))
+    gate = RecoveryAuthorizationGate(clock=lambda: NOW, id_factory=lambda: next(ids))
+    old_challenge = gate.begin_confirmation(report)
+    assert old_challenge is not None
+    current_challenge = gate.begin_confirmation(report)
+    assert current_challenge is not None
+
+    assert (
+        gate.authorize(report, _explicit_confirmation(old_challenge)).reason == "confirmation-stale"
+    )
+    assert (
+        gate.authorize(changed_report, _explicit_confirmation(current_challenge)).reason
+        == "confirmation-report-mismatch"
+    )
+
+
+def test_confirmation_expires_and_successful_confirmation_cannot_replay() -> None:
+    report = RecoveryService(_Probe(), clock=lambda: NOW).inspect()
+    current_time = NOW
+    ids = iter(("recovery-confirmation-1", "recovery-confirmation-2"))
+    gate = RecoveryAuthorizationGate(
+        clock=lambda: current_time,
+        id_factory=lambda: next(ids),
+    )
+    challenge = gate.begin_confirmation(report)
+    assert challenge is not None
+    confirmation = _explicit_confirmation(challenge)
+
+    current_time = NOW + timedelta(minutes=5, microseconds=1)
+    assert gate.authorize(report, confirmation).reason == "confirmation-stale"
+
+    current_time = NOW
+    fresh = gate.begin_confirmation(report)
+    assert fresh is not None
+    fresh_confirmation = _explicit_confirmation(fresh)
+    assert gate.authorize(report, fresh_confirmation).authorized is True
+    assert gate.authorize(report, fresh_confirmation).reason == "confirmation-stale"
