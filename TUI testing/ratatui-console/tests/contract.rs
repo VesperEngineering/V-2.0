@@ -673,7 +673,7 @@ fn decode_base64(value: &str) -> Vec<u8> {
 #[test]
 fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     let bundle = python_contract_bundle();
-    assert_eq!(bundle.fixtures.len(), 19);
+    assert_eq!(bundle.fixtures.len(), 22);
     let mut seen = Vec::new();
     for fixture in bundle.fixtures {
         let envelope: Envelope =
@@ -683,7 +683,7 @@ fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     }
     seen.sort_by_key(|value| value.to_string());
     seen.dedup();
-    assert_eq!(seen.len(), 19);
+    assert_eq!(seen.len(), 22);
     assert_eq!(rust_contract_descriptor(), bundle.descriptor);
 }
 
@@ -693,7 +693,7 @@ fn rust_contract_descriptor() -> Vec<u8> {
         "field_catalog_scope": [
             "envelope", "payloads", "shell", "snapshot-observability-metadata",
             "event-presentation-metadata", "repository-status", "governed-command-contracts",
-            "live-readiness"
+            "live-readiness", "agent-chat"
         ],
         "integer_fields": [
             "envelope.sequence",
@@ -708,12 +708,22 @@ fn rust_contract_descriptor() -> Vec<u8> {
             "event.presentation.header.agent_queue_length",
             "event.presentation.timeline_hidden_event_count",
             "event.presentation.window_omissions[].omitted_count",
-            "repository.unpushed_commit_count"
+            "repository.unpushed_commit_count",
+            "chat-history-request.limit",
+            "chat-event.chunk_sequence",
+            "chat-event.token_count"
         ],
         "messages": {
             "auth-result": ["success", "access_state", "reason"],
             "auth-setup": ["password", "confirmation"],
             "auth-unlock": ["password"],
+            "chat-event": [
+                "event_id", "agent_id", "message_id", "role", "operation",
+                "chunk_sequence", "text", "token_count", "message_created_at_utc",
+                "occurred_at_utc", "validation_receipt_id", "raw_text_sha256"
+            ],
+            "chat-history-request": ["agent_id", "limit", "cursor"],
+            "chat-history-result": ["agent_id", "next_cursor"],
             "client-hello": ["client_version", "supported_schema_versions"],
             "command": ["request"],
             "command-receipt": ["receipt"],
@@ -734,7 +744,16 @@ fn rust_contract_descriptor() -> Vec<u8> {
         "nullable_required": [
             "auth-result.reason", "lease-result.reason", "search-results.error",
             "search-results.results[].occurred_at_utc",
-            "search-results.results[].context_only", "command.request.reason",
+            "search-results.results[].context_only",
+            "chat-history-request.cursor",
+            "chat-history-result.next_cursor",
+            "chat-event.chunk_sequence",
+            "chat-event.text",
+            "chat-event.token_count",
+            "chat-event.occurred_at_utc",
+            "chat-event.validation_receipt_id",
+            "chat-event.raw_text_sha256",
+            "command.request.reason",
             "command-receipt.receipt.accepted_at_utc",
             "command-receipt.receipt.finished_at_utc",
             "command-receipt.receipt.result", "event.entity", "snapshot.shell.alerts",
@@ -1082,7 +1101,7 @@ fn rejects_wrong_schema_negative_versions_and_invalid_ids() {
 }
 
 #[test]
-fn parses_all_nineteen_strict_payloads() {
+fn parses_all_twenty_two_strict_payloads() {
     let snapshot = String::from_utf8(shared_snapshot_fixture()).unwrap();
     let event = serde_json::to_string(&serde_json::json!({
         "entity_type": "alert-row",
@@ -1127,6 +1146,18 @@ fn parses_all_nineteen_strict_payloads() {
         (
             "search-results",
             r#"{"request_id":1,"indexed_state_version":0,"results":[{"kind":"note","record_type":"note","record_id":"note:1","label":"AAPL note","summary":"Review concentration risk.","occurred_at_utc":"2026-08-03T00:00:00Z","source":"operator","screen":"portfolio","context_only":true}],"error":null}"#.to_owned(),
+        ),
+        (
+            "chat-history-request",
+            r#"{"agent_id":"v20-product","limit":20,"cursor":null}"#.to_owned(),
+        ),
+        (
+            "chat-event",
+            r#"{"event_id":"chat:event:1","agent_id":"v20-product","message_id":"chat:message:1","role":"agent","operation":"chunk","chunk_sequence":1,"text":"Working","token_count":null,"message_created_at_utc":"2026-08-03T00:00:00Z","occurred_at_utc":null,"validation_receipt_id":null,"raw_text_sha256":null}"#.to_owned(),
+        ),
+        (
+            "chat-history-result",
+            r#"{"agent_id":"v20-product","next_cursor":null}"#.to_owned(),
         ),
         (
             "command",

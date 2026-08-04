@@ -1,23 +1,25 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Instant;
 
 use ratatui::layout::Rect;
 
+use crate::chat::{AgentId, ChatApplyOutcome, ChatEvent, ChatStore};
 use crate::command::{CommandDraft, CommandTracker, PrepareOutcome, TrackedCommandSummary};
 use crate::confirm::{Selection, begin_confirmation, submit_confirmation};
 use crate::contract::{
-    AccessState as WireAccessState, AgentStage, CapabilityState, CommandReceipt, CommandRequest,
-    CommandType, ConsoleSnapshot, Envelope, Freshness, LeaseStatus, MemoryStatus, Message,
-    PasswordString, SearchRequestPayload,
+    AccessState as WireAccessState, AgentStage, CapabilityState, ChatEventPayload,
+    ChatHistoryRequestPayload, CommandReceipt, CommandRequest, CommandType, ConfirmationLevel,
+    ConsoleSnapshot, Envelope, Freshness, LeaseStatus, MemoryStatus, Message, PasswordString,
+    ReasonRule, SearchRequestPayload,
 };
 use crate::controls::{
     AgentEnqueueForm, AgentRouteDraft, ButtonState, ControlButton, ControlContext, ControlMenu,
-    ControlMenuEntry, ControlOverlay, LocalControl, ReasonForm, build_control_menu,
+    ControlMenuEntry, ControlOverlay, LocalControl, ReasonForm, build_control_menu, server_button,
 };
 use crate::detail::detail_area;
 use crate::input::InputEvent;
-use crate::layout::{DisplayMode, shell_layout};
+use crate::layout::{DisplayMode, chat_shell_layout, shell_layout};
 use crate::preferences::{LoadedPreferences, ScreenId, ScreenPreferences, UiPreferences};
 use crate::reducer::{EventEnvelope, ReduceOutcome as SnapshotReduceOutcome, SnapshotReducer};
 use crate::screens::{DetailKind, PerformancePeriod, ScreenState};
@@ -66,6 +68,8 @@ pub enum LocalMode {
     Filter,
     Menu,
     Help,
+    AgentSelector,
+    AgentChat,
     AgentInput,
     NoteEditor,
 }
@@ -113,6 +117,7 @@ pub enum ClientAction {
     RequestLock,
     RequestSnapshot,
     Search(SearchRequestPayload),
+    ChatHistoryRequest(ChatHistoryRequestPayload),
     Command(CommandRequest),
     SubmitInput(String),
     CloseTui,
@@ -209,9 +214,36 @@ struct ViewKey {
     show_search_detail: bool,
     search_return_screen: Option<Screen>,
     control_epoch: u64,
+    selected_chat_agent: Option<AgentId>,
+    chat_selector_index: usize,
+    chat_return_mode: LocalMode,
+    chat_feedback: Option<String>,
+    chat_scroll: BTreeMap<AgentId, ChatScrollState>,
+    pending_chat_history: BTreeSet<AgentId>,
 }
 
 struct ReceiptSequenceEvidence(CommandReceipt);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChatScrollState {
+    offset: usize,
+    follow_tail: bool,
+}
+
+#[derive(Debug)]
+struct PendingChatPage {
+    baseline_revision: u64,
+    candidate: ChatStore,
+}
+
+impl Default for ChatScrollState {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            follow_tail: true,
+        }
+    }
+}
 
 const STALE_CACHE_LABEL: &str = "STALE CACHE";
 const STALE_CACHE_CAPABILITY_REASON: &str = "Cached state cannot authorize actions.";
@@ -275,6 +307,14 @@ pub struct AppState {
     command_tracker: CommandTracker,
     receipt_sequence_evidence: BTreeMap<u64, ReceiptSequenceEvidence>,
     control_epoch: u64,
+    chat_store: ChatStore,
+    selected_chat_agent: Option<AgentId>,
+    chat_selector_index: usize,
+    chat_return_mode: LocalMode,
+    chat_feedback: Option<String>,
+    chat_scroll: BTreeMap<AgentId, ChatScrollState>,
+    pending_chat_history: BTreeSet<AgentId>,
+    pending_chat_pages: BTreeMap<AgentId, PendingChatPage>,
 }
 
 impl AppState {
@@ -336,6 +376,16 @@ impl AppState {
             command_tracker: CommandTracker::default(),
             receipt_sequence_evidence: BTreeMap::new(),
             control_epoch: 0,
+            chat_store: ChatStore::default(),
+            selected_chat_agent: None,
+            chat_selector_index: 0,
+            chat_return_mode: LocalMode::Browse,
+            chat_feedback: None,
+            chat_scroll: AgentId::all()
+                .map(|agent_id| (agent_id, ChatScrollState::default()))
+                .collect(),
+            pending_chat_history: BTreeSet::new(),
+            pending_chat_pages: BTreeMap::new(),
         }
     }
 
@@ -379,7 +429,11 @@ impl AppState {
     }
 
     pub fn set_terminal_area(&mut self, area: Rect) {
-        let shell_body = shell_layout(area, self.display_mode()).body;
+        let shell_body = if matches!(self.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+            chat_shell_layout(area, self.display_mode()).body
+        } else {
+            shell_layout(area, self.display_mode()).body
+        };
         let viewport = if self.snapshot.is_some()
             && self.search_detail().is_none()
             && matches!(
@@ -446,6 +500,44 @@ impl AppState {
 
     pub fn note_input(&self) -> &str {
         &self.local_input
+    }
+
+    pub fn chat_store(&self) -> &ChatStore {
+        &self.chat_store
+    }
+
+    pub fn selected_chat_agent(&self) -> Option<AgentId> {
+        self.selected_chat_agent
+    }
+
+    pub fn chat_selector_index(&self) -> usize {
+        self.chat_selector_index
+    }
+
+    pub fn chat_input(&self) -> &str {
+        &self.local_input
+    }
+
+    pub fn can_open_selected_chat(&self) -> bool {
+        self.selected_approved_agent().is_some()
+    }
+
+    pub fn chat_send_reason(&self) -> Option<String> {
+        self.chat_feedback
+            .clone()
+            .or_else(|| self.chat_send_disabled_reason())
+    }
+
+    pub fn chat_scroll_offset(&self, agent_id: AgentId) -> usize {
+        self.chat_scroll
+            .get(&agent_id)
+            .map_or(0, |state| state.offset)
+    }
+
+    pub fn chat_follows_tail(&self, agent_id: AgentId) -> bool {
+        self.chat_scroll
+            .get(&agent_id)
+            .is_none_or(|state| state.follow_tail)
     }
 
     pub fn set_performance_period(&mut self, period: PerformancePeriod) {
@@ -595,6 +687,26 @@ impl AppState {
                     "command-receipt",
                     "Duplicate receipt sequence has no exact reduced evidence.",
                 ));
+            }
+            if let Message::ChatEvent(payload) = &envelope.message {
+                let event = self.decode_chat_event(payload.clone())?;
+                let evidence = self
+                    .pending_chat_pages
+                    .get(&event.agent_id())
+                    .map(|page| &page.candidate)
+                    .unwrap_or(&self.chat_store);
+                return match evidence.replay_outcome(&event) {
+                    Ok(Some(ChatApplyOutcome::Ignored)) => Ok(ReduceOutcome::Ignored),
+                    Ok(Some(ChatApplyOutcome::Changed)) => unreachable!("replay cannot change"),
+                    Ok(None) => Err(self.fail_closed(
+                        "chat-event",
+                        "Duplicate chat sequence has no exact reduced evidence.",
+                    )),
+                    Err(_) => Err(self.fail_closed(
+                        "chat-event",
+                        "Duplicate chat event conflicts with reduced evidence.",
+                    )),
+                };
             }
             return Ok(ReduceOutcome::Ignored);
         }
@@ -964,6 +1076,72 @@ impl AppState {
                     Ok(ReduceOutcome::Ignored)
                 }
             }
+            Message::ChatEvent(payload) => {
+                if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
+                    return Err(
+                        self.fail_closed("state", "Chat event arrived before authentication.")
+                    );
+                }
+                self.observe_presentation_sequence(envelope.sequence)?;
+                let event = self.decode_chat_event(payload)?;
+                let agent_id = event.agent_id();
+                let outcome = if let Some(page) = self.pending_chat_pages.get_mut(&agent_id) {
+                    page.candidate.apply(event)
+                } else {
+                    self.chat_store.apply(event)
+                };
+                match outcome {
+                    Ok(ChatApplyOutcome::Changed) => {
+                        self.dirty = true;
+                        Ok(ReduceOutcome::Changed)
+                    }
+                    Ok(ChatApplyOutcome::Ignored) => Ok(ReduceOutcome::Ignored),
+                    Err(_) => Err(self.fail_closed(
+                        "chat-event",
+                        "Chat event conflicts with previously reduced evidence.",
+                    )),
+                }
+            }
+            Message::ChatHistoryResult(payload) => {
+                if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
+                    return Err(self.fail_closed(
+                        "state",
+                        "Chat history result arrived before authentication.",
+                    ));
+                }
+                self.observe_presentation_sequence(envelope.sequence)?;
+                let Some(agent_id) = AgentId::parse(payload.agent_id().as_str()) else {
+                    return Err(self.fail_closed(
+                        "chat-history",
+                        "Chat history result names an unapproved agent.",
+                    ));
+                };
+                if !self.pending_chat_history.remove(&agent_id) {
+                    return Err(self.fail_closed(
+                        "chat-history",
+                        "Chat history result has no matching request.",
+                    ));
+                }
+                if let Some(mut page) = self.pending_chat_pages.remove(&agent_id) {
+                    page.candidate
+                        .finish_history(agent_id, payload.next_cursor().cloned());
+                    if self
+                        .chat_store
+                        .replace_agent_from(&page.candidate, agent_id, page.baseline_revision)
+                        .is_err()
+                    {
+                        return Err(self.fail_closed(
+                            "chat-history",
+                            "Chat history page cannot merge into retained evidence safely.",
+                        ));
+                    }
+                } else {
+                    self.chat_store
+                        .finish_history(agent_id, payload.next_cursor().cloned());
+                }
+                self.dirty = true;
+                Ok(ReduceOutcome::Changed)
+            }
             Message::CommandReceipt(payload) => {
                 if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
                     return Err(
@@ -990,6 +1168,7 @@ impl AppState {
             | Message::LockRequest(_)
             | Message::SnapshotRequest(_)
             | Message::SearchRequest(_)
+            | Message::ChatHistoryRequest(_)
             | Message::Command(_)
             | Message::Ping(_) => {
                 Err(self.fail_closed("direction", "Server message direction is invalid."))
@@ -1111,6 +1290,13 @@ impl AppState {
         self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
         self.search_return_screen = None;
+        self.selected_chat_agent = None;
+        self.chat_selector_index = 0;
+        self.chat_return_mode = LocalMode::Browse;
+        self.chat_feedback = None;
+        self.pending_chat_history.clear();
+        self.pending_chat_pages.clear();
+        self.chat_store.cancel_history_loads();
         self.control_epoch = self.control_epoch.saturating_add(1);
         self.dirty = true;
     }
@@ -1159,6 +1345,12 @@ impl AppState {
             show_search_detail: self.show_search_detail,
             search_return_screen: self.search_return_screen,
             control_epoch: self.control_epoch,
+            selected_chat_agent: self.selected_chat_agent,
+            chat_selector_index: self.chat_selector_index,
+            chat_return_mode: self.chat_return_mode,
+            chat_feedback: self.chat_feedback.clone(),
+            chat_scroll: self.chat_scroll.clone(),
+            pending_chat_history: self.pending_chat_history.clone(),
         }
     }
 
@@ -1224,7 +1416,17 @@ impl AppState {
 
     fn route_unlocked_input(&mut self, event: InputEvent) -> Vec<ClientAction> {
         if event == InputEvent::Escape {
-            if self.mode == LocalMode::NoteEditor {
+            if self.mode == LocalMode::AgentInput {
+                self.mode = LocalMode::AgentChat;
+                self.chat_feedback = None;
+            } else if self.mode == LocalMode::AgentChat {
+                self.mode = self.chat_return_mode;
+                self.local_input.clear();
+                self.chat_feedback = None;
+            } else if self.mode == LocalMode::AgentSelector {
+                self.mode = LocalMode::Browse;
+                self.chat_feedback = None;
+            } else if self.mode == LocalMode::NoteEditor {
                 self.mode = LocalMode::Open;
                 self.local_input.clear();
                 self.note_command = None;
@@ -1248,6 +1450,55 @@ impl AppState {
             }
             self.screen_state.scroll_offset = 0;
             return Vec::new();
+        }
+
+        if self.mode == LocalMode::AgentSelector {
+            match event {
+                InputEvent::Up => {
+                    self.chat_selector_index = self.chat_selector_index.saturating_sub(1);
+                }
+                InputEvent::Down => {
+                    self.chat_selector_index = self
+                        .chat_selector_index
+                        .saturating_add(1)
+                        .min(crate::controls::APPROVED_AGENT_ROLES.len() - 1);
+                }
+                InputEvent::Enter => return self.open_chat_agent(self.chat_selector_index),
+                InputEvent::SelectChatAgent(index) => return self.open_chat_agent(index),
+                _ => {}
+            }
+            return Vec::new();
+        }
+
+        if matches!(self.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+            match event {
+                InputEvent::Char('i') | InputEvent::FocusChatInput
+                    if self.mode == LocalMode::AgentChat =>
+                {
+                    self.mode = LocalMode::AgentInput;
+                    return Vec::new();
+                }
+                InputEvent::Up => {
+                    self.scroll_chat(false, false);
+                    return self.request_older_chat();
+                }
+                InputEvent::Down => {
+                    self.scroll_chat(true, false);
+                    return Vec::new();
+                }
+                InputEvent::PageUp => {
+                    self.scroll_chat(false, true);
+                    return self.request_older_chat();
+                }
+                InputEvent::PageDown => {
+                    self.scroll_chat(true, true);
+                    return Vec::new();
+                }
+                _ => {}
+            }
+            if self.mode == LocalMode::AgentChat {
+                return Vec::new();
+            }
         }
 
         if self.mode.captures_text() {
@@ -1291,14 +1542,7 @@ impl AppState {
                 InputEvent::Enter if self.mode == LocalMode::NoteEditor => {
                     return self.submit_note();
                 }
-                InputEvent::Enter if self.mode == LocalMode::AgentInput => {
-                    let input = std::mem::take(&mut self.local_input);
-                    if input.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![ClientAction::SubmitInput(input)]
-                    }
-                }
+                InputEvent::Enter if self.mode == LocalMode::AgentInput => self.submit_chat(),
                 InputEvent::Char(character) => {
                     let limit = match self.mode {
                         LocalMode::Search => 256,
@@ -1404,11 +1648,215 @@ impl AppState {
             }
             ':' => self.open_control_menu(),
             '?' => self.mode = LocalMode::Help,
-            'i' => self.mode = LocalMode::AgentInput,
+            'i' if self.mode == LocalMode::Open && self.can_open_selected_chat() => {
+                if let Some(agent_id) = self.selected_approved_agent() {
+                    return self.open_chat(agent_id, LocalMode::Open);
+                }
+            }
+            'i' if self.mode == LocalMode::Browse && self.screen == Screen::Agents => {
+                self.mode = LocalMode::AgentSelector;
+                self.local_input.clear();
+                self.chat_feedback = None;
+            }
             'q' => return vec![ClientAction::CloseTui],
             _ => {}
         }
         Vec::new()
+    }
+
+    fn selected_approved_agent(&self) -> Option<AgentId> {
+        if self.screen != Screen::Agents
+            || self.mode != LocalMode::Open
+            || self.screen_state.selected_kind != Some(DetailKind::Agent)
+        {
+            return None;
+        }
+        let work_id = self.screen_state.selected_id.as_deref()?;
+        let agent = self
+            .snapshot
+            .as_ref()?
+            .agents
+            .rows
+            .iter()
+            .find(|row| row.work_id.as_str() == work_id)?
+            .agent
+            .as_str();
+        AgentId::parse(agent)
+    }
+
+    fn open_chat_agent(&mut self, index: usize) -> Vec<ClientAction> {
+        let Some(agent_id) = AgentId::all().nth(index) else {
+            return Vec::new();
+        };
+        self.chat_selector_index = index;
+        self.open_chat(agent_id, LocalMode::Browse)
+    }
+
+    fn open_chat(&mut self, agent_id: AgentId, return_mode: LocalMode) -> Vec<ClientAction> {
+        self.selected_chat_agent = Some(agent_id);
+        self.chat_return_mode = return_mode;
+        self.local_input.clear();
+        self.chat_feedback = None;
+        self.mode = LocalMode::AgentChat;
+        if !self.pending_chat_history.insert(agent_id) {
+            return Vec::new();
+        }
+        self.chat_store.mark_history_loading(agent_id, false);
+        self.stage_chat_page(agent_id);
+        vec![ClientAction::ChatHistoryRequest(
+            ChatHistoryRequestPayload::page(agent_id, None),
+        )]
+    }
+
+    fn request_older_chat(&mut self) -> Vec<ClientAction> {
+        let Some(agent_id) = self.selected_chat_agent else {
+            return Vec::new();
+        };
+        if self.chat_scroll_offset(agent_id) != 0 || self.pending_chat_history.contains(&agent_id) {
+            return Vec::new();
+        }
+        if !self.chat_store.can_request_older_page(agent_id) {
+            return Vec::new();
+        }
+        let Some(cursor) = self.chat_store.next_cursor(agent_id).cloned() else {
+            return Vec::new();
+        };
+        if !self.pending_chat_history.insert(agent_id) {
+            return Vec::new();
+        }
+        self.chat_store.mark_history_loading(agent_id, true);
+        self.stage_chat_page(agent_id);
+        vec![ClientAction::ChatHistoryRequest(
+            ChatHistoryRequestPayload::page(agent_id, Some(cursor)),
+        )]
+    }
+
+    fn stage_chat_page(&mut self, agent_id: AgentId) {
+        self.pending_chat_pages.insert(
+            agent_id,
+            PendingChatPage {
+                baseline_revision: self.chat_store.agent_revision(agent_id),
+                candidate: self.chat_store.clone(),
+            },
+        );
+    }
+
+    fn scroll_chat(&mut self, forward: bool, page: bool) {
+        let Some(agent_id) = self.selected_chat_agent else {
+            return;
+        };
+        let area = self
+            .detail_viewport
+            .unwrap_or_else(|| Rect::new(0, 0, 80, 3));
+        let maximum = crate::ui::chat_scroll_maximum(self, area);
+        let amount = if page {
+            usize::from(area.height.saturating_sub(2)).max(1)
+        } else {
+            1
+        };
+        let scroll = self
+            .chat_scroll
+            .get_mut(&agent_id)
+            .expect("all approved agent scroll states are initialized");
+        let current = if scroll.follow_tail {
+            maximum
+        } else {
+            scroll.offset.min(maximum)
+        };
+        scroll.offset = if forward {
+            current.saturating_add(amount).min(maximum)
+        } else {
+            current.saturating_sub(amount)
+        };
+        scroll.follow_tail = scroll.offset == maximum;
+    }
+
+    fn chat_send_disabled_reason(&self) -> Option<String> {
+        if self.mode != LocalMode::AgentInput {
+            return None;
+        }
+        if self.selected_chat_agent.is_none() {
+            return Some("Select an approved V20 agent first.".to_owned());
+        }
+        if self.access != AccessState::Controller {
+            return Some("Take Control is required.".to_owned());
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return Some("Controller chat command is unavailable.".to_owned());
+        };
+        let specs = snapshot
+            .command_specs
+            .iter()
+            .filter(|spec| spec.command_type.as_str() == CommandType::AgentSendMessage.as_str())
+            .collect::<Vec<_>>();
+        if let [spec] = specs.as_slice()
+            && (spec.payload_model.as_str() != "AgentMessagePayload"
+                || spec.capability_id.as_str() != CommandType::AgentSendMessage.as_str()
+                || spec.reason_rule != ReasonRule::Forbidden
+                || spec.confirmation_level != ConfirmationLevel::None)
+        {
+            return Some(
+                "Server chat command spec does not match the reviewed contract.".to_owned(),
+            );
+        }
+        let button = server_button(
+            snapshot,
+            CommandType::AgentSendMessage,
+            "Send Message",
+            true,
+        );
+        match button.state {
+            ButtonState::Enabled => None,
+            ButtonState::Disabled { reason } => Some(reason),
+            ButtonState::Hidden => Some("Controller chat command is unavailable.".to_owned()),
+        }
+    }
+
+    fn submit_chat(&mut self) -> Vec<ClientAction> {
+        if self.local_input.trim().is_empty() {
+            return Vec::new();
+        }
+        let Some(agent_id) = self.selected_chat_agent else {
+            self.chat_feedback = Some("Select an approved V20 agent first.".to_owned());
+            return Vec::new();
+        };
+        if let Some(reason) = self.chat_send_disabled_reason() {
+            self.chat_feedback = Some(reason);
+            return Vec::new();
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            self.chat_feedback = Some("Controller chat command is unavailable.".to_owned());
+            return Vec::new();
+        };
+        let button = server_button(
+            snapshot,
+            CommandType::AgentSendMessage,
+            "Send Message",
+            true,
+        );
+        let draft = CommandDraft::new(
+            CommandType::AgentSendMessage,
+            serde_json::json!({
+                "agent_id": agent_id.as_str(),
+                "text": self.local_input,
+                "selected_entity_type": null,
+                "selected_entity_id": null,
+            }),
+            None,
+            format!("agent.send-message:{}", agent_id.as_str()),
+        );
+        let actions = self.start_draft(button, draft);
+        if actions.iter().any(|action| {
+            matches!(
+                action,
+                ClientAction::Command(request)
+                    if request.command_type == CommandType::AgentSendMessage
+            )
+        }) {
+            self.local_input.clear();
+            self.chat_feedback = None;
+        }
+        actions
     }
 
     fn open_control_menu(&mut self) {
@@ -1875,7 +2323,13 @@ impl AppState {
             self.control_epoch = self.control_epoch.saturating_add(1);
             return Vec::new();
         };
+        let sent_chat = request.command_type == CommandType::AgentSendMessage;
         self.close_control_overlay();
+        if sent_chat {
+            self.local_input.clear();
+            self.chat_feedback = None;
+            self.mode = LocalMode::AgentInput;
+        }
         vec![ClientAction::Command(request)]
     }
 
@@ -2746,6 +3200,15 @@ impl AppState {
         Some((target_type, entity_id))
     }
 
+    fn decode_chat_event(&mut self, payload: ChatEventPayload) -> Result<ChatEvent, ProtocolError> {
+        ChatEvent::try_from(payload).map_err(|_| {
+            self.fail_closed(
+                "chat-event",
+                "Chat event does not name an approved V20 agent.",
+            )
+        })
+    }
+
     fn observe_presentation_sequence(&mut self, sequence: u64) -> Result<(), ProtocolError> {
         if self.awaiting_snapshot || self.snapshot_reducer.state_opt().is_none() {
             return Ok(());
@@ -2781,6 +3244,9 @@ impl AppState {
         self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
         self.search_return_screen = None;
+        self.pending_chat_history.clear();
+        self.pending_chat_pages.clear();
+        self.chat_store.cancel_history_loads();
         self.lock_pending = true;
     }
 
@@ -2803,6 +3269,9 @@ impl AppState {
         self.awaiting_snapshot = false;
         self.lock_pending = false;
         self.lease_pending = false;
+        self.pending_chat_history.clear();
+        self.pending_chat_pages.clear();
+        self.chat_store.cancel_history_loads();
     }
 
     fn enter_protocol_lockout(&mut self) {
@@ -2824,6 +3293,9 @@ impl AppState {
         self.awaiting_snapshot = false;
         self.lock_pending = false;
         self.lease_pending = false;
+        self.pending_chat_history.clear();
+        self.pending_chat_pages.clear();
+        self.chat_store.cancel_history_loads();
     }
 
     fn fail_closed(&mut self, code: &str, safe_message: &str) -> ProtocolError {

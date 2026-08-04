@@ -28,6 +28,14 @@ pub struct ShellLayout {
 }
 
 pub fn shell_layout(area: Rect, mode: DisplayMode) -> ShellLayout {
+    shell_layout_with_input(area, mode, false)
+}
+
+pub fn chat_shell_layout(area: Rect, mode: DisplayMode) -> ShellLayout {
+    shell_layout_with_input(area, mode, true)
+}
+
+fn shell_layout_with_input(area: Rect, mode: DisplayMode, show_input: bool) -> ShellLayout {
     let narrow = area.width < 120;
     let (header, navigation, alerts, input, footer) = match (narrow, mode) {
         (true, DisplayMode::Compact) => (7, 4, 3, 3, 3),
@@ -42,7 +50,7 @@ pub fn shell_layout(area: Rect, mode: DisplayMode) -> ShellLayout {
         Constraint::Length(navigation),
         Constraint::Length(alerts),
         Constraint::Min(1),
-        Constraint::Length(input),
+        Constraint::Length(if show_input { input } else { 0 }),
         Constraint::Length(footer),
     ])
     .split(area);

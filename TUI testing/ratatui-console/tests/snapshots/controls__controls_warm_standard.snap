@@ -147,9 +147,9 @@ THEME WarmWhite | MODE Standard
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
 │ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────────────────────────┐
-│UNAVAILABLE - Agent input is not connected to the controller yet.                                                     │
+│Receipt cmd:PID:TICKS:COUNT REJECTED - Control state changed. | Timeline: cmd:PID:TICKS:COUNT │
+│                                                                                                                      │
+│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                                                        │
@@ -184,9 +184,9 @@ THEME WarmWhite | MODE Standard
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
 │ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────────────────────────┐
-│UNAVAILABLE - Agent input is not connected to the controller yet.                                                     │
+│Receipt cmd:PID:TICKS:COUNT RUNNING - Command is running. | Timeline: cmd:PID:TICKS:COUNT     │
+│                                                                                                                      │
+│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                                                        │
@@ -221,9 +221,9 @@ THEME WarmWhite | MODE Standard
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
 │ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────────────────────────┐
-│UNAVAILABLE - Agent input is not connected to the controller yet.                                                     │
+│Receipt cmd:PID:TICKS:COUNT COMPLETED - Approval was recorded. | Timeline: cmd:PID:TICKS:COUNT│
+│                                                                                                                      │
+│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                                                        │
@@ -258,9 +258,9 @@ THEME WarmWhite | MODE Standard
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
 │ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────────────────────────┐
-│UNAVAILABLE - Agent input is not connected to the controller yet.                                                     │
+│Receipt cmd:PID:TICKS:COUNT FAILED - Command failed safely. | Timeline: cmd:PID:TICKS:COUNT   │
+│                                                                                                                      │
+│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter                                                        │
@@ -295,9 +295,9 @@ THEME WarmWhite | MODE Standard
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Dismiss Alert         [x] Reset Layout          [ ] Take Control          [ ] Lock TUI                           │
 │                                                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌AGENT INPUT - DISABLED────────────────────────────────────────────────────────────────────────────────────────────────┐
-│UNAVAILABLE - Agent input is not connected to the controller yet.                                                     │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │Up/Down Holdings | o Open | q Close | f Filter                                                                        │

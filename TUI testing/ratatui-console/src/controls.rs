@@ -77,7 +77,7 @@ pub fn local_controls(access: AccessState, screen: Screen) -> Vec<LocalControl> 
     controls
 }
 
-const APPROVED_AGENT_ROLES: [&str; 8] = [
+pub const APPROVED_AGENT_ROLES: [&str; 8] = [
     "v20-product",
     "v20-development",
     "v20-risk-review",

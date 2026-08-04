@@ -162,7 +162,7 @@ fn next_rebalance_uses_eastern_time_and_keeps_narrow_labels_visible() {
 }
 
 #[test]
-fn unlocked_shell_has_six_sections_and_truthful_snapshot_unavailable_content() {
+fn unlocked_shell_hides_chat_input_until_an_agent_chat_is_open() {
     let state = AppState::controller();
     let text = normalized_render(120, 36, &state);
     let labels = [
@@ -170,7 +170,6 @@ fn unlocked_shell_has_six_sections_and_truthful_snapshot_unavailable_content() {
         "┌NAVIGATION",
         "┌ALERTS",
         "┌SCREEN: Impact",
-        "┌AGENT INPUT - DISABLED",
         "┌KEYS & STATUS",
     ];
     let positions = labels.map(|label| {
@@ -183,7 +182,8 @@ fn unlocked_shell_has_six_sections_and_truthful_snapshot_unavailable_content() {
     assert!(text.contains("UNAVAILABLE"));
     assert!(!text.contains("STOPPED"));
     assert!(text.contains("UNAVAILABLE - Controller snapshot has not arrived."));
-    assert!(text.contains("UNAVAILABLE - Agent input is not connected to the controller yet."));
+    assert!(!text.contains("CHAT INPUT"));
+    assert!(!text.contains("AGENT INPUT"));
 }
 
 #[test]
@@ -330,7 +330,7 @@ fn all_observability_screens_dispatch_to_their_integrated_renderers() {
 }
 
 #[test]
-fn controller_viewer_and_disabled_input_are_explicit() {
+fn controller_viewer_are_explicit_and_chat_input_stays_hidden() {
     let controller = normalized_render(80, 24, &AppState::controller());
     let viewer = normalized_render(80, 24, &AppState::viewer());
 
@@ -338,8 +338,8 @@ fn controller_viewer_and_disabled_input_are_explicit() {
     assert!(!controller.contains("READ ONLY"));
     assert!(viewer.contains("READ ONLY"));
     assert!(!viewer.contains("CONTROLLER"));
-    assert!(controller.contains("AGENT INPUT - DISABLED"));
-    assert!(viewer.contains("AGENT INPUT - DISABLED"));
+    assert!(!controller.contains("CHAT INPUT"));
+    assert!(!viewer.contains("CHAT INPUT"));
     assert!(!controller.contains("Take Control"));
     assert!(!viewer.contains("Take Control"));
     assert!(!controller.contains("Lock TUI"));

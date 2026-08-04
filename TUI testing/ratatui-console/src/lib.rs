@@ -1,4 +1,5 @@
 pub mod app;
+pub mod chat;
 pub mod command;
 pub mod confirm;
 pub mod contract;

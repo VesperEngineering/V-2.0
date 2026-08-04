@@ -6,6 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetSystemTime;
 
+use crate::chat::AgentId;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SafeId(String);
 
@@ -189,6 +191,12 @@ impl NonEmptyString {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sha256Hex(String);
+
+impl Sha256Hex {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl Serialize for Sha256Hex {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -744,6 +752,9 @@ pub enum MessageType {
     Snapshot,
     SearchRequest,
     SearchResults,
+    ChatHistoryRequest,
+    ChatEvent,
+    ChatHistoryResult,
     Command,
     CommandReceipt,
     Event,
@@ -787,6 +798,9 @@ pub enum Message {
     Snapshot(Box<SnapshotPayload>),
     SearchRequest(SearchRequestPayload),
     SearchResults(SearchResultsPayload),
+    ChatHistoryRequest(ChatHistoryRequestPayload),
+    ChatEvent(ChatEventPayload),
+    ChatHistoryResult(ChatHistoryResultPayload),
     Command(CommandMessagePayload),
     CommandReceipt(CommandReceiptPayload),
     Event(Box<EventPayload>),
@@ -811,6 +825,9 @@ impl Message {
             Self::Snapshot(_) => MessageType::Snapshot,
             Self::SearchRequest(_) => MessageType::SearchRequest,
             Self::SearchResults(_) => MessageType::SearchResults,
+            Self::ChatHistoryRequest(_) => MessageType::ChatHistoryRequest,
+            Self::ChatEvent(_) => MessageType::ChatEvent,
+            Self::ChatHistoryResult(_) => MessageType::ChatHistoryResult,
             Self::Command(_) => MessageType::Command,
             Self::CommandReceipt(_) => MessageType::CommandReceipt,
             Self::Event(_) => MessageType::Event,
@@ -998,6 +1015,338 @@ pub struct SearchResultsPayload {
     pub results: Vec<SearchResultPayload>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub error: Option<NonEmptyString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ChatHistoryLimit(u8);
+
+impl ChatHistoryLimit {
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatHistoryLimit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u8::deserialize(deserializer)?;
+        if (1..=20).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "chat history limit must be between 1 and 20",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ApprovedAgentId(SafeId);
+
+impl ApprovedAgentId {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl<'de> Deserialize<'de> for ApprovedAgentId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = SafeId::deserialize(deserializer)?;
+        if crate::controls::APPROVED_AGENT_ROLES.contains(&value.as_str()) {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "agent_id must name an approved V20 agent",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatHistoryRequestPayload {
+    agent_id: ApprovedAgentId,
+    limit: ChatHistoryLimit,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    cursor: Option<SafeId>,
+}
+
+impl ChatHistoryRequestPayload {
+    pub(crate) fn page(agent_id: AgentId, cursor: Option<SafeId>) -> Self {
+        Self {
+            agent_id: ApprovedAgentId(SafeId(agent_id.as_str().to_owned())),
+            limit: ChatHistoryLimit(20),
+            cursor,
+        }
+    }
+
+    pub fn agent_id(&self) -> &ApprovedAgentId {
+        &self.agent_id
+    }
+
+    pub fn limit(&self) -> u8 {
+        self.limit.get()
+    }
+
+    pub fn cursor(&self) -> Option<&SafeId> {
+        self.cursor.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireChatRole {
+    Human,
+    Agent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChatOperation {
+    Chunk,
+    Complete,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ChatChunkSequence(u64);
+
+impl ChatChunkSequence {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatChunkSequence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        if (1..=i64::MAX as u64).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "chat chunk sequence must be between 1 and 2^63-1",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ChatTokenCount(u64);
+
+impl ChatTokenCount {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatTokenCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        if value <= i64::MAX as u64 {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "chat token count cannot exceed 2^63-1",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChatChunkText(String);
+
+impl ChatChunkText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatChunkText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if !value.is_empty() && value.len() <= 64 * 1024 {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom(
+                "chat chunk must contain 1 through 65536 UTF-8 bytes",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawChatEventPayload {
+    event_id: SafeId,
+    agent_id: ApprovedAgentId,
+    message_id: SafeId,
+    role: WireChatRole,
+    operation: ChatOperation,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    chunk_sequence: Option<ChatChunkSequence>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    text: Option<ChatChunkText>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    token_count: Option<ChatTokenCount>,
+    message_created_at_utc: UtcTimestamp,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    occurred_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    validation_receipt_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    raw_text_sha256: Option<Sha256Hex>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChatEventPayload {
+    event_id: SafeId,
+    agent_id: ApprovedAgentId,
+    message_id: SafeId,
+    role: WireChatRole,
+    operation: ChatOperation,
+    chunk_sequence: Option<ChatChunkSequence>,
+    text: Option<ChatChunkText>,
+    token_count: Option<ChatTokenCount>,
+    message_created_at_utc: UtcTimestamp,
+    occurred_at_utc: Option<UtcTimestamp>,
+    validation_receipt_id: Option<SafeId>,
+    raw_text_sha256: Option<Sha256Hex>,
+}
+
+impl<'de> Deserialize<'de> for ChatEventPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawChatEventPayload::deserialize(deserializer)?;
+        let valid = match raw.operation {
+            ChatOperation::Chunk => {
+                raw.chunk_sequence.is_some()
+                    && raw.text.is_some()
+                    && raw.occurred_at_utc.is_none()
+                    && raw.validation_receipt_id.is_none()
+                    && raw.raw_text_sha256.is_none()
+            }
+            ChatOperation::Complete => {
+                raw.chunk_sequence.is_none()
+                    && raw.text.is_none()
+                    && raw.token_count.is_none()
+                    && raw.occurred_at_utc.is_some()
+                    && raw.validation_receipt_id.is_some()
+                    && raw.raw_text_sha256.is_some()
+            }
+            ChatOperation::Interrupted => {
+                raw.chunk_sequence.is_none()
+                    && raw.text.is_none()
+                    && raw.token_count.is_none()
+                    && raw.occurred_at_utc.is_some()
+                    && raw.validation_receipt_id.is_none()
+                    && raw.raw_text_sha256.is_none()
+            }
+        };
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "chat event fields do not match the operation",
+            ));
+        }
+        Ok(Self {
+            event_id: raw.event_id,
+            agent_id: raw.agent_id,
+            message_id: raw.message_id,
+            role: raw.role,
+            operation: raw.operation,
+            chunk_sequence: raw.chunk_sequence,
+            text: raw.text,
+            token_count: raw.token_count,
+            message_created_at_utc: raw.message_created_at_utc,
+            occurred_at_utc: raw.occurred_at_utc,
+            validation_receipt_id: raw.validation_receipt_id,
+            raw_text_sha256: raw.raw_text_sha256,
+        })
+    }
+}
+
+impl ChatEventPayload {
+    pub fn event_id(&self) -> &SafeId {
+        &self.event_id
+    }
+
+    pub fn agent_id(&self) -> &ApprovedAgentId {
+        &self.agent_id
+    }
+
+    pub fn message_id(&self) -> &SafeId {
+        &self.message_id
+    }
+
+    pub fn role(&self) -> WireChatRole {
+        self.role
+    }
+
+    pub fn operation(&self) -> ChatOperation {
+        self.operation
+    }
+
+    pub fn chunk_sequence(&self) -> Option<u64> {
+        self.chunk_sequence.map(ChatChunkSequence::get)
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_ref().map(ChatChunkText::as_str)
+    }
+
+    pub fn token_count(&self) -> Option<u64> {
+        self.token_count.map(ChatTokenCount::get)
+    }
+
+    pub fn message_created_at_utc(&self) -> &UtcTimestamp {
+        &self.message_created_at_utc
+    }
+
+    pub fn occurred_at_utc(&self) -> Option<&UtcTimestamp> {
+        self.occurred_at_utc.as_ref()
+    }
+
+    pub fn validation_receipt_id(&self) -> Option<&SafeId> {
+        self.validation_receipt_id.as_ref()
+    }
+
+    pub fn raw_text_sha256(&self) -> Option<&Sha256Hex> {
+        self.raw_text_sha256.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatHistoryResultPayload {
+    agent_id: ApprovedAgentId,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    next_cursor: Option<SafeId>,
+}
+
+impl ChatHistoryResultPayload {
+    pub fn agent_id(&self) -> &ApprovedAgentId {
+        &self.agent_id
+    }
+
+    pub fn next_cursor(&self) -> Option<&SafeId> {
+        self.next_cursor.as_ref()
+    }
 }
 
 const MAX_COMMAND_PAYLOAD_BYTES: usize = 64 * 1024;

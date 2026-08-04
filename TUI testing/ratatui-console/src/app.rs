@@ -22,11 +22,13 @@ use crate::contract::{
 };
 use crate::input::InputEvent;
 use crate::launcher::{GatewayLauncher, LaunchError};
-use crate::layout::shell_layout;
+use crate::layout::{chat_shell_layout, shell_layout};
 use crate::preferences::{load_preferences, preferences_path, save_preferences_to};
-use crate::state::{AccessState, AppState, ClientAction, ProtocolError, ReduceOutcome};
+use crate::state::{AccessState, AppState, ClientAction, LocalMode, ProtocolError, ReduceOutcome};
 use crate::transport::{PipeTransport, TransportError};
-use crate::ui::{control_grid_index, control_overlay_area, split_control_area};
+use crate::ui::{
+    chat_selector_start, control_grid_index, control_overlay_area, split_control_area,
+};
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub const SEND_TIMEOUT: Duration = Duration::from_millis(50);
@@ -128,6 +130,8 @@ pub fn key_to_input(key: KeyEvent) -> Option<InputEvent> {
         KeyCode::Backspace => Some(InputEvent::Backspace),
         KeyCode::Up => Some(InputEvent::Up),
         KeyCode::Down => Some(InputEvent::Down),
+        KeyCode::PageUp => Some(InputEvent::PageUp),
+        KeyCode::PageDown => Some(InputEvent::PageDown),
         KeyCode::Left => Some(InputEvent::Left),
         KeyCode::Right => Some(InputEvent::Right),
         _ => None,
@@ -141,7 +145,11 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
         MouseEventKind::Down(MouseButton::Left) => {}
         _ => return None,
     }
-    let layout = shell_layout(area, state.display_mode());
+    let layout = if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+        chat_shell_layout(area, state.display_mode())
+    } else {
+        shell_layout(area, state.display_mode())
+    };
     if let Some(overlay) = state.control_overlay() {
         let modal = control_overlay_area(layout.body);
         return match overlay {
@@ -204,6 +212,20 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
         }
         let left_half = mouse.column < layout.footer.x.saturating_add(layout.footer.width / 2);
         match state.mode {
+            crate::state::LocalMode::AgentSelector | crate::state::LocalMode::AgentInput => {
+                return Some(if left_half {
+                    InputEvent::Enter
+                } else {
+                    InputEvent::Escape
+                });
+            }
+            crate::state::LocalMode::AgentChat => {
+                return Some(if left_half {
+                    InputEvent::FocusChatInput
+                } else {
+                    InputEvent::Escape
+                });
+            }
             crate::state::LocalMode::Filter | crate::state::LocalMode::NoteEditor => {
                 return Some(if left_half {
                     InputEvent::Enter
@@ -211,8 +233,20 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
                     InputEvent::Escape
                 });
             }
+            crate::state::LocalMode::Open if state.can_open_selected_chat() => {
+                return Some(if left_half {
+                    InputEvent::Char('i')
+                } else {
+                    InputEvent::Escape
+                });
+            }
             crate::state::LocalMode::Open => return Some(InputEvent::Escape),
             crate::state::LocalMode::Search if !left_half => return Some(InputEvent::Escape),
+            crate::state::LocalMode::Browse
+                if state.screen == crate::state::Screen::Agents && left_half =>
+            {
+                return Some(InputEvent::Char('i'));
+            }
             crate::state::LocalMode::Browse
                 if state.snapshot.is_some()
                     && mouse.column
@@ -237,6 +271,23 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
                 InputEvent::Right
             },
         );
+    }
+    if state.mode == crate::state::LocalMode::AgentSelector
+        && contains(control_body, mouse.column, mouse.row)
+        && mouse.column > control_body.x
+        && mouse.column < control_body.right().saturating_sub(1)
+        && mouse.row > control_body.y
+        && mouse.row < control_body.bottom().saturating_sub(1)
+    {
+        let index = chat_selector_start(state, control_body)
+            + usize::from(mouse.row.saturating_sub(control_body.y.saturating_add(1)));
+        return (index < crate::controls::APPROVED_AGENT_ROLES.len())
+            .then_some(InputEvent::SelectChatAgent(index));
+    }
+    if state.mode == crate::state::LocalMode::AgentChat
+        && contains(layout.input, mouse.column, mouse.row)
+    {
+        return Some(InputEvent::FocusChatInput);
     }
     if state.mode == crate::state::LocalMode::Search
         && contains(control_body, mouse.column, mouse.row)
@@ -1254,6 +1305,7 @@ impl FoundationClient {
             }),
             ClientAction::RequestSnapshot => Message::SnapshotRequest(SnapshotRequestPayload {}),
             ClientAction::Search(payload) => Message::SearchRequest(payload),
+            ClientAction::ChatHistoryRequest(payload) => Message::ChatHistoryRequest(payload),
             ClientAction::Command(request) => Message::Command(CommandMessagePayload { request }),
             ClientAction::Reconnect => return Ok(SessionStep::Reconnect),
             ClientAction::CloseTui => return Ok(SessionStep::Exit),

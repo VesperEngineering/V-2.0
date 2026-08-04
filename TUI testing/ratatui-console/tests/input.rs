@@ -344,7 +344,7 @@ fn local_modes_follow_global_keys_and_escape_returns_to_browse() {
 }
 
 #[test]
-fn enter_submits_only_from_agent_input_and_q_only_closes_outside_text_input() {
+fn generic_agent_input_cannot_open_outside_the_agents_screen() {
     let mut state = AppState::controller();
     assert!(state.handle(InputEvent::Enter).is_empty());
     assert_eq!(
@@ -353,12 +353,8 @@ fn enter_submits_only_from_agent_input_and_q_only_closes_outside_text_input() {
     );
 
     state.handle(InputEvent::Char('i'));
-    assert_eq!(state.mode, LocalMode::AgentInput);
-    assert!(state.handle(InputEvent::Char('q')).is_empty());
-    assert_eq!(
-        state.handle(InputEvent::Enter),
-        vec![ClientAction::SubmitInput("q".to_owned())]
-    );
+    assert_eq!(state.mode, LocalMode::Browse);
+    assert!(state.handle(InputEvent::Enter).is_empty());
 }
 
 #[test]
@@ -391,19 +387,27 @@ fn backspace_and_escape_handle_unicode_text_without_leaking_or_submitting() {
     assert_eq!(password.masked_auth_input(), "");
 
     let mut input = AppState::controller();
+    input.reduce(snapshot_envelope(1)).unwrap();
+    input.handle(InputEvent::Char('4'));
     input.handle(InputEvent::Char('i'));
+    input.handle(InputEvent::Enter);
+    assert_eq!(input.mode, LocalMode::AgentChat);
+    input.handle(InputEvent::Char('i'));
+    assert_eq!(input.mode, LocalMode::AgentInput);
     input.handle(InputEvent::Char('é'));
     input.handle(InputEvent::Char('🙂'));
     input.handle(InputEvent::Backspace);
-    assert_eq!(
-        input.handle(InputEvent::Enter),
-        vec![ClientAction::SubmitInput("é".to_owned())]
-    );
-    input.handle(InputEvent::Char('x'));
+    assert!(input.handle(InputEvent::Enter).is_empty());
+    assert_eq!(input.chat_input(), "é");
+    input.handle(InputEvent::Escape);
+    assert_eq!(input.mode, LocalMode::AgentChat);
     input.handle(InputEvent::Escape);
     assert_eq!(input.mode, LocalMode::Browse);
     input.handle(InputEvent::Char('i'));
+    input.handle(InputEvent::Enter);
+    input.handle(InputEvent::Char('i'));
     assert!(input.handle(InputEvent::Enter).is_empty());
+    assert_eq!(input.chat_input(), "");
 }
 
 #[test]
@@ -500,6 +504,8 @@ fn crossterm_conversion_accepts_press_only_and_blocks_modified_character_leakage
     for (code, expected) in [
         (KeyCode::Up, InputEvent::Up),
         (KeyCode::Down, InputEvent::Down),
+        (KeyCode::PageUp, InputEvent::PageUp),
+        (KeyCode::PageDown, InputEvent::PageDown),
         (KeyCode::Left, InputEvent::Left),
         (KeyCode::Right, InputEvent::Right),
     ] {

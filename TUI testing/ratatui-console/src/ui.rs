@@ -12,11 +12,12 @@ use windows_sys::Win32::System::Time::{
     SystemTimeToTzSpecificLocalTimeEx,
 };
 
+use crate::chat::{AgentId, ChatHistoryStatus, ChatMessageStatus, ChatRole};
 use crate::command::TrackedCommandState;
 use crate::confirm::{ConfirmationStep, Selection};
 use crate::contract::{AlertSeverity, ConfirmationLevel, Freshness, OperatingMode, UtcTimestamp};
 use crate::controls::{ButtonState, ControlMenu, ControlMenuEntry, ControlOverlay};
-use crate::layout::{DisplayMode, ViewportClass, shell_layout};
+use crate::layout::{DisplayMode, ViewportClass, chat_shell_layout, shell_layout};
 use crate::screens::agents::render_agents;
 use crate::screens::data::render_data;
 use crate::screens::detail::render_direct_detail;
@@ -33,8 +34,6 @@ use crate::state::{AccessState, AppState, AuthFeedback, AuthStage, LocalMode, Sc
 use crate::theme::Palette;
 
 const EASTERN_TIME_ZONE: &str = "Eastern Standard Time";
-const AGENT_INPUT_UNAVAILABLE: &str =
-    "UNAVAILABLE - Agent input is not connected to the controller yet.";
 static EASTERN_ZONE: OnceLock<Option<DYNAMIC_TIME_ZONE_INFORMATION>> = OnceLock::new();
 pub(crate) const CONTROL_CELL_WIDTH: u16 = 26;
 
@@ -48,7 +47,11 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         return;
     }
 
-    let layout = shell_layout(area, state.display_mode());
+    let layout = if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+        chat_shell_layout(area, state.display_mode())
+    } else {
+        shell_layout(area, state.display_mode())
+    };
     render_header(frame, layout.header, state, palette);
     render_navigation(frame, layout.navigation, state, palette);
     render_alerts(frame, layout.alerts, state, palette);
@@ -65,7 +68,11 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         (layout.body, None)
     };
     let inline_actions = action_bar.is_some_and(|area| area.height == 0);
-    if state.mode == LocalMode::Search {
+    if state.mode == LocalMode::AgentSelector {
+        render_chat_selector(frame, body, state, palette);
+    } else if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+        render_chat(frame, body, state, palette);
+    } else if state.mode == LocalMode::Search {
         render_search(frame, body, state, palette);
     } else if state.mode == LocalMode::Filter {
         render_filter(frame, body, state, palette);
@@ -98,7 +105,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     {
         render_action_bar(frame, area, state, palette);
     }
-    render_agent_input(frame, layout.input, palette);
+    if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+        render_agent_input(frame, layout.input, state, palette);
+    }
     render_footer(frame, layout.footer, state, palette, inline_actions);
     if let Some(overlay) = state.control_overlay() {
         render_control_overlay(frame, layout.body, overlay, palette);
@@ -923,11 +932,149 @@ fn format_search_time(value: Option<&str>) -> String {
         )
 }
 
-fn render_agent_input(frame: &mut Frame<'_>, area: Rect, palette: Palette) {
+fn render_chat_selector(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+    let start = chat_selector_start(state, area);
+    let lines = AgentId::all()
+        .enumerate()
+        .skip(start)
+        .take(usize::from(area.height.saturating_sub(2)))
+        .map(|(index, agent_id)| {
+            let marker = if index == state.chat_selector_index() {
+                ">"
+            } else {
+                " "
+            };
+            Line::from(format!("{marker} {}", agent_id.as_str()))
+        })
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(AGENT_INPUT_UNAVAILABLE)
+        Paragraph::new(lines)
             .style(base_style(palette))
-            .block(panel("AGENT INPUT - DISABLED", palette)),
+            .block(panel("SELECT AGENT CHAT", palette)),
+        area,
+    );
+}
+
+#[doc(hidden)]
+pub fn chat_selector_start(state: &AppState, area: Rect) -> usize {
+    let visible = usize::from(area.height.saturating_sub(2)).max(1);
+    let maximum = crate::controls::APPROVED_AGENT_ROLES
+        .len()
+        .saturating_sub(visible);
+    state
+        .chat_selector_index()
+        .saturating_sub(visible.saturating_sub(1))
+        .min(maximum)
+}
+
+fn render_chat(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+    let Some(agent_id) = state.selected_chat_agent() else {
+        frame.render_widget(
+            Paragraph::new("UNAVAILABLE - No approved V20 agent is selected.")
+                .style(base_style(palette))
+                .block(panel("AGENT CHAT", palette)),
+            area,
+        );
+        return;
+    };
+    let lines = chat_lines(state, agent_id);
+    let maximum = chat_scroll_maximum(state, area);
+    let offset = if state.chat_follows_tail(agent_id) {
+        maximum
+    } else {
+        state.chat_scroll_offset(agent_id).min(maximum)
+    };
+    let tail = if state.chat_follows_tail(agent_id) {
+        "FOLLOW TAIL"
+    } else {
+        "SCROLLED"
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(base_style(palette))
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
+            .block(panel(
+                format!("CHAT - {} - {tail}", agent_id.as_str()),
+                palette,
+            )),
+        area,
+    );
+}
+
+fn chat_lines(state: &AppState, agent_id: AgentId) -> Vec<Line<'static>> {
+    let messages = state.chat_store().thread(agent_id).messages();
+    let mut lines = vec![Line::from("Human and agent messages only.")];
+    lines.extend(match state.chat_store().history_status(agent_id) {
+        ChatHistoryStatus::Loading => vec![Line::from(
+            "LOADING CHAT HISTORY - Keeping last verified messages visible.",
+        )],
+        ChatHistoryStatus::NotRequested if messages.is_empty() => vec![Line::from(
+            "CHAT HISTORY UNAVAILABLE - Controller history has not been requested.",
+        )],
+        ChatHistoryStatus::Available if messages.is_empty() => vec![Line::from(
+            "NO CHAT HISTORY - Controller returned no messages.",
+        )],
+        ChatHistoryStatus::NotRequested | ChatHistoryStatus::Available => Vec::new(),
+    });
+    lines.extend(messages.iter().map(|message| {
+        let role = match message.role() {
+            ChatRole::Human => "HUMAN",
+            ChatRole::Agent => "AGENT",
+        };
+        let status = match message.status() {
+            ChatMessageStatus::Draft => "DRAFT",
+            ChatMessageStatus::Complete => "COMPLETE",
+            ChatMessageStatus::Interrupted => "INTERRUPTED",
+        };
+        Line::from(format!(
+            "[{role} {status}] {}",
+            sanitize_text(message.content())
+        ))
+    }));
+    lines
+}
+
+pub(crate) fn chat_scroll_maximum(state: &AppState, area: Rect) -> usize {
+    let Some(agent_id) = state.selected_chat_agent() else {
+        return 0;
+    };
+    let width = area.width.saturating_sub(2).max(1);
+    let line_count = Paragraph::new(chat_lines(state, agent_id))
+        .wrap(Wrap { trim: false })
+        .line_count(width);
+    line_count.saturating_sub(usize::from(area.height.saturating_sub(2)).max(1))
+}
+
+fn render_agent_input(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: Palette) {
+    let Some(agent_id) = state.selected_chat_agent() else {
+        return;
+    };
+    let focused = state.mode == LocalMode::AgentInput;
+    let status = if focused {
+        state.chat_send_reason().map_or_else(
+            || "READY - Enter sends".to_owned(),
+            |reason| format!("SEND DISABLED - {reason}"),
+        )
+    } else {
+        "NOT FOCUSED - i or click to compose".to_owned()
+    };
+    let sanitized = sanitize_text(state.chat_input());
+    let prefix = "Draft: ";
+    let draft_width =
+        usize::from(area.width.saturating_sub(2)).saturating_sub(UnicodeWidthStr::width(prefix));
+    let draft = tail_bounded_text(&sanitized, draft_width);
+    frame.render_widget(
+        Paragraph::new(format!("{prefix}{draft}"))
+            .style(base_style(palette))
+            .block(panel(
+                format!(
+                    "CHAT INPUT - {} - {}",
+                    agent_id.as_str(),
+                    sanitize_text(&status)
+                ),
+                palette,
+            )),
         area,
     );
 }
@@ -939,14 +1086,24 @@ fn render_footer(
     palette: Palette,
     inline_actions: bool,
 ) {
-    let text = if state.mode == LocalMode::Search {
+    let text = if state.mode == LocalMode::AgentSelector {
+        "Agent Chat Selector | Up/Down Select | Enter Open | Esc Back"
+    } else if state.mode == LocalMode::AgentChat {
+        "Agent Chat | i Compose | Up/Down/Page Scroll | Esc Back"
+    } else if state.mode == LocalMode::AgentInput {
+        "Agent Chat Input | Enter Send | Esc History"
+    } else if state.mode == LocalMode::Search {
         "Search | Type Query | Up/Down Select | Enter Open | Esc Close"
     } else if state.mode == LocalMode::Filter {
         "Filter Search on Current Screen | Enter Apply | Esc Cancel"
     } else if state.mode == LocalMode::NoteEditor {
         "Context Note | Left/Right Visibility | Enter Keep Draft | Esc Cancel"
     } else if state.mode == LocalMode::Open {
-        "Detail | Up/Down Scroll | Esc Back"
+        if state.can_open_selected_chat() {
+            "Detail | i Chat | Up/Down Scroll | Esc Back"
+        } else {
+            "Detail | Up/Down Scroll | Esc Back"
+        }
     } else if state.preferences_unavailable() {
         "1-9,0 Screens | q Close TUI only | PREFERENCES UNAVAILABLE"
     } else if state.snapshot.is_some() {
@@ -957,7 +1114,9 @@ fn render_footer(
                 "Up/Down Holdings | Left/Right Period | o Open | q Close | f Filter"
             }
             Screen::Orders => "Up/Down Rows | o Open | q Close | f Filter",
-            Screen::Agents => "Up/Down Tasks | Left/Right Stages | o Open | q Close | f Filter",
+            Screen::Agents => {
+                "i Agent Selector | Up/Down Tasks | Left/Right Stages | o Open | q Close | f Filter"
+            }
             Screen::ModelsRegime => {
                 "Left/Right Panels | Up/Down Rows | o Open | q Close | f Filter"
             }
@@ -1068,7 +1227,7 @@ fn bounded_text(value: &str, max_width: usize) -> String {
     let ellipsis = ".".repeat(max_width.min(3));
     let content_width = max_width.saturating_sub(ellipsis.len());
     let mut bounded = String::new();
-    let mut used = 0;
+    let mut used: usize = 0;
     for character in sanitized.chars() {
         let width = character.width().unwrap_or(1);
         if used + width > content_width {
@@ -1079,6 +1238,23 @@ fn bounded_text(value: &str, max_width: usize) -> String {
     }
     bounded.push_str(&ellipsis);
     bounded
+}
+
+fn tail_bounded_text(value: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= max_width {
+        return value.to_owned();
+    }
+    let mut reversed = Vec::new();
+    let mut used: usize = 0;
+    for character in value.chars().rev() {
+        let width = character.width().unwrap_or(0);
+        if used.saturating_add(width) > max_width {
+            break;
+        }
+        reversed.push(character);
+        used += width;
+    }
+    reversed.into_iter().rev().collect()
 }
 
 fn pad_to_width(mut value: String, width: usize) -> String {
