@@ -1,6 +1,6 @@
 # V20 Ratatui Console Build Roadmap
 
-Status: approved; preflight corrections incorporated
+Status: implementation complete; focused/full gates pass; integration pending
 Date: 2026-08-03
 Design: `TUI testing/RATATUI_DESIGN.md`
 
@@ -12,7 +12,10 @@ for every phase. If older wording conflicts, those two sections win.
 Build the approved Ratatui console as four testable phases. Each phase leaves a
 working product and does not claim abilities the connected V20 runtime lacks.
 
-## Verified starting point
+## Originally verified starting point
+
+These bullets record the pre-implementation state; the current closeout is
+summarized below.
 
 - V20 is Python 3.11 and exposes `vesper-agent` through Typer.
 - The governed agent platform lives under `vesper/platform/`.
@@ -29,6 +32,20 @@ working product and does not claim abilities the connected V20 runtime lacks.
 
 The separation between the agent platform and trading engine matters: the TUI
 must not turn legacy Python objects into an unreviewed broker control path.
+
+## Current closeout
+
+- The Ratatui crate, Python controller gateway, ten-screen shell, strict
+  contracts, chats, memory, notifications, operations policies, package script,
+  and exact `dist/tui` package are implemented.
+- Fresh focused verification passes: Python `1,314 passed`; Rust format,
+  Clippy, and all-target tests pass.
+- Fresh full-repository verification passes: `2,087 passed, 5 skipped`.
+- Broker, order, risk, Live, scheduler, training, source-control, and
+  production backup/restore adapters remain disabled or unavailable.
+- Backup/restore remains an explicit activation gate because restore writes
+  state; temporary-state service tests pass without enabling the production
+  adapter.
 
 ## Plan set
 

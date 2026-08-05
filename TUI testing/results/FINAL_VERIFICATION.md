@@ -1,11 +1,12 @@
 # V20 Ratatui Console Verification
 
-Status: **PACKAGE BUILT; FOUNDATION AND COMPONENT GATES VERIFIED; FULL PRODUCTION RELEASE BLOCKED**
+Status: **PACKAGE BUILT; FOCUSED AND FULL TEST GATES VERIFIED; PRODUCTION ADAPTERS NOT ACTIVATED**
 
 This receipt separates tested console behavior from capabilities that are not
 connected or authorized. `NOT ACTIVATED` means the control or production source
 is intentionally off. `UNVERIFIED` means no direct real-terminal or manual test
-was run. `BLOCKED` is a known release blocker.
+was run. `BLOCKED` is a known release blocker. High-risk production adapters
+remain separate from this safe console delivery.
 
 ## Delivered
 
@@ -35,15 +36,15 @@ was run. `BLOCKED` is a known release blocker.
 | Portfolio movement waits for execution and broker read-back | PASS | Contract/fake tests preserve current/proposed/approved columns and executed-only rank. Production portfolio/order/broker reads are `NOT ACTIVATED` because no approved controller adapter is configured. |
 | Agent chat, Qwen context, memory, training, and approval limits | PASS | Policy/component tests cover separate bounded chats, one 64K Qwen lease, compression, 2,000-word managed memory, reversible archive, activation grants, and approvals. Continuous work, curation, training, deletion, and merge remain `NOT ACTIVATED`. |
 | Runtime lifecycle and high-risk operations | NOT ACTIVATED | Runtime, service, scheduler, training, deletion, merge, broker, risk, and Live adapters or activation grants remain off. |
-| Production backup/restore command path | BLOCKED | P2 scope gap: DPAPI backup/restore passes temporary-state tests, but the production gateway does not inject a `BackupCommandPort`; the TUI buttons remain disabled. |
+| Production backup/restore command path | NOT ACTIVATED | DPAPI backup/restore passes temporary-state tests, but the production gateway deliberately does not inject a `BackupCommandPort`; restore is state-mutating and the TUI buttons remain disabled pending an explicit activation decision. |
 | Notification implementation | PASS | Generic-content, activation-ID, cleanup, failure-health, and locked-console tests pass. Actual Windows display/activation/Action Center cleanup remains `UNVERIFIED`. |
-| Required focused tests | PASS | `session-verification.json` records Ruff, 1,313 focused Python passes, 1,313 reproducible-script passes, Rust debug/release, and README/script checks. |
-| Broader repository suite | BLOCKED | Environment blocker: 2,070 passed, 5 skipped, and 4 existing OpenCode process-tree tests failed because this sandbox denied their required Windows `taskkill`; no failure was attributed to the TUI slice. |
+| Required focused tests | PASS | `verification-commands.json` records 1,314 focused Python passes plus Rust format, Clippy, and all-target tests. |
+| Broader repository suite | PASS | Fresh full suite: 2,087 passed and 5 skipped; no failures. |
 | Component performance evidence | PASS | Component renderer, real DPAPI/disposable gateway, and 10-minute Tick/render CPU gates pass with raw samples in `performance.json`. |
 | One-hour retained-memory component gate | PASS | Release test ran for `3,608.02 s`; peak live-allocation growth was `9,068,088` bytes and end growth was `5,936` bytes, both below `10,485,760`. PrivateUsage is informational. |
 | Full-process performance acceptance | UNVERIFIED | Real ConPTY, production named-pipe, native/Python/GPU memory, and complete-process startup, idle, and shutdown remain unverified. |
 | Protected data and credentials remain untouched | PASS | No changed path is under `vesper/data/massive/` or `vesper/data/model_research/`; no credential was used, printed, stored, or tested. |
-| High-risk activation remains separate | PASS | Broker, orders, Live, risk changes, runtime/service control, scheduler, training, candidate deletion, automatic merge, and push remain disabled or unavailable. |
+| High-risk activation remains separate | PASS | Broker, orders, Live, risk changes, runtime/service control, scheduler, training, candidate deletion, and automatic merge remain disabled or unavailable. Git push is separately operator-authorized and does not activate runtime capabilities. |
 
 ## Production gaps
 
@@ -55,17 +56,16 @@ was run. `BLOCKED` is a known release blocker.
 | Real Windows terminal input and event-to-visible latency | UNVERIFIED | Component/TestBackend measurements are not ConPTY or Crossterm end to end. |
 | Full Windows process startup, unlock, idle CPU, shutdown, and memory | UNVERIFIED | The one-hour Rust component gate passed, but it does not include all native, Python, GPU, VRAM, named-pipe, or terminal costs. |
 | Permanently hung admitted gateway handler | PASS | `_GatewayCoordinator.stop()` now uses a bounded join; late disconnect returns without waiting when the handler remains hung. Regression and full gateway tests pass. The handler remains a daemon thread and is not force-cancelled. |
-| Production backup/restore invocation | BLOCKED | The service and temporary-state tests exist, but no production backup command adapter is connected. |
+| Production backup/restore invocation | NOT ACTIVATED | The service and temporary-state tests exist, but no production backup command adapter is connected. Restore remains a separate state-writing activation. |
 | Manual Windows console acceptance | UNVERIFIED | All ten screens, password, themes, three text sizes, keyboard/mouse parity, close behavior, unavailable controls, toast, temporary backup/restore, dirty-main block, and shortcut launch were not manually completed. No user password was requested or stored; no shortcut was installed. |
 
 ## Fresh verification
 
 - Changed Python files: Ruff format/check pass, 48 files.
-- Focused Python: `1,313 passed` in `160.696 s`.
-- Reproducible script: `1,313 passed` in `160.696 s`; Rust format, Clippy, and all-target tests pass.
-- Full Python repository: `2,070 passed, 5 skipped, 4 sandbox-taskkill failures` in `311.35 s`.
-- Rust debug: `428 passed, 4 ignored`; release: `428 passed, 4 ignored`.
-- README and packaging-script checks: `15 passed` in `7.00 s`.
+- Focused Python: `1,314 passed`; the official verification script also passed
+  Rust format, Clippy, and all-target tests.
+- Full Python repository: `2,087 passed, 5 skipped` in `266.00 s`.
+- Release package build: PASS; exact package entry and hash checks passed.
 - Idle Tick/render component: p95 `44` percent-basis-points (`0.44%`), max
   `59` (`0.59%`), gate `< 1%`.
 - Cached DPAPI/disposable-gateway first frame: p95 `316,026,400 ns`, max
@@ -78,20 +78,19 @@ was run. `BLOCKED` is a known release blocker.
 - Fresh shutdown regression: `tests/platform/tui/test_gateway.py` passed; full
   gateway suite `57 passed`; full TUI/operations Python suite `1,314 passed`.
 - Package executable: `5,321,216` bytes, SHA-256
-  `c0c253c85897a619a7b03c9068e411fefa7685d1854e5c2918bde482e8ca831c`.
+  `334c1edfbad930a9fce1bf871000597f82522fe106202148ce0fe2c1c2704900`.
 - Packaged README SHA-256:
   `00e6436d9caa6efcdbd2425ba3ce16f5102724fd6f639386131bdfe041bc77cd`.
 - Build receipt SHA-256:
-  `87a33eb079bf2edc5b9196519ca4daa09f7cd9974acdca0bc50b9052ea68ec43`.
+  `e821b1055d236573ebe272a8bdb8add3f6d119bb25d1f7536fc1ee86800b38e8`.
 
 ## Delivery state
 
 - Branch: `codex/vesper/ratatui-console`.
-- HEAD: `8174e0531d2c9e7334314a796097614caa0cd079` plus a verified uncommitted final slice.
-- Source manifest: 130 changed/untracked source files, SHA-256
-  `89625e960f7648f06ced178b6728a493304288f5cea279f0f9be1d1eb2d797a3`.
-- Final commit is blocked because the sandbox denied creation of the linked-
-  worktree `index.lock`. No stale lock file is present. Existing commits are
-  intact. No merge or push was attempted.
+- Code baseline freshly verified: `0075fe80aee3f9f0ea63ffc751f0bb005e7b5b9f`.
+- No uncommitted implementation slice remains. This receipt and the command
+  receipt are closeout metadata changes.
+- Main integration must preserve the unrelated dirty root worktree; the
+  feature branch is ready for a clean main-based merge.
 - Pre-existing untracked `=` and sandbox-created `.pytest-*` directories were
   preserved and were not packaged.
