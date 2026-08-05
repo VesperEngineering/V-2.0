@@ -1,6 +1,6 @@
 # V20 Ratatui Console Build Roadmap
 
-Status: implementation complete; focused/full gates pass; integration pending
+Status: implementation complete; focused/full gates pass; pushed to origin/main
 Date: 2026-08-03
 Design: `TUI testing/RATATUI_DESIGN.md`
 
@@ -40,12 +40,15 @@ must not turn legacy Python objects into an unreviewed broker control path.
   and exact `dist/tui` package are implemented.
 - Fresh focused verification passes: Python `1,314 passed`; Rust format,
   Clippy, and all-target tests pass.
-- Fresh full-repository verification passes: `2,087 passed, 5 skipped`.
+- Fresh full-repository verification passes: `2,158 passed, 5 skipped` on the
+  merged tree.
 - Broker, order, risk, Live, scheduler, training, source-control, and
   production backup/restore adapters remain disabled or unavailable.
 - Backup/restore remains an explicit activation gate because restore writes
   state; temporary-state service tests pass without enabling the production
   adapter.
+- Clean main-based integration was verified and pushed non-force to
+  `origin/main`.
 
 ## Plan set
 

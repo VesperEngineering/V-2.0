@@ -39,7 +39,7 @@ remain separate from this safe console delivery.
 | Production backup/restore command path | NOT ACTIVATED | DPAPI backup/restore passes temporary-state tests, but the production gateway deliberately does not inject a `BackupCommandPort`; restore is state-mutating and the TUI buttons remain disabled pending an explicit activation decision. |
 | Notification implementation | PASS | Generic-content, activation-ID, cleanup, failure-health, and locked-console tests pass. Actual Windows display/activation/Action Center cleanup remains `UNVERIFIED`. |
 | Required focused tests | PASS | `verification-commands.json` records 1,314 focused Python passes plus Rust format, Clippy, and all-target tests. |
-| Broader repository suite | PASS | Fresh full suite: 2,087 passed and 5 skipped; no failures. |
+| Broader repository suite | PASS | Fresh merged-tree suite: 2,158 passed and 5 skipped; no failures. |
 | Component performance evidence | PASS | Component renderer, real DPAPI/disposable gateway, and 10-minute Tick/render CPU gates pass with raw samples in `performance.json`. |
 | One-hour retained-memory component gate | PASS | Release test ran for `3,608.02 s`; peak live-allocation growth was `9,068,088` bytes and end growth was `5,936` bytes, both below `10,485,760`. PrivateUsage is informational. |
 | Full-process performance acceptance | UNVERIFIED | Real ConPTY, production named-pipe, native/Python/GPU memory, and complete-process startup, idle, and shutdown remain unverified. |
@@ -64,7 +64,7 @@ remain separate from this safe console delivery.
 - Changed Python files: Ruff format/check pass, 48 files.
 - Focused Python: `1,314 passed`; the official verification script also passed
   Rust format, Clippy, and all-target tests.
-- Full Python repository: `2,087 passed, 5 skipped` in `266.00 s`.
+- Full Python repository: `2,158 passed, 5 skipped` in `278.98 s` on the merged tree.
 - Release package build: PASS; exact package entry and hash checks passed.
 - Idle Tick/render component: p95 `44` percent-basis-points (`0.44%`), max
   `59` (`0.59%`), gate `< 1%`.
@@ -90,7 +90,7 @@ remain separate from this safe console delivery.
 - Code baseline freshly verified: `0075fe80aee3f9f0ea63ffc751f0bb005e7b5b9f`.
 - No uncommitted implementation slice remains. This receipt and the command
   receipt are closeout metadata changes.
-- Main integration must preserve the unrelated dirty root worktree; the
-  feature branch is ready for a clean main-based merge.
+- Clean main-based integration was verified after conflict repair and pushed
+  non-force to `origin/main`.
 - Pre-existing untracked `=` and sandbox-created `.pytest-*` directories were
   preserved and were not packaged.
