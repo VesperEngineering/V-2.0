@@ -10,6 +10,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 pub fn render_memory(frame: &mut Frame<'_>, area: Rect, view: &MemoryView, state: &ScreenState) {
     let area = render_stale_notice(frame, area, view.freshness, view.error.as_deref(), state);
+    let sections = Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(area);
+    render_agent_usage_notice(frame, sections[0], view, state);
+    let area = sections[1];
     if area.width < 120 {
         match state.narrow_panel % 3 {
             0 => render_rows(
@@ -97,22 +100,32 @@ fn render_rows(
                 } else {
                     0
                 })
-                .map(|row| {
+                .flat_map(|row| {
                     let (badge, style) = match row.status {
                         MemoryStatus::Core => ("[OK] CORE", state.theme.palette().resolved),
                         MemoryStatus::Archived => ("[A] ARCHIVED", base_style(state)),
                     };
-                    Line::from(vec![
-                        Span::raw(marker(state, row.memory_id.as_str(), DetailKind::Memory)),
-                        Span::styled(badge, style),
-                        Span::raw(format!(
-                            " {} | {} | {} | Evidence {}",
-                            row.memory_id.as_str(),
-                            sanitize(row.summary.as_str()),
-                            format_eastern_time(&row.updated_at_utc),
-                            ids(&row.evidence_ids)
+                    vec![
+                        Line::from(vec![
+                            Span::raw(marker(state, row.memory_id.as_str(), DetailKind::Memory)),
+                            Span::styled(badge, style),
+                            Span::raw(format!(
+                                " {} | {} | {} | Evidence {}",
+                                row.memory_id.as_str(),
+                                sanitize(row.summary.as_str()),
+                                format_eastern_time(&row.updated_at_utc),
+                                ids(&row.evidence_ids)
+                            )),
+                        ]),
+                        Line::from(format!("USED BY {}", ids(&row.used_by_agents))),
+                        Line::from(format!(
+                            "CHANGE REASON {}",
+                            row.change_reason.as_ref().map_or_else(
+                                || "UNAVAILABLE".to_owned(),
+                                |value| sanitize(value.as_str())
+                            )
                         )),
-                    ])
+                    ]
                 })
                 .collect::<Vec<_>>();
             policy
@@ -148,7 +161,7 @@ fn render_history(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            let mut lines = vec![Line::from("Reasons/agent use: [?] UNAVAILABLE")];
+            let mut lines = Vec::new();
             lines.extend(
                 view.history
                     .iter()
@@ -183,6 +196,32 @@ fn render_history(
             .style(base_style(state))
             .wrap(Wrap { trim: true })
             .block(panel(focus_title(title, focused), state)),
+        area,
+    );
+}
+
+fn render_agent_usage_notice(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &MemoryView,
+    state: &ScreenState,
+) {
+    let usage_reported = view.rows.iter().any(|row| !row.used_by_agents.is_empty());
+    let (status, reason) = if usage_reported {
+        (
+            "[OK] AGENT MEMORY USE REPORTED",
+            "See USED BY on each memory row.".to_owned(),
+        )
+    } else {
+        (
+            "[?] AGENT MEMORY USE UNAVAILABLE",
+            sanitize(view.agent_usage_error.as_str()),
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(status), Line::from(reason)])
+            .style(base_style(state))
+            .block(panel("AGENT USE STATUS", state)),
         area,
     );
 }

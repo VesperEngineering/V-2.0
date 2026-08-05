@@ -5,12 +5,12 @@ expression: "|_, _| { render_risk_narrow(&fixture().risk, 1) } (78, 22)"
 ┌> APPROVALS - PANEL 2/4─────────────────────────────────────────────────────┐
 │[~] STALE approval:stale | 2026-01-15 07:34:56 EST | Approval?reason |      │
 │Evidence evidence:1                                                         │
-│                                                                            │
-│                                                                            │
-│                                                                            │
-│                                                                            │
-│                                                                            │
-│                                                                            │
+│SYMBOLS NVDA, AAPL                                                          │
+│NVDA 10.0% -> 12.0%                                                         │
+│RISKS Concentration increases.                                              │
+│CONSEQUENCES NVDA order will be submitted.                                  │
+│BASIS aaaaaaaaaaaa                                                          │
+│STALE REASON Market evidence expired.                                       │
 │                                                                            │
 │                                                                            │
 │                                                                            │

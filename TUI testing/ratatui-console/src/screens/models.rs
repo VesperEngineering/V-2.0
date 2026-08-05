@@ -5,7 +5,10 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::contract::{CandidateStatus, Freshness, ModelsView, StrategyName};
+use crate::contract::{
+    CandidateStatus, Freshness, GateComparison, ModelGateState, ModelsView, RegimeState,
+    StrategyName,
+};
 use crate::layout::DisplayMode;
 use crate::screens::{DetailKind, ScreenState};
 use crate::theme::Palette;
@@ -93,18 +96,58 @@ pub fn render_models(frame: &mut Frame<'_>, area: Rect, view: &ModelsView, state
 }
 
 fn opinion_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'static>> {
-    let consensus = agreed_regime(view)
-        .map(safe_text)
-        .unwrap_or_else(|| "UNCERTAIN".to_owned());
+    let final_regime = match view.regime_state {
+        RegimeState::Decided => view.final_regime.as_ref().map_or_else(
+            || "UNAVAILABLE".to_owned(),
+            |value| safe_text(value.as_str()),
+        ),
+        RegimeState::Uncertain => "UNCERTAIN".to_owned(),
+        RegimeState::Unavailable => "UNAVAILABLE".to_owned(),
+    };
+    let confidence = view.final_regime_confidence.map_or_else(
+        || "UNAVAILABLE".to_owned(),
+        |value| format!("{:.1}%", value * 100.0),
+    );
+    let block_reason = view.block_reason.as_ref().map_or_else(
+        || "UNAVAILABLE".to_owned(),
+        |value| safe_text(value.as_str()),
+    );
     let mut lines = vec![
-        Line::from("FINAL REGIME: UNAVAILABLE - controller truth not provided"),
-        Line::from(format!("OPINION CONSENSUS: {consensus}")),
+        Line::from(format!(
+            "FINAL REGIME: {final_regime} | CONFIDENCE {confidence}"
+        )),
+        Line::from(format!(
+            "ACTIVE {}",
+            optional_id(view.active_model_id.as_ref())
+        )),
+        Line::from(format!(
+            "ROLLBACK {}",
+            optional_id(view.rollback_model_id.as_ref())
+        )),
+        Line::from(format!(
+            "FAMILY {}",
+            optional_text(view.approved_family.as_ref().map(|value| value.as_str()))
+        )),
+        Line::from(format!(
+            "STRATEGY {}",
+            view.approved_strategy.map_or("UNAVAILABLE", strategy_label)
+        )),
+        Line::from(format!(
+            "FEATURE SET {}",
+            optional_id(view.approved_feature_set_id.as_ref())
+        )),
+        Line::from(if view.automatic_changes_blocked {
+            "AUTOMATIC CHANGES: BLOCKED".to_owned()
+        } else {
+            "AUTOMATIC CHANGES: ALLOWED".to_owned()
+        }),
+        Line::from(format!("BLOCK REASON: {block_reason}")),
     ];
     if view.opinions.is_empty() {
         lines.push(Line::from("No model opinions reported."));
         return lines;
     }
-    lines.push(Line::default());
+    lines.push(Line::from("MODEL OPINIONS"));
     for opinion in &view.opinions {
         lines.push(Line::from(format!(
             "{}{} | {} | {:.1}%",
@@ -119,14 +162,6 @@ fn opinion_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'static>> {
     lines
 }
 
-fn agreed_regime(view: &ModelsView) -> Option<&str> {
-    let first = view.opinions.first()?.regime.as_str();
-    view.opinions
-        .iter()
-        .all(|opinion| opinion.regime.as_str() == first)
-        .then_some(first)
-}
-
 fn candidate_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'static>> {
     if view.candidates.is_empty() {
         return vec![Line::from("No model candidates reported.")];
@@ -134,7 +169,7 @@ fn candidate_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'static>>
     let mut lines = Vec::new();
     for candidate in &view.candidates {
         lines.push(Line::from(format!(
-            "{}{} | FAMILY {} | STRATEGY {} | {}",
+            "{}{} | FAMILY {} | STRATEGY {}",
             marker(
                 state,
                 candidate.candidate_id.as_str(),
@@ -142,14 +177,36 @@ fn candidate_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'static>>
             ),
             safe_text(candidate.candidate_id.as_str()),
             safe_text(candidate.family.as_str()),
-            strategy_label(candidate.strategy),
-            format_eastern_time(&candidate.created_at_utc)
+            strategy_label(candidate.strategy)
         )));
         lines.push(Line::from(format!(
-            "STATUS {} | RETENTION POLICY {} | EVIDENCE {}",
-            candidate_status(candidate.status),
-            retention_policy_label(candidate.status),
+            "{} | EVIDENCE {}",
+            format_eastern_time(&candidate.created_at_utc),
             evidence_list(&candidate.evidence_ids)
+        )));
+        lines.push(Line::from(format!(
+            "STATUS {} | RETENTION POLICY {}",
+            candidate_status(candidate.status),
+            retention_policy_label(candidate.status)
+        )));
+        lines.push(Line::from(format!(
+            "FEATURE {} | DATA {} | EVALUATION {}",
+            optional_id(candidate.feature_set_id.as_ref()),
+            candidate
+                .data_identity
+                .as_ref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), sha256_short),
+            candidate
+                .evaluation_contract
+                .as_ref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), sha256_short)
+        )));
+        lines.push(Line::from(format!(
+            "STATUS DETAIL {}",
+            candidate.status_reason.as_ref().map_or_else(
+                || "UNAVAILABLE".to_owned(),
+                |value| safe_text(value.as_str())
+            )
         )));
         add_spacing(&mut lines, state.display_mode);
     }
@@ -157,7 +214,35 @@ fn candidate_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'static>>
 }
 
 fn evidence_metric_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("METRICS")];
+    let mut lines = vec![Line::from("GATES")];
+    if view.gates.is_empty() {
+        lines.push(Line::from("[?] UNAVAILABLE - No model gates reported."));
+    } else {
+        for gate in &view.gates {
+            lines.extend([
+                Line::from(format!(
+                    "{} | {}",
+                    safe_text(gate.gate_id.as_str()),
+                    model_gate_state(gate.state)
+                )),
+                Line::from(format!(
+                    "METRIC {} {} {:.4} | VALUE {} | BASELINE {}",
+                    safe_text(gate.metric_id.as_str()),
+                    gate_comparison(gate.comparison),
+                    gate.threshold,
+                    optional_number(gate.candidate_value),
+                    optional_number(gate.baseline_value)
+                )),
+                Line::from(format!(
+                    "WINDOW {}",
+                    safe_text(gate.evaluation_window.as_str())
+                )),
+                Line::from(format!("REASON {}", safe_text(gate.reason.as_str()))),
+                Line::from(format!("EVIDENCE {}", evidence_list(&gate.evidence_ids))),
+            ]);
+        }
+    }
+    lines.push(Line::from("METRICS"));
     if view.metrics.is_empty() {
         lines.push(Line::from("No metrics reported."));
     } else {
@@ -204,6 +289,40 @@ fn evidence_metric_lines(view: &ModelsView, state: &ScreenState) -> Vec<Line<'st
         }
     }
     lines
+}
+
+fn optional_id(value: Option<&crate::contract::SafeId>) -> String {
+    value.map_or_else(
+        || "UNAVAILABLE".to_owned(),
+        |value| safe_text(value.as_str()),
+    )
+}
+
+fn optional_text(value: Option<&str>) -> String {
+    value.map_or_else(|| "UNAVAILABLE".to_owned(), safe_text)
+}
+
+fn optional_number(value: Option<f64>) -> String {
+    value.map_or_else(|| "UNAVAILABLE".to_owned(), |value| format!("{value:.4}"))
+}
+
+fn model_gate_state(state: ModelGateState) -> &'static str {
+    match state {
+        ModelGateState::Pass => "PASS",
+        ModelGateState::Fail => "FAIL",
+        ModelGateState::Pending => "PENDING",
+        ModelGateState::Unavailable => "UNAVAILABLE",
+    }
+}
+
+fn gate_comparison(comparison: GateComparison) -> &'static str {
+    match comparison {
+        GateComparison::Gte => ">=",
+        GateComparison::Lte => "<=",
+        GateComparison::Gt => ">",
+        GateComparison::Lt => "<",
+        GateComparison::Eq => "=",
+    }
 }
 
 fn add_spacing(lines: &mut Vec<Line<'static>>, display_mode: DisplayMode) {
@@ -397,6 +516,10 @@ fn sha256_text(value: &crate::contract::Sha256Hex) -> String {
         .ok()
         .and_then(|value| value.as_str().map(safe_text))
         .unwrap_or_else(|| "UNAVAILABLE".to_owned())
+}
+
+fn sha256_short(value: &crate::contract::Sha256Hex) -> String {
+    sha256_text(value).chars().take(12).collect()
 }
 
 fn panel<'a>(title: impl Into<Line<'a>>, palette: Palette) -> Block<'a> {

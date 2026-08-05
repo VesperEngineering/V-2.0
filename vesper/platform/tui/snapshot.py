@@ -14,8 +14,10 @@ from vesper.platform.tui.contracts import MessageType, SnapshotPayload, WireEnve
 from vesper.platform.tui.live_readiness import unavailable_live_readiness
 from vesper.platform.tui.ports import (
     AgentFacts,
+    AttentionFacts,
     DataFacts,
     MemoryFacts,
+    MEMORY_AGENT_USAGE_UNAVAILABLE,
     ModelFacts,
     OrderFacts,
     PlatformRuntimeFacts,
@@ -30,9 +32,11 @@ from vesper.platform.tui.views import (
     AgentCard,
     AgentsView,
     AlertView,
+    BlockedActionRow,
     CapabilityState,
     CapabilityView,
     ConsoleSnapshot,
+    CircuitBreakerView,
     DataView,
     EventPayload,
     EventPresentation,
@@ -44,6 +48,7 @@ from vesper.platform.tui.views import (
     MemoryRow,
     MemoryView,
     MetricRow,
+    ModelGateRow,
     ModelOpinionRow,
     ModelsView,
     OperatingMode,
@@ -51,6 +56,7 @@ from vesper.platform.tui.views import (
     OrdersView,
     PortfolioRow,
     PortfolioView,
+    QwenStatusView,
     RepositoryRow,
     ReturnComponentRow,
     RiskLimitRow,
@@ -60,6 +66,7 @@ from vesper.platform.tui.views import (
     ServiceRow,
     ShellSnapshot,
     SourceRow,
+    SystemHealthRow,
     SystemView,
     TimelineRow,
     TimelineView,
@@ -80,6 +87,8 @@ REPOSITORY_SYSTEM_SOURCE_ID: Final = "repository.system"
 WINDOWS_SYSTEM_SOURCE_ID: Final = "windows.system"
 TIMELINE_SOURCE_ID: Final = "events.timeline"
 PLATFORM_RUNTIME_SOURCE_ID: Final = "platform.runtime"
+ATTENTION_SOURCE_ID: Final = "operations.attention"
+NOTIFICATION_HEALTH_SOURCE_ID: Final = "operations.notification-health"
 
 SOURCE_IDS: Final = frozenset(
     {
@@ -94,6 +103,8 @@ SOURCE_IDS: Final = frozenset(
         WINDOWS_SYSTEM_SOURCE_ID,
         TIMELINE_SOURCE_ID,
         PLATFORM_RUNTIME_SOURCE_ID,
+        ATTENTION_SOURCE_ID,
+        NOTIFICATION_HEALTH_SOURCE_ID,
     }
 )
 
@@ -109,6 +120,8 @@ _EXPECTED_FACT_TYPES: Final = {
     WINDOWS_SYSTEM_SOURCE_ID: SystemFacts,
     TIMELINE_SOURCE_ID: TimelineFacts,
     PLATFORM_RUNTIME_SOURCE_ID: PlatformRuntimeFacts,
+    ATTENTION_SOURCE_ID: AttentionFacts,
+    NOTIFICATION_HEALTH_SOURCE_ID: SystemFacts,
 }
 
 _ACTION_CAPABILITY_IDS: Final = (
@@ -331,6 +344,23 @@ class _ProjectedSnapshot:
     portfolio_rank_source: str | None
     header: HeaderView
     capabilities: tuple[CapabilityView, ...]
+    alerts_available: bool
+    memory_agent_usage_error: str
+    model_active_model_id: str | None
+    model_rollback_model_id: str | None
+    model_approved_family: str | None
+    model_approved_strategy: str | None
+    model_approved_feature_set_id: str | None
+    model_final_regime: str | None
+    model_final_regime_confidence: float | None
+    model_regime_state: str
+    model_automatic_changes_blocked: bool
+    model_block_reason: str | None
+    model_gates: tuple[ModelGateRow, ...]
+    risk_blocked_actions: tuple[BlockedActionRow, ...]
+    risk_circuit_breaker: CircuitBreakerView
+    system_qwen: QwenStatusView
+    system_health: tuple[SystemHealthRow, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,6 +461,7 @@ def _project(
         metadata["agents"] = _sample_metadata(runtime_sample, "agents")
     windows: dict[str, tuple[object, ...]] = {target: () for target in _TARGET_ORDER}
     source_omissions: dict[str, int] = {}
+    alerts_available = False
 
     portfolio_sample = samples.get(PORTFOLIO_SOURCE_ID)
     portfolio_facts = _facts(portfolio_sample, PortfolioFacts)
@@ -445,6 +476,7 @@ def _project(
             error=portfolio_error,
         )
     windows["portfolio.rows"] = portfolio_rows
+    windows["impact.holdings"] = portfolio_rows
 
     order_sample = samples.get(ORDER_SOURCE_ID)
     order_facts = _facts(order_sample, OrderFacts)
@@ -480,13 +512,26 @@ def _project(
                 active_agents = agent_facts.active_work
                 windows["agents.rows"] = active_agents
 
+    model_active_model_id = None
+    model_rollback_model_id = None
+    model_approved_family = None
+    model_approved_strategy = None
+    model_approved_feature_set_id = None
+    model_final_regime = None
+    model_final_regime_confidence = None
+    model_regime_state = "unavailable"
+    model_automatic_changes_blocked = True
+    model_block_reason = "Controller model summary is unavailable."
+    model_gates: tuple[ModelGateRow, ...] = ()
     model_sample = samples.get(MODEL_SOURCE_ID)
     model_facts = _facts(model_sample, ModelFacts)
     if model_facts is not None:
         duplicate_models = (
             _has_duplicate_id(model_facts.opinions, "model_id")
             or _has_duplicate_id(model_facts.candidates, "candidate_id")
+            or _has_duplicate_id(model_facts.metrics, "metric_id")
             or _has_duplicate_id(model_facts.evidence, "evidence_id")
+            or _has_duplicate_id(model_facts.gates, "gate_id")
         )
         if duplicate_models:
             metadata["models"] = _duplicate_metadata(model_sample, "model view IDs")
@@ -494,7 +539,19 @@ def _project(
         else:
             windows["models.opinions"] = model_facts.opinions
             windows["models.candidates"] = model_facts.candidates
+            windows["models.metrics"] = model_facts.metrics
             windows["models.evidence"] = model_facts.evidence
+            model_active_model_id = model_facts.configured_model_id
+            model_rollback_model_id = model_facts.rollback_model_id
+            model_approved_family = model_facts.approved_family
+            model_approved_strategy = model_facts.configured_strategy
+            model_approved_feature_set_id = model_facts.approved_feature_set_id
+            model_final_regime = model_facts.final_regime
+            model_final_regime_confidence = model_facts.final_regime_confidence
+            model_regime_state = model_facts.regime_state
+            model_automatic_changes_blocked = model_facts.automatic_changes_blocked
+            model_block_reason = model_facts.block_reason
+            model_gates = model_facts.gates
 
     timeline_facts = _facts(samples.get(TIMELINE_SOURCE_ID), TimelineFacts)
     timeline_rows: tuple[TimelineRow, ...] = ()
@@ -508,7 +565,6 @@ def _project(
                 error="Duplicate timeline event IDs were rejected.",
             )
             metadata["timeline"] = duplicate_metadata
-            metadata["impact"] = duplicate_metadata
             timeline_facts = None
         else:
             timeline_rows = timeline_facts.rows
@@ -518,21 +574,21 @@ def _project(
         impact_events = tuple(row for row in timeline_rows if row.impact)
         windows["impact.events"] = impact_events
         source_omissions["impact.events"] = timeline_facts.hidden_impact_event_count
-        affected_symbols = {row.symbol for row in impact_events if row.symbol is not None}
         affected_agents = {row.agent_id for row in impact_events if row.agent_id is not None}
-        windows["impact.holdings"] = tuple(
-            row for row in portfolio_rows if row.symbol in affected_symbols
-        )
         windows["impact.agents"] = tuple(
             row for row in active_agents if row.agent in affected_agents
         )
-        metadata["impact"] = metadata["timeline"]
         windows["portfolio.history"] = tuple(row for row in timeline_rows if row.symbol is not None)
         windows["orders.history"] = tuple(row for row in timeline_rows if row.order_id is not None)
         windows["agents.history"] = tuple(row for row in timeline_rows if row.agent_id is not None)
-    else:
-        metadata.setdefault("impact", _unavailable_metadata("impact"))
+    metadata["impact"] = _impact_metadata(metadata)
 
+    risk_blocked_actions: tuple[BlockedActionRow, ...] = ()
+    risk_circuit_breaker = CircuitBreakerView(
+        state="unavailable",
+        reason="Controller circuit-breaker status is unavailable.",
+        observed_at_utc=None,
+    )
     risk_sample = samples.get(RISK_SOURCE_ID)
     risk_facts = _facts(risk_sample, RiskFacts)
     if risk_facts is not None:
@@ -556,6 +612,35 @@ def _project(
             metadata["risk"] = risk_metadata
         windows["risk.limits"] = _risk_limits(risk_facts)
         windows["risk.metrics"] = _risk_metrics(risk_facts, risk_metadata)
+        if risk_facts.blocked_actions is not None:
+            if _has_duplicate_id(risk_facts.blocked_actions, "action_id"):
+                metadata["risk"] = _duplicate_metadata(risk_sample, "blocked action IDs")
+            else:
+                risk_blocked_actions = risk_facts.blocked_actions
+        if risk_facts.circuit_breaker is not None:
+            risk_circuit_breaker = risk_facts.circuit_breaker
+        unavailable_deep_risk = tuple(
+            reason
+            for reason in (
+                risk_facts.blocked_actions_error,
+                risk_facts.circuit_breaker_error,
+            )
+            if reason is not None
+        )
+        if unavailable_deep_risk and metadata["risk"].freshness is not Freshness.UNAVAILABLE:
+            risk_metadata = metadata["risk"]
+            metadata["risk"] = _ViewMetadata(
+                freshness=Freshness.STALE,
+                as_of_utc=risk_metadata.as_of_utc,
+                source=risk_metadata.source,
+                error=_join_reasons(
+                    tuple(
+                        reason
+                        for reason in (risk_metadata.error, *unavailable_deep_risk)
+                        if reason is not None
+                    )
+                ),
+            )
 
     if runtime_facts is not None:
         if _has_duplicate_id(runtime_facts.pending_approvals, "approval_id"):
@@ -633,6 +718,14 @@ def _project(
                 ),
             )
 
+    alerts_available, alerts, metadata["risk"] = _merge_attention(
+        samples,
+        metadata["risk"],
+        has_other_risk_facts=risk_facts is not None or runtime_facts is not None,
+    )
+    windows["shell.alerts"] = alerts
+    windows["risk.alerts"] = alerts
+
     data_sample = samples.get(DATA_SOURCE_ID)
     data_facts = _facts(data_sample, DataFacts)
     if data_facts is not None:
@@ -646,13 +739,18 @@ def _project(
 
     memory_sample = samples.get(MEMORY_SOURCE_ID)
     memory_facts = _facts(memory_sample, MemoryFacts)
+    memory_agent_usage_error = MEMORY_AGENT_USAGE_UNAVAILABLE
     if memory_facts is not None:
-        if _has_duplicate_id(memory_facts.rows, "memory_id"):
-            metadata["memory"] = _duplicate_metadata(memory_sample, "memory IDs")
+        memory_agent_usage_error = memory_facts.agent_usage_error
+        if _has_duplicate_id(memory_facts.rows, "memory_id") or _has_duplicate_id(
+            memory_facts.history, "event_id"
+        ):
+            metadata["memory"] = _duplicate_metadata(memory_sample, "memory view IDs")
         else:
             windows["memory.rows"] = memory_facts.rows
+            windows["memory.history"] = memory_facts.history
 
-    system_metadata, system_windows = _merge_system(samples)
+    system_metadata, system_windows, system_qwen, system_health = _merge_system(samples)
     metadata["system"] = system_metadata
     windows.update(system_windows)
 
@@ -662,7 +760,10 @@ def _project(
         generated_at_utc,
         portfolio_rows,
         active_agents,
-        agent_facts,
+        system_qwen,
+        model_regime_state,
+        model_final_regime,
+        model_final_regime_confidence,
     )
     return _ProjectedSnapshot(
         metadata=metadata,
@@ -671,6 +772,82 @@ def _project(
         portfolio_rank_source=rank_source,
         header=header,
         capabilities=capabilities,
+        alerts_available=alerts_available,
+        memory_agent_usage_error=memory_agent_usage_error,
+        model_active_model_id=model_active_model_id,
+        model_rollback_model_id=model_rollback_model_id,
+        model_approved_family=model_approved_family,
+        model_approved_strategy=model_approved_strategy,
+        model_approved_feature_set_id=model_approved_feature_set_id,
+        model_final_regime=model_final_regime,
+        model_final_regime_confidence=model_final_regime_confidence,
+        model_regime_state=model_regime_state,
+        model_automatic_changes_blocked=model_automatic_changes_blocked,
+        model_block_reason=model_block_reason,
+        model_gates=model_gates,
+        risk_blocked_actions=risk_blocked_actions,
+        risk_circuit_breaker=risk_circuit_breaker,
+        system_qwen=system_qwen,
+        system_health=system_health,
+    )
+
+
+def _merge_attention(
+    samples: Mapping[str, SourceSample[object]],
+    risk_metadata: _ViewMetadata,
+    *,
+    has_other_risk_facts: bool,
+) -> tuple[bool, tuple[AlertView, ...], _ViewMetadata]:
+    sample = samples.get(ATTENTION_SOURCE_ID)
+    if sample is None:
+        return False, (), risk_metadata
+    facts = _facts(sample, AttentionFacts)
+    if facts is not None:
+        if _has_duplicate_id(facts.alerts, "alert_id"):
+            reason = "Duplicate attention alert IDs were rejected."
+        else:
+            if has_other_risk_facts or risk_metadata.freshness in {
+                Freshness.FRESH,
+                Freshness.STALE,
+            }:
+                return True, facts.alerts, risk_metadata
+            return (
+                True,
+                facts.alerts,
+                _ViewMetadata(
+                    freshness=Freshness.STALE,
+                    as_of_utc=sample.observed_at_utc,
+                    source=sample.source,
+                    error="Attention alerts are current; other risk facts are unavailable.",
+                ),
+            )
+    else:
+        reason = sample.error or "Attention alert state is loading."
+
+    if risk_metadata.freshness in {Freshness.FRESH, Freshness.STALE}:
+        return (
+            False,
+            (),
+            _ViewMetadata(
+                freshness=Freshness.STALE,
+                as_of_utc=risk_metadata.as_of_utc,
+                source=risk_metadata.source,
+                error=_join_reasons(
+                    tuple(item for item in (risk_metadata.error, reason) if item is not None)
+                ),
+            ),
+        )
+    return (
+        False,
+        (),
+        _ViewMetadata(
+            freshness=Freshness.UNAVAILABLE,
+            as_of_utc=None,
+            source=risk_metadata.source,
+            error=_join_reasons(
+                tuple(item for item in (risk_metadata.error, reason) if item is not None)
+            ),
+        ),
     )
 
 
@@ -740,12 +917,48 @@ def _ordered_portfolio(
     return tuple(retained), None, None
 
 
+def _unavailable_qwen(reason: str) -> QwenStatusView:
+    return QwenStatusView(
+        state="unavailable",
+        loaded_model=None,
+        current_agent=None,
+        queue_length=None,
+        context_percent=None,
+        last_inference_ms=None,
+        observed_at_utc=None,
+        error=reason,
+    )
+
+
+def _unavailable_health(reason: str) -> tuple[SystemHealthRow, ...]:
+    return tuple(
+        SystemHealthRow(
+            component=component,
+            state="unavailable",
+            reason=reason,
+            observed_at_utc=None,
+            checks=(),
+            broker_actions_blocked=component == "recovery",
+        )
+        for component in ("backup", "recovery", "notifications")
+    )
+
+
 def _merge_system(
     samples: Mapping[str, SourceSample[object]],
-) -> tuple[_ViewMetadata, dict[str, tuple[object, ...]]]:
+) -> tuple[
+    _ViewMetadata,
+    dict[str, tuple[object, ...]],
+    QwenStatusView,
+    tuple[SystemHealthRow, ...],
+]:
     entries = [
         (source_id, samples[source_id])
-        for source_id in (REPOSITORY_SYSTEM_SOURCE_ID, WINDOWS_SYSTEM_SOURCE_ID)
+        for source_id in (
+            REPOSITORY_SYSTEM_SOURCE_ID,
+            WINDOWS_SYSTEM_SOURCE_ID,
+            NOTIFICATION_HEALTH_SOURCE_ID,
+        )
         if source_id in samples
     ]
     empty = {
@@ -754,7 +967,13 @@ def _merge_system(
         "system.repositories": (),
     }
     if not entries:
-        return _unavailable_metadata("system"), empty
+        reason = "No controller-owned system projection is configured."
+        return (
+            _unavailable_metadata("system"),
+            empty,
+            _unavailable_qwen(reason),
+            _unavailable_health(reason),
+        )
 
     component_specs = (
         ("services", "service_id", "system.services"),
@@ -763,11 +982,16 @@ def _merge_system(
     )
     merged: dict[str, dict[str, object]] = {name: {} for name, _, _ in component_specs}
     observed_components = {name: False for name, _, _ in component_specs}
+    component_errors: dict[str, list[str]] = {name: [] for name, _, _ in component_specs}
+    qwen_errors: list[str] = []
+    health_errors: list[str] = []
     reasons: list[str] = []
     observed_times: list[datetime] = []
     sources: list[str] = []
     stale = False
     conflict = False
+    qwen: QwenStatusView | None = None
+    health: dict[str, SystemHealthRow] = {}
 
     for _source_id, sample in entries:
         sources.append(sample.source)
@@ -787,7 +1011,7 @@ def _merge_system(
             component_error = cast(str | None, getattr(facts, f"{component}_error"))
             if rows is None:
                 if component_error:
-                    reasons.append(component_error)
+                    component_errors[component].append(component_error)
                 continue
             observed_components[component] = True
             for row in rows:
@@ -797,25 +1021,60 @@ def _merge_system(
                     conflict = True
                 else:
                     merged[component][entity_id] = row
+        if facts.qwen is None:
+            if facts.qwen_error:
+                qwen_errors.append(facts.qwen_error)
+        elif qwen is not None and qwen != facts.qwen:
+            conflict = True
+        else:
+            qwen = facts.qwen
+        if facts.health is None:
+            if facts.health_error:
+                health_errors.append(facts.health_error)
+        else:
+            for row in facts.health:
+                known = health.get(row.component)
+                if known is not None and known != row:
+                    conflict = True
+                else:
+                    health[row.component] = row
 
     source = " + ".join(dict.fromkeys(sources))
     if len(source) > _MAX_VIEW_TEXT:
         source = " + ".join(source_id for source_id, _sample in entries)
     if conflict:
+        reason = "Conflicting system facts were rejected."
         return (
             _ViewMetadata(
                 freshness=Freshness.UNAVAILABLE,
                 as_of_utc=None,
                 source=source,
-                error="Conflicting system facts were rejected.",
+                error=reason,
             ),
             empty,
+            _unavailable_qwen(reason),
+            _unavailable_health(reason),
         )
     missing = [name for name, seen in observed_components.items() if not seen]
     if missing:
         stale = True
         reasons.append(f"System {', '.join(missing)} facts are unavailable.")
-    any_observed = any(observed_components.values())
+        for component in missing:
+            reasons.extend(component_errors[component])
+    if qwen is None:
+        stale = True
+        reasons.append("Qwen status is unavailable.")
+        reasons.extend(qwen_errors)
+    missing_health = tuple(
+        component
+        for component in ("backup", "recovery", "notifications")
+        if component not in health
+    )
+    if missing_health:
+        stale = True
+        reasons.append(f"System {', '.join(missing_health)} health is unavailable.")
+        reasons.extend(health_errors)
+    any_observed = any(observed_components.values()) or qwen is not None or bool(health)
     if not any_observed:
         freshness = (
             Freshness.LOADING
@@ -830,6 +1089,21 @@ def _merge_system(
                 error=None if freshness is Freshness.LOADING else _join_reasons(reasons),
             ),
             empty,
+            _unavailable_qwen(_join_reasons(reasons)),
+            _unavailable_health(_join_reasons(reasons)),
+        )
+    if not observed_times:
+        reason = "System facts have no trusted observation time."
+        return (
+            _ViewMetadata(
+                freshness=Freshness.UNAVAILABLE,
+                as_of_utc=None,
+                source=source,
+                error=reason,
+            ),
+            empty,
+            _unavailable_qwen(reason),
+            _unavailable_health(reason),
         )
     metadata = _ViewMetadata(
         freshness=Freshness.STALE if stale else Freshness.FRESH,
@@ -841,7 +1115,24 @@ def _merge_system(
         target: tuple(merged[component][key] for key in sorted(merged[component]))
         for component, _id_field, target in component_specs
     }
-    return metadata, windows
+    system_health = tuple(
+        health.get(component)
+        or SystemHealthRow(
+            component=component,
+            state="unavailable",
+            reason=f"Controller {component} health is unavailable.",
+            observed_at_utc=None,
+            checks=(),
+            broker_actions_blocked=component == "recovery",
+        )
+        for component in ("backup", "recovery", "notifications")
+    )
+    return (
+        metadata,
+        windows,
+        qwen or _unavailable_qwen("Controller Qwen status is unavailable."),
+        system_health,
+    )
 
 
 def _join_reasons(reasons: Sequence[str]) -> str:
@@ -853,6 +1144,67 @@ def _join_reasons(reasons: Sequence[str]) -> str:
     return joined[: _MAX_VIEW_TEXT - len(suffix)].rstrip() + suffix
 
 
+def _impact_metadata(metadata: Mapping[str, _ViewMetadata]) -> _ViewMetadata:
+    components = tuple((name, metadata[name]) for name in ("portfolio", "timeline", "agents"))
+    sources = " + ".join(dict.fromkeys(item.source for _, item in components))
+    usable = tuple(
+        (name, item)
+        for name, item in components
+        if item.freshness in {Freshness.FRESH, Freshness.STALE}
+    )
+    if len(usable) == len(components) and all(
+        item.freshness is Freshness.FRESH for _, item in usable
+    ):
+        return _ViewMetadata(
+            freshness=Freshness.FRESH,
+            as_of_utc=max(cast(datetime, item.as_of_utc) for _, item in usable),
+            source=sources,
+            error=None,
+        )
+    if usable:
+        reasons = []
+        for name, item in components:
+            if item.freshness is Freshness.FRESH:
+                continue
+            reasons.append(
+                item.error
+                or (
+                    f"{name.title()} projection is loading."
+                    if item.freshness is Freshness.LOADING
+                    else f"{name.title()} projection is not current."
+                )
+            )
+        return _ViewMetadata(
+            freshness=Freshness.STALE,
+            as_of_utc=max(cast(datetime, item.as_of_utc) for _, item in usable),
+            source=sources,
+            error=_join_reasons(reasons),
+        )
+    if all(item.freshness is Freshness.LOADING for _, item in components):
+        return _ViewMetadata(
+            freshness=Freshness.LOADING,
+            as_of_utc=None,
+            source=sources,
+            error=None,
+        )
+    return _ViewMetadata(
+        freshness=Freshness.UNAVAILABLE,
+        as_of_utc=None,
+        source=sources,
+        error=_join_reasons(
+            tuple(
+                item.error
+                or (
+                    f"{name.title()} projection is loading."
+                    if item.freshness is Freshness.LOADING
+                    else f"{name.title()} projection is unavailable."
+                )
+                for name, item in components
+            )
+        ),
+    )
+
+
 def _risk_limits(facts: RiskFacts) -> tuple[RiskLimitRow, ...]:
     return (
         RiskLimitRow(
@@ -860,12 +1212,18 @@ def _risk_limits(facts: RiskFacts) -> tuple[RiskLimitRow, ...]:
             current_value="1" if facts.breaker_tripped else "0",
             proposed_value=None,
             status="violated" if facts.breaker_tripped else "within",
+            proposal_reason=None,
+            review_state="not-required",
+            evidence_ids=(),
         ),
         RiskLimitRow(
             limit_id="risk.broker-reconciled",
             current_value="0",
             proposed_value=None,
             status="unavailable",
+            proposal_reason=None,
+            review_state="unavailable",
+            evidence_ids=(),
         ),
     )
 
@@ -912,7 +1270,10 @@ def _header(
     generated_at_utc: datetime,
     portfolio_rows: tuple[PortfolioRow, ...],
     active_agents: tuple[AgentCard, ...],
-    agent_facts_value: object | None,
+    qwen: QwenStatusView,
+    model_regime_state: str,
+    model_final_regime: str | None,
+    model_final_regime_confidence: float | None,
 ) -> HeaderView:
     data_metadata = metadata["data"]
     data_freshness = data_metadata.freshness
@@ -929,10 +1290,20 @@ def _header(
         if agents_are_fresh
         else []
     )
-    agent_facts = cast(AgentFacts | None, agent_facts_value)
-    qwen_state = "Unavailable"
-    if agents_are_fresh and agent_facts is not None and agent_facts.configured_roster:
-        qwen_state = "Running" if any(row.model == "qwen:64k" for row in running) else "Configured"
+    qwen_state = "Unavailable" if qwen.state == "unavailable" else qwen.state
+    qwen_context_percent = None if qwen.state == "unavailable" else qwen.context_percent
+    models_freshness = metadata["models"].freshness
+    models_are_usable = models_freshness in {Freshness.FRESH, Freshness.STALE}
+    stale_prefix = "STALE " if models_freshness is Freshness.STALE else ""
+    if models_are_usable and model_regime_state == "decided":
+        regime_label = stale_prefix + (model_final_regime or "Unavailable")
+        regime_confidence = model_final_regime_confidence
+    elif models_are_usable and model_regime_state == "uncertain":
+        regime_label = stale_prefix + "UNCERTAIN"
+        regime_confidence = None
+    else:
+        regime_label = "Unavailable"
+        regime_confidence = None
     portfolio_value = (
         _portfolio_value(portfolio_rows)
         if metadata["portfolio"].freshness is Freshness.FRESH
@@ -944,19 +1315,19 @@ def _header(
         operating_mode_reason=_UNAVAILABLE_MODE_REASON,
         data_freshness=data_freshness,
         data_age_seconds=age,
-        regime_label="Unavailable",
-        regime_confidence=None,
+        regime_label=regime_label,
+        regime_confidence=regime_confidence,
         portfolio_value=portfolio_value,
         next_rebalance_at_utc=None,
         rebalance_blockers=None,
         active_agent=running[0].agent if running else None,
         agent_queue_length=(
             sum(row.stage in {"queued", "waiting"} for row in active_agents)
-            if agents_are_fresh and agent_facts is not None and agent_facts.active_work is not None
+            if agents_are_fresh
             else None
         ),
         qwen_state=qwen_state,
-        qwen_context_percent=None,
+        qwen_context_percent=qwen_context_percent,
         current_time_utc=generated_at_utc,
         market_session="Unavailable",
     )
@@ -987,7 +1358,11 @@ def _assemble_snapshot(
         state_version=state_version,
         generated_at_utc=generated_at_utc,
         header=projected.header,
-        alerts=None,
+        alerts=(
+            cast(tuple[AlertView, ...], windows["shell.alerts"])
+            if projected.alerts_available
+            else None
+        ),
         capabilities=projected.capabilities,
     )
     metadata = projected.metadata
@@ -1036,6 +1411,17 @@ def _assemble_snapshot(
             candidates=cast(tuple, windows["models.candidates"]),
             metrics=cast(tuple[MetricRow, ...], windows["models.metrics"]),
             evidence=cast(tuple[EvidenceRow, ...], windows["models.evidence"]),
+            active_model_id=projected.model_active_model_id,
+            rollback_model_id=projected.model_rollback_model_id,
+            approved_family=projected.model_approved_family,
+            approved_strategy=cast(object, projected.model_approved_strategy),
+            approved_feature_set_id=projected.model_approved_feature_set_id,
+            final_regime=projected.model_final_regime,
+            final_regime_confidence=projected.model_final_regime_confidence,
+            regime_state=cast(object, projected.model_regime_state),
+            automatic_changes_blocked=projected.model_automatic_changes_blocked,
+            block_reason=projected.model_block_reason,
+            gates=projected.model_gates,
         ),
         timeline=TimelineView(
             **metadata["timeline"].values(),
@@ -1048,6 +1434,8 @@ def _assemble_snapshot(
             approvals=cast(tuple, windows["risk.approvals"]),
             alerts=cast(tuple[AlertView, ...], windows["risk.alerts"]),
             metrics=cast(tuple[MetricRow, ...], windows["risk.metrics"]),
+            blocked_actions=projected.risk_blocked_actions,
+            circuit_breaker=projected.risk_circuit_breaker,
         ),
         data=DataView(
             **metadata["data"].values(),
@@ -1058,6 +1446,7 @@ def _assemble_snapshot(
             **metadata["memory"].values(),
             rows=cast(tuple[MemoryRow, ...], windows["memory.rows"]),
             history=cast(tuple[TimelineRow, ...], windows["memory.history"]),
+            agent_usage_error=projected.memory_agent_usage_error,
         ),
         system=SystemView(
             **metadata["system"].values(),
@@ -1067,6 +1456,8 @@ def _assemble_snapshot(
             live_readiness=unavailable_live_readiness(),
             live_account=None,
             live_transition_plan=None,
+            qwen=projected.system_qwen,
+            health=projected.system_health,
         ),
     )
 
@@ -1119,7 +1510,22 @@ def _control_facts(samples: Mapping[str, SourceSample[object]]) -> dict[str, obj
     sources = cast(dict[str, object], facts["sources"])
     for source_id in sorted(SOURCE_IDS):
         sample = samples.get(source_id)
-        if source_id in {AGENT_SOURCE_ID, MEMORY_SOURCE_ID, PLATFORM_RUNTIME_SOURCE_ID}:
+        if source_id in {
+            AGENT_SOURCE_ID,
+            MEMORY_SOURCE_ID,
+            ATTENTION_SOURCE_ID,
+        }:
+            continue
+        if source_id == NOTIFICATION_HEALTH_SOURCE_ID:
+            if (
+                sample is not None
+                and isinstance(sample.value, SystemFacts)
+                and sample.value.health is not None
+            ):
+                sources[source_id] = {
+                    "freshness": sample.freshness.value,
+                    "facts": {"health": _control_health_facts(sample.value.health)},
+                }
             continue
         if sample is None or sample.value is None:
             sources[source_id] = {
@@ -1135,6 +1541,33 @@ def _control_facts(samples: Mapping[str, SourceSample[object]]) -> dict[str, obj
 
 
 def _control_source_facts(value: object) -> object:
+    if isinstance(value, PlatformRuntimeFacts):
+        return {
+            "pending_approvals": [
+                {
+                    "approval_id": row.approval_id,
+                    "run_id": row.run_id,
+                    "checkpoint_id": row.checkpoint_id,
+                    "state": row.state,
+                    "reason": row.reason,
+                    "evidence_ids": sorted(row.evidence_ids),
+                    "affected_symbols": sorted(row.affected_symbols),
+                    "weight_changes": [
+                        {
+                            "symbol": change.symbol,
+                            "current_weight": change.current_weight,
+                            "proposed_weight": change.proposed_weight,
+                        }
+                        for change in sorted(row.weight_changes, key=lambda item: item.symbol)
+                    ],
+                    "risks": sorted(row.risks),
+                    "expected_consequences": sorted(row.expected_consequences),
+                    "basis_sha256": row.basis_sha256,
+                    "stale_reason": row.stale_reason,
+                }
+                for row in sorted(value.pending_approvals, key=lambda item: item.approval_id)
+            ]
+        }
     if isinstance(value, SystemFacts):
         return {
             "services": [
@@ -1152,11 +1585,33 @@ def _control_source_facts(value: object) -> object:
                     "clean": row.clean,
                     "worktrees": sorted(row.worktrees),
                     "unpushed_commit_count": row.unpushed_commit_count,
+                    "checks": [
+                        {
+                            "check_id": check.check_id,
+                            "state": check.state,
+                            "reason": check.reason,
+                        }
+                        for check in sorted(row.checks, key=lambda item: item.check_id)
+                    ],
                 }
                 for row in sorted(value.repositories or (), key=lambda item: item.repository_id)
             ]
             if value.repositories is not None
             else None,
+            "qwen": (
+                {
+                    "state": value.qwen.state,
+                    "loaded_model": value.qwen.loaded_model,
+                    "current_agent": value.qwen.current_agent,
+                }
+                if value.qwen is not None
+                else None
+            ),
+            "health": (
+                _control_health_facts(value.health)
+                if value.health is not None
+                else None
+            ),
         }
     if isinstance(value, PortfolioFacts):
         return {
@@ -1204,6 +1659,14 @@ def _control_source_facts(value: object) -> object:
         return {
             "configured_strategy": value.configured_strategy,
             "configured_model_id": value.configured_model_id,
+            "rollback_model_id": value.rollback_model_id,
+            "approved_family": value.approved_family,
+            "approved_feature_set_id": value.approved_feature_set_id,
+            "final_regime": value.final_regime,
+            "final_regime_confidence": value.final_regime_confidence,
+            "regime_state": value.regime_state,
+            "automatic_changes_blocked": value.automatic_changes_blocked,
+            "block_reason": value.block_reason,
             "opinions": [
                 {
                     "model_id": row.model_id,
@@ -1219,6 +1682,9 @@ def _control_source_facts(value: object) -> object:
                     "strategy": row.strategy,
                     "status": row.status,
                     "evidence_ids": sorted(row.evidence_ids),
+                    "feature_set_id": row.feature_set_id,
+                    "data_identity": row.data_identity,
+                    "evaluation_contract": row.evaluation_contract,
                 }
                 for row in sorted(value.candidates, key=lambda item: item.candidate_id)
             ],
@@ -1230,6 +1696,22 @@ def _control_source_facts(value: object) -> object:
                     "sha256": row.sha256,
                 }
                 for row in sorted(value.evidence, key=lambda item: item.evidence_id)
+            ],
+            "gates": [
+                {
+                    "gate_id": row.gate_id,
+                    "candidate_id": row.candidate_id,
+                    "metric_id": row.metric_id,
+                    "candidate_value": row.candidate_value,
+                    "baseline_value": row.baseline_value,
+                    "comparison": row.comparison,
+                    "threshold": row.threshold,
+                    "evaluation_window": row.evaluation_window,
+                    "state": row.state,
+                    "reason": row.reason,
+                    "evidence_ids": sorted(row.evidence_ids),
+                }
+                for row in sorted(value.gates, key=lambda item: item.gate_id)
             ],
         }
     if isinstance(value, RiskFacts):
@@ -1245,6 +1727,39 @@ def _control_source_facts(value: object) -> object:
                 for row in sorted(value.positions, key=lambda item: item.symbol)
             ],
             "broker_reconciled": value.broker_reconciled,
+            "limits": [
+                {
+                    "limit_id": row.limit_id,
+                    "current_value": row.current_value,
+                    "proposed_value": row.proposed_value,
+                    "status": row.status,
+                    "proposal_reason": row.proposal_reason,
+                    "review_state": row.review_state,
+                    "evidence_ids": sorted(row.evidence_ids),
+                }
+                for row in _risk_limits(value)
+            ],
+            "blocked_actions": (
+                [
+                    {
+                        "action_id": row.action_id,
+                        "action": row.action,
+                        "reason": row.reason,
+                        "affected_symbols": sorted(row.affected_symbols),
+                    }
+                    for row in sorted(value.blocked_actions, key=lambda item: item.action_id)
+                ]
+                if value.blocked_actions is not None
+                else None
+            ),
+            "circuit_breaker": (
+                {
+                    "state": value.circuit_breaker.state,
+                    "reason": value.circuit_breaker.reason,
+                }
+                if value.circuit_breaker is not None
+                else None
+            ),
         }
     if isinstance(value, DataFacts):
         return {
@@ -1254,6 +1769,7 @@ def _control_source_facts(value: object) -> object:
                     "freshness": row.freshness,
                     "coverage": row.coverage,
                     "consumers": sorted(row.consumers),
+                    "dependencies": sorted(row.dependencies),
                 }
                 for row in sorted(value.sources, key=lambda item: item.source_id)
             ],
@@ -1283,6 +1799,21 @@ def _control_source_facts(value: object) -> object:
             ]
         }
     raise TypeError(f"Unsupported command-prerequisite facts: {type(value).__name__}")
+
+
+def _control_health_facts(rows: Sequence[SystemHealthRow]) -> list[dict[str, object]]:
+    return [
+        {
+            "component": row.component,
+            "state": row.state,
+            "broker_actions_blocked": row.broker_actions_blocked,
+            "checks": [
+                {"check_id": check.check_id, "state": check.state}
+                for check in sorted(row.checks, key=lambda item: item.check_id)
+            ],
+        }
+        for row in sorted(rows, key=lambda item: item.component)
+    ]
 
 
 _DIFF_TARGETS: Final = {
@@ -1379,6 +1910,22 @@ def requires_full_snapshot(
         or previous.system.live_readiness != current.system.live_readiness
         or previous.system.live_account != current.system.live_account
         or previous.system.live_transition_plan != current.system.live_transition_plan
+        or previous.models.active_model_id != current.models.active_model_id
+        or previous.models.rollback_model_id != current.models.rollback_model_id
+        or previous.models.approved_family != current.models.approved_family
+        or previous.models.approved_strategy != current.models.approved_strategy
+        or previous.models.approved_feature_set_id != current.models.approved_feature_set_id
+        or previous.models.final_regime != current.models.final_regime
+        or previous.models.final_regime_confidence != current.models.final_regime_confidence
+        or previous.models.regime_state != current.models.regime_state
+        or previous.models.automatic_changes_blocked
+        != current.models.automatic_changes_blocked
+        or previous.models.block_reason != current.models.block_reason
+        or previous.models.gates != current.models.gates
+        or previous.risk.blocked_actions != current.risk.blocked_actions
+        or previous.risk.circuit_breaker != current.risk.circuit_breaker
+        or previous.system.qwen != current.system.qwen
+        or previous.system.health != current.system.health
     )
 
 
@@ -1431,4 +1978,19 @@ def _event_presentation(snapshot: ConsoleSnapshot) -> EventPresentation:
         system=meta(snapshot.system),
         portfolio_rank_source=snapshot.portfolio.rank_source,
         timeline_hidden_event_count=snapshot.timeline.hidden_event_count,
+        model_active_model_id=snapshot.models.active_model_id,
+        model_rollback_model_id=snapshot.models.rollback_model_id,
+        model_approved_family=snapshot.models.approved_family,
+        model_approved_strategy=snapshot.models.approved_strategy,
+        model_approved_feature_set_id=snapshot.models.approved_feature_set_id,
+        model_final_regime=snapshot.models.final_regime,
+        model_final_regime_confidence=snapshot.models.final_regime_confidence,
+        model_regime_state=snapshot.models.regime_state,
+        model_automatic_changes_blocked=snapshot.models.automatic_changes_blocked,
+        model_block_reason=snapshot.models.block_reason,
+        model_gates=snapshot.models.gates,
+        risk_blocked_actions=snapshot.risk.blocked_actions,
+        risk_circuit_breaker=snapshot.risk.circuit_breaker,
+        system_qwen=snapshot.system.qwen,
+        system_health=snapshot.system.health,
     )

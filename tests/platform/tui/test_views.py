@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
+from vesper.platform.tui import views as tui_views
 from vesper.platform.tui.live_readiness import unavailable_live_readiness
 from vesper.platform.tui.views import (
     AgentCard,
@@ -117,20 +118,42 @@ def _event_presentation(snapshot: ConsoleSnapshot) -> EventPresentation:
                 "window_omissions": [
                     item.model_dump(mode="json") for item in snapshot.window_omissions
                 ],
-                **{name: meta(name) for name in (
-                    "impact",
-                    "portfolio",
-                    "orders",
-                    "agents",
-                    "models",
-                    "timeline",
-                    "risk",
-                    "data",
-                    "memory",
-                    "system",
-                )},
+                **{
+                    name: meta(name)
+                    for name in (
+                        "impact",
+                        "portfolio",
+                        "orders",
+                        "agents",
+                        "models",
+                        "timeline",
+                        "risk",
+                        "data",
+                        "memory",
+                        "system",
+                    )
+                },
                 "portfolio_rank_source": snapshot.portfolio.rank_source,
                 "timeline_hidden_event_count": snapshot.timeline.hidden_event_count,
+                "model_active_model_id": snapshot.models.active_model_id,
+                "model_rollback_model_id": snapshot.models.rollback_model_id,
+                "model_approved_family": snapshot.models.approved_family,
+                "model_approved_strategy": snapshot.models.approved_strategy,
+                "model_approved_feature_set_id": snapshot.models.approved_feature_set_id,
+                "model_final_regime": snapshot.models.final_regime,
+                "model_final_regime_confidence": snapshot.models.final_regime_confidence,
+                "model_regime_state": snapshot.models.regime_state,
+                "model_automatic_changes_blocked": snapshot.models.automatic_changes_blocked,
+                "model_block_reason": snapshot.models.block_reason,
+                "model_gates": [item.model_dump(mode="json") for item in snapshot.models.gates],
+                "risk_blocked_actions": [
+                    item.model_dump(mode="json") for item in snapshot.risk.blocked_actions
+                ],
+                "risk_circuit_breaker": snapshot.risk.circuit_breaker.model_dump(mode="json"),
+                "system_qwen": snapshot.system.qwen.model_dump(mode="json"),
+                "system_health": [
+                    item.model_dump(mode="json") for item in snapshot.system.health
+                ],
             }
         )
     )
@@ -162,6 +185,21 @@ def full_snapshot_payload() -> dict[str, object]:
         "elapsed_seconds": 3.0,
         "model": "qwen:64k",
         "affected_areas": ("portfolio",),
+        "session_id": "session:1",
+        "plan_steps": ("Inspect evidence", "Report result"),
+        "activity": (
+            {
+                "activity_id": "activity:1",
+                "kind": "stage",
+                "summary": "Review started",
+                "occurred_at_utc": NOW,
+                "evidence_ids": ("evidence:1",),
+            },
+        ),
+        "evidence_ids": ("evidence:1",),
+        "context_percent": 25.0,
+        "chat_agent_id": "portfolio-research",
+        "detail_next_cursor": None,
     }
     timeline = {
         "event_id": "event:1",
@@ -175,6 +213,7 @@ def full_snapshot_payload() -> dict[str, object]:
         "approval_id": None,
         "order_id": None,
         "evidence_ids": ("evidence:1",),
+        "work_id": "work:1",
     }
     fill = {
         "fill_id": "fill:1",
@@ -209,12 +248,20 @@ def full_snapshot_payload() -> dict[str, object]:
         "status": "evaluating",
         "evidence_ids": ("evidence:1",),
         "created_at_utc": NOW,
+        "feature_set_id": "features:v1",
+        "data_identity": SHA,
+        "evaluation_contract": SHA,
+        "status_reason": "Evaluation is running.",
+        "status_at_utc": NOW,
     }
     risk_limit = {
         "limit_id": "limit:concentration",
         "current_value": "0.10",
         "proposed_value": None,
         "status": "within",
+        "proposal_reason": None,
+        "review_state": "not-required",
+        "evidence_ids": (),
     }
     approval = {
         "approval_id": "approval:1",
@@ -224,6 +271,14 @@ def full_snapshot_payload() -> dict[str, object]:
         "reason": "Review required",
         "evidence_ids": ("evidence:1",),
         "requested_at_utc": NOW,
+        "affected_symbols": ("AAPL",),
+        "weight_changes": (
+            {"symbol": "AAPL", "current_weight": 0.6, "proposed_weight": 0.55},
+        ),
+        "risks": ("Concentration changes.",),
+        "expected_consequences": ("AAPL weight decreases.",),
+        "basis_sha256": SHA,
+        "stale_reason": None,
     }
     source = {
         "source_id": "source:massive",
@@ -233,6 +288,7 @@ def full_snapshot_payload() -> dict[str, object]:
         "coverage": "S&P 500",
         "error": None,
         "consumers": ("ml_model",),
+        "dependencies": ("split adjustments",),
     }
     evidence = {
         "evidence_id": "evidence:1",
@@ -240,6 +296,16 @@ def full_snapshot_payload() -> dict[str, object]:
         "source": "fixture",
         "created_at_utc": NOW,
         "sha256": SHA,
+        "symbols": ("AAPL",),
+        "agent_ids": ("portfolio-research",),
+        "model_ids": ("model:active",),
+        "order_ids": ("order:1",),
+        "approval_ids": ("approval:1",),
+        "source_ids": ("source:massive",),
+        "raw_log_id": None,
+        "raw_log_excerpt": (),
+        "raw_log_truncated": False,
+        "raw_log_next_cursor": None,
     }
     memory = {
         "memory_id": "memory:1",
@@ -247,6 +313,8 @@ def full_snapshot_payload() -> dict[str, object]:
         "summary": "Use controller truth.",
         "evidence_ids": ("evidence:1",),
         "updated_at_utc": NOW,
+        "used_by_agents": ("portfolio-research",),
+        "change_reason": "Retained controller authority rule.",
     }
     service = {
         "service_id": "service:qwen",
@@ -265,6 +333,14 @@ def full_snapshot_payload() -> dict[str, object]:
         "clean": True,
         "worktrees": ("C:/Users/bgonn/Desktop/v20",),
         "unpushed_commit_count": 0,
+        "checks": (
+            {
+                "check_id": "check:tests",
+                "state": "pass",
+                "reason": None,
+                "observed_at_utc": NOW,
+            },
+        ),
     }
     metric = {
         "metric_id": "metric:cpu",
@@ -294,7 +370,12 @@ def full_snapshot_payload() -> dict[str, object]:
         "control_hash": SHA,
         "command_specs": (),
         "window_omissions": (),
-        "impact": {**_screen(), "holdings": (portfolio,), "events": (timeline,), "agents": (agent,)},
+        "impact": {
+            **_screen(),
+            "holdings": (portfolio,),
+            "events": (timeline,),
+            "agents": (agent,),
+        },
         "portfolio": {
             **_screen(),
             "rows": (portfolio,),
@@ -318,6 +399,31 @@ def full_snapshot_payload() -> dict[str, object]:
             "candidates": (candidate,),
             "metrics": (metric,),
             "evidence": (evidence,),
+            "active_model_id": "model:active",
+            "rollback_model_id": None,
+            "approved_family": "approved-family",
+            "approved_strategy": "ml_model",
+            "approved_feature_set_id": "features:v1",
+            "final_regime": "risk-on",
+            "final_regime_confidence": 0.8,
+            "regime_state": "decided",
+            "automatic_changes_blocked": False,
+            "block_reason": None,
+            "gates": (
+                {
+                    "gate_id": "gate:oos-ic",
+                    "candidate_id": "candidate:1",
+                    "metric_id": "model.oos-ic",
+                    "candidate_value": 0.12,
+                    "baseline_value": 0.08,
+                    "comparison": "gte",
+                    "threshold": 0.1,
+                    "evaluation_window": "2025-01-01/2025-12-31",
+                    "state": "pass",
+                    "reason": "Candidate cleared the approved threshold.",
+                    "evidence_ids": ("evidence:1",),
+                },
+            ),
         },
         "timeline": {**_screen(), "rows": (timeline,), "hidden_event_count": 0},
         "risk": {
@@ -326,9 +432,20 @@ def full_snapshot_payload() -> dict[str, object]:
             "approvals": (approval,),
             "alerts": (alert,),
             "metrics": (metric,),
+            "blocked_actions": (),
+            "circuit_breaker": {
+                "state": "armed",
+                "reason": None,
+                "observed_at_utc": NOW,
+            },
         },
         "data": {**_screen(), "sources": (source,), "evidence": (evidence,)},
-        "memory": {**_screen(), "rows": (memory,), "history": (timeline,)},
+        "memory": {
+            **_screen(),
+            "rows": (memory,),
+            "history": (timeline,),
+            "agent_usage_error": "No trusted memory-use source is configured.",
+        },
         "system": {
             **_screen(),
             "services": (service,),
@@ -337,6 +454,33 @@ def full_snapshot_payload() -> dict[str, object]:
             "live_readiness": unavailable_live_readiness(),
             "live_account": None,
             "live_transition_plan": None,
+            "qwen": {
+                "state": "busy",
+                "loaded_model": "qwen:64k",
+                "current_agent": "portfolio-research",
+                "queue_length": 1,
+                "context_percent": 25.0,
+                "last_inference_ms": 210.0,
+                "observed_at_utc": NOW,
+                "error": None,
+            },
+            "health": tuple(
+                {
+                    "component": component,
+                    "state": "healthy",
+                    "reason": None,
+                    "observed_at_utc": NOW,
+                    "checks": (
+                        {
+                            "check_id": f"check:{component}",
+                            "state": "pass",
+                            "reason": None,
+                        },
+                    ),
+                    "broker_actions_blocked": False,
+                }
+                for component in ("backup", "recovery", "notifications")
+            ),
         },
     }
 
@@ -583,14 +727,17 @@ def test_event_payload_is_closed_and_binds_operation_type_and_primary_id(
                 presentation=presentation,
             )
 
-    assert EventPayload(
-        entity_type="portfolio-row",
-        entity_id="AAPL",
-        operation="remove",
-        entity=None,
-        targets=("portfolio.rows",),
-        presentation=presentation,
-    ).entity is None
+    assert (
+        EventPayload(
+            entity_type="portfolio-row",
+            entity_id="AAPL",
+            operation="remove",
+            entity=None,
+            targets=("portfolio.rows",),
+            presentation=presentation,
+        ).entity
+        is None
+    )
     invalid = (
         {
             "entity_type": "portfolio-row",
@@ -686,7 +833,9 @@ def test_event_targets_are_required_bounded_unique_canonical_and_closed(
                 **base,
                 "entity_type": "fill-row",
                 "entity_id": "fill:1",
-                "entity": ConsoleSnapshot.model_validate(full_snapshot_payload).orders.rows[0].fills[0],
+                "entity": ConsoleSnapshot.model_validate(full_snapshot_payload)
+                .orders.rows[0]
+                .fills[0],
                 "targets": ("orders.rows",),
             }
         )
@@ -702,27 +851,36 @@ def test_metric_freshness_and_window_omissions_are_truthful(full_snapshot_payloa
         "error": None,
     }
     assert MetricRow.model_validate(base_metric).value == 1.0
-    assert MetricRow.model_validate(
-        {**base_metric, "freshness": Freshness.STALE, "error": "Delayed."}
-    ).value == 1.0
-    assert MetricRow.model_validate(
-        {
-            **base_metric,
-            "freshness": Freshness.UNAVAILABLE,
-            "value": None,
-            "observed_at_utc": None,
-            "error": "Unavailable.",
-        }
-    ).value is None
-    assert MetricRow.model_validate(
-        {
-            **base_metric,
-            "freshness": Freshness.LOADING,
-            "value": None,
-            "observed_at_utc": None,
-            "error": None,
-        }
-    ).value is None
+    assert (
+        MetricRow.model_validate(
+            {**base_metric, "freshness": Freshness.STALE, "error": "Delayed."}
+        ).value
+        == 1.0
+    )
+    assert (
+        MetricRow.model_validate(
+            {
+                **base_metric,
+                "freshness": Freshness.UNAVAILABLE,
+                "value": None,
+                "observed_at_utc": None,
+                "error": "Unavailable.",
+            }
+        ).value
+        is None
+    )
+    assert (
+        MetricRow.model_validate(
+            {
+                **base_metric,
+                "freshness": Freshness.LOADING,
+                "value": None,
+                "observed_at_utc": None,
+                "error": None,
+            }
+        ).value
+        is None
+    )
     for invalid in (
         {**base_metric, "value": None},
         {**base_metric, "freshness": Freshness.STALE, "error": None},
@@ -807,3 +965,304 @@ def test_each_named_screen_is_a_strict_screen_view() -> None:
         DataView,
         SystemView,
     }
+
+
+def test_agent_deep_detail_contract_is_bounded_and_linked() -> None:
+    activity = tui_views.AgentActivityRow(
+        activity_id="activity:1",
+        kind="tool",
+        summary="Read controller state",
+        occurred_at_utc=NOW,
+        evidence_ids=("evidence:1",),
+    )
+    card = AgentCard(
+        work_id="work:1",
+        agent="portfolio-research",
+        title="Review AAPL",
+        stage="running",
+        priority=1,
+        urgent=False,
+        elapsed_seconds=3.0,
+        model="qwen:64k",
+        affected_areas=("portfolio",),
+        session_id="session:1",
+        plan_steps=("Inspect evidence", "Report result"),
+        activity=(activity,),
+        evidence_ids=("evidence:1",),
+        context_percent=62.5,
+        chat_agent_id="portfolio-research",
+        detail_next_cursor="cursor:2",
+    )
+
+    assert card.activity == (activity,)
+    assert card.session_id == "session:1"
+    missing_session = card.model_dump()
+    missing_session.pop("session_id")
+    with pytest.raises(ValidationError):
+        AgentCard.model_validate(missing_session)
+    with pytest.raises(ValidationError):
+        AgentCard.model_validate({**card.model_dump(), "context_percent": 100.1})
+
+    timeline = TimelineRow(
+        event_id="event:1",
+        occurred_at_utc=NOW,
+        impact=True,
+        severity="active",
+        summary="Work started",
+        agent_id="portfolio-research",
+        work_id="work:1",
+        symbol=None,
+        model_id=None,
+        approval_id=None,
+        order_id=None,
+        evidence_ids=(),
+    )
+    assert timeline.work_id == card.work_id
+
+
+def test_model_summary_requires_fail_closed_regime_state() -> None:
+    gate = tui_views.ModelGateRow(
+        gate_id="gate:oos-ic",
+        candidate_id="candidate:1",
+        metric_id="model.oos-ic",
+        candidate_value=0.12,
+        baseline_value=0.08,
+        comparison="gte",
+        threshold=0.1,
+        evaluation_window="2025-01-01/2025-12-31",
+        state="pass",
+        reason="Candidate cleared the approved threshold.",
+        evidence_ids=("evidence:1",),
+    )
+    fields = {
+        **_screen(),
+        "opinions": (),
+        "candidates": (),
+        "metrics": (),
+        "evidence": (),
+        "active_model_id": "model:active",
+        "rollback_model_id": "model:rollback",
+        "approved_family": "xgboost",
+        "approved_strategy": "ml_model",
+        "approved_feature_set_id": "features:v1",
+        "final_regime": "risk-on",
+        "final_regime_confidence": 0.8,
+        "regime_state": "decided",
+        "automatic_changes_blocked": False,
+        "block_reason": None,
+        "gates": (gate,),
+    }
+
+    assert ModelsView(**fields).gates == (gate,)
+    with pytest.raises(ValidationError):
+        ModelsView(**{**fields, "final_regime": None})
+    with pytest.raises(ValidationError):
+        ModelsView(
+            **{
+                **fields,
+                "final_regime": None,
+                "final_regime_confidence": None,
+                "regime_state": "uncertain",
+                "automatic_changes_blocked": False,
+                "block_reason": None,
+            }
+        )
+
+    candidate = {
+        "candidate_id": "candidate:1",
+        "family": "xgboost",
+        "strategy": "ml_model",
+        "status": "evaluating",
+        "evidence_ids": (),
+        "created_at_utc": NOW,
+        "feature_set_id": None,
+        "data_identity": "not-a-sha256",
+        "evaluation_contract": SHA,
+        "status_reason": None,
+        "status_at_utc": None,
+    }
+    with pytest.raises(ValidationError):
+        CandidateRow.model_validate(candidate)
+
+
+def test_risk_contract_exposes_blocks_breaker_and_stale_approval_reason() -> None:
+    blocked = tui_views.BlockedActionRow(
+        action_id="block:1",
+        action="rebalance",
+        reason="Portfolio read-back mismatch.",
+        affected_symbols=("AAPL",),
+        created_at_utc=NOW,
+    )
+    breaker = tui_views.CircuitBreakerView(
+        state="tripped",
+        reason="Daily loss limit breached.",
+        observed_at_utc=NOW,
+    )
+    risk = RiskView(
+        **_screen(),
+        limits=(),
+        approvals=(),
+        alerts=(),
+        metrics=(),
+        blocked_actions=(blocked,),
+        circuit_breaker=breaker,
+    )
+    assert risk.blocked_actions == (blocked,)
+    assert risk.circuit_breaker.state == "tripped"
+
+    approval = {
+        "approval_id": "approval:1",
+        "run_id": "run:1",
+        "checkpoint_id": "checkpoint:1",
+        "state": "stale",
+        "reason": "Inputs changed.",
+        "evidence_ids": ("evidence:1",),
+        "requested_at_utc": NOW,
+        "affected_symbols": ("AAPL",),
+        "weight_changes": (
+            {"symbol": "AAPL", "current_weight": 0.1, "proposed_weight": 0.11},
+        ),
+        "risks": ("Concentration increased.",),
+        "expected_consequences": ("AAPL allocation rises.",),
+        "basis_sha256": SHA,
+        "stale_reason": None,
+    }
+    with pytest.raises(ValidationError):
+        ApprovalRow.model_validate(approval)
+    assert ApprovalRow.model_validate(
+        {**approval, "stale_reason": "Portfolio basis changed."}
+    ).state == "stale"
+
+
+def test_evidence_memory_source_and_repository_details_are_explicit() -> None:
+    evidence = tui_views.EvidenceRow(
+        evidence_id="evidence:1",
+        evidence_type="agent-log",
+        source="controller",
+        created_at_utc=NOW,
+        sha256=SHA,
+        symbols=("AAPL",),
+        agent_ids=("portfolio-research",),
+        model_ids=("model:active",),
+        order_ids=("order:1",),
+        approval_ids=("approval:1",),
+        source_ids=("source:massive",),
+        raw_log_id="log:1",
+        raw_log_excerpt=("line 1",),
+        raw_log_truncated=True,
+        raw_log_next_cursor="cursor:2",
+    )
+    assert evidence.raw_log_excerpt == ("line 1",)
+    with pytest.raises(ValidationError):
+        tui_views.EvidenceRow.model_validate(
+            {**evidence.model_dump(), "raw_log_id": None}
+        )
+
+    source = SourceRow(
+        source_id="source:massive",
+        freshness=Freshness.FRESH,
+        as_of_utc=NOW,
+        age_seconds=1.0,
+        coverage="S&P 500",
+        error=None,
+        consumers=("portfolio",),
+        dependencies=("split adjustments",),
+    )
+    assert source.dependencies == ("split adjustments",)
+
+    memory = MemoryRow(
+        memory_id="memory:1",
+        status="core",
+        summary="Keep broker reconciliation fail-closed.",
+        evidence_ids=("evidence:1",),
+        updated_at_utc=NOW,
+        used_by_agents=("risk-agent",),
+        change_reason="Required safety rule.",
+    )
+    assert memory.used_by_agents == ("risk-agent",)
+
+    check = tui_views.RepositoryCheckRow(
+        check_id="check:tests",
+        state="pass",
+        reason=None,
+        observed_at_utc=NOW,
+    )
+    assert check.state == "pass"
+    with pytest.raises(ValidationError):
+        tui_views.RepositoryCheckRow(
+            check_id="check:tests",
+            state="fail",
+            reason=None,
+            observed_at_utc=NOW,
+        )
+
+
+def test_system_detail_is_explicit_and_has_each_health_component_once() -> None:
+    qwen = tui_views.QwenStatusView(
+        state="busy",
+        loaded_model="qwen:64k",
+        current_agent="portfolio-research",
+        queue_length=2,
+        context_percent=75.0,
+        last_inference_ms=210.0,
+        observed_at_utc=NOW,
+        error=None,
+    )
+    health = tuple(
+        tui_views.SystemHealthRow(
+            component=component,
+            state="healthy",
+            reason=None,
+            observed_at_utc=NOW,
+            checks=(
+                tui_views.SystemHealthCheckRow(
+                    check_id=f"check:{component}",
+                    state="pass",
+                    reason=None,
+                ),
+            ),
+            broker_actions_blocked=False,
+        )
+        for component in ("backup", "recovery", "notifications")
+    )
+    fields = {
+        **_screen(),
+        "services": (),
+        "metrics": (),
+        "repositories": (),
+        "live_readiness": unavailable_live_readiness(),
+        "live_account": None,
+        "live_transition_plan": None,
+        "qwen": qwen,
+        "health": health,
+    }
+
+    assert len(SystemView(**fields).health) == 3
+    with pytest.raises(ValidationError):
+        SystemView(**{**fields, "health": health[:-1]})
+    with pytest.raises(ValidationError):
+        tui_views.QwenStatusView(
+            state="unavailable",
+            loaded_model=None,
+            current_agent=None,
+            queue_length=None,
+            context_percent=None,
+            last_inference_ms=None,
+            observed_at_utc=None,
+            error=None,
+        )
+    with pytest.raises(ValidationError):
+        tui_views.SystemHealthCheckRow(
+            check_id="check:recovery",
+            state="unavailable",
+            reason=None,
+        )
+    with pytest.raises(ValidationError):
+        tui_views.SystemHealthRow(
+            component="recovery",
+            state="blocked",
+            reason=None,
+            observed_at_utc=NOW,
+            checks=(),
+            broker_actions_blocked=True,
+        )

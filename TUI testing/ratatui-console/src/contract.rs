@@ -16,6 +16,18 @@ impl SafeId {
         &self.0
     }
 
+    pub(crate) fn parse(value: String) -> Result<Self, ()> {
+        let bytes = value.as_bytes();
+        let valid = (1..=128).contains(&bytes.len())
+            && value != "."
+            && value != ".."
+            && bytes[0].is_ascii_alphanumeric()
+            && bytes.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            });
+        valid.then_some(Self(value)).ok_or(())
+    }
+
     pub(crate) fn client_message(sequence: u64) -> Self {
         Self(format!("client:{sequence}"))
     }
@@ -36,19 +48,7 @@ impl<'de> Deserialize<'de> for SafeId {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let bytes = value.as_bytes();
-        let valid = (1..=128).contains(&bytes.len())
-            && value != "."
-            && value != ".."
-            && bytes[0].is_ascii_alphanumeric()
-            && bytes.iter().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
-            });
-        if valid {
-            Ok(Self(value))
-        } else {
-            Err(serde::de::Error::custom("invalid safe ID"))
-        }
+        Self::parse(value).map_err(|()| serde::de::Error::custom("invalid safe ID"))
     }
 }
 
@@ -79,6 +79,26 @@ impl UtcTimestamp {
             Self(format!("{seconds}.{:03}000Z", current.wMilliseconds))
         }
     }
+
+    pub(crate) fn parse(value: String) -> Result<Self, ()> {
+        if !is_utc_timestamp(&value) {
+            return Err(());
+        }
+        let body = value
+            .strip_suffix('Z')
+            .or_else(|| value.strip_suffix("+00:00"))
+            .expect("validated UTC suffix");
+        let normalized = if let Some((seconds, fraction)) = body.split_once('.') {
+            if fraction.bytes().all(|digit| digit == b'0') {
+                format!("{seconds}Z")
+            } else {
+                format!("{seconds}.{fraction:0<6}Z")
+            }
+        } else {
+            format!("{body}Z")
+        };
+        Ok(Self(normalized))
+    }
 }
 
 impl Serialize for UtcTimestamp {
@@ -96,26 +116,8 @@ impl<'de> Deserialize<'de> for UtcTimestamp {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if is_utc_timestamp(&value) {
-            let body = value
-                .strip_suffix('Z')
-                .or_else(|| value.strip_suffix("+00:00"))
-                .expect("validated UTC suffix");
-            let normalized = if let Some((seconds, fraction)) = body.split_once('.') {
-                if fraction.bytes().all(|digit| digit == b'0') {
-                    format!("{seconds}Z")
-                } else {
-                    format!("{seconds}.{fraction:0<6}Z")
-                }
-            } else {
-                format!("{body}Z")
-            };
-            Ok(Self(normalized))
-        } else {
-            Err(serde::de::Error::custom(
-                "timestamp must be zero-offset UTC",
-            ))
-        }
+        Self::parse(value)
+            .map_err(|()| serde::de::Error::custom("timestamp must be zero-offset UTC"))
     }
 }
 
@@ -393,6 +395,13 @@ bounded_string!(
     "confirmation text cannot exceed 512 characters",
     false
 );
+bounded_string!(
+    MemoryContentText,
+    1,
+    100_000,
+    "memory content must contain 1 to 100000 characters",
+    false
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitRevision(String);
@@ -639,6 +648,20 @@ where
     }
 }
 
+fn deserialize_optional_percent<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = deserialize_optional_finite(deserializer)?;
+    if value.is_none_or(|item| (0.0..=100.0).contains(&item)) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "percentage must be between zero and one hundred",
+        ))
+    }
+}
+
 fn deserialize_confidence<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: Deserializer<'de>,
@@ -736,6 +759,20 @@ where
     }
 }
 
+fn deserialize_bounded_log_excerpt<'de, D>(deserializer: D) -> Result<Vec<NonEmptyString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<NonEmptyString>::deserialize(deserializer)?;
+    if values.len() <= 50 {
+        Ok(values)
+    } else {
+        Err(serde::de::Error::custom(
+            "raw log excerpt cannot exceed 50 lines",
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MessageType {
@@ -752,6 +789,8 @@ pub enum MessageType {
     Snapshot,
     SearchRequest,
     SearchResults,
+    MemoryContentRequest,
+    MemoryContentResult,
     ChatHistoryRequest,
     ChatEvent,
     ChatHistoryResult,
@@ -798,6 +837,8 @@ pub enum Message {
     Snapshot(Box<SnapshotPayload>),
     SearchRequest(SearchRequestPayload),
     SearchResults(SearchResultsPayload),
+    MemoryContentRequest(MemoryContentRequestPayload),
+    MemoryContentResult(MemoryContentResultPayload),
     ChatHistoryRequest(ChatHistoryRequestPayload),
     ChatEvent(ChatEventPayload),
     ChatHistoryResult(ChatHistoryResultPayload),
@@ -825,6 +866,8 @@ impl Message {
             Self::Snapshot(_) => MessageType::Snapshot,
             Self::SearchRequest(_) => MessageType::SearchRequest,
             Self::SearchResults(_) => MessageType::SearchResults,
+            Self::MemoryContentRequest(_) => MessageType::MemoryContentRequest,
+            Self::MemoryContentResult(_) => MessageType::MemoryContentResult,
             Self::ChatHistoryRequest(_) => MessageType::ChatHistoryRequest,
             Self::ChatEvent(_) => MessageType::ChatEvent,
             Self::ChatHistoryResult(_) => MessageType::ChatHistoryResult,
@@ -1015,6 +1058,68 @@ pub struct SearchResultsPayload {
     pub results: Vec<SearchResultPayload>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub error: Option<NonEmptyString>,
+}
+
+strict_struct!(MemoryContentRequestPayload {
+    request_id: SearchRequestId,
+    memory_id: SafeId,
+    reviewed_updated_at_utc: UtcTimestamp,
+});
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryContentStatus {
+    Success,
+    Error,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMemoryContentResultPayload {
+    request_id: SearchRequestId,
+    memory_id: SafeId,
+    reviewed_updated_at_utc: UtcTimestamp,
+    status: MemoryContentStatus,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    content: Option<MemoryContentText>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    error: Option<NonEmptyString>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MemoryContentResultPayload {
+    pub request_id: SearchRequestId,
+    pub memory_id: SafeId,
+    pub reviewed_updated_at_utc: UtcTimestamp,
+    pub status: MemoryContentStatus,
+    pub content: Option<MemoryContentText>,
+    pub error: Option<NonEmptyString>,
+}
+
+impl<'de> Deserialize<'de> for MemoryContentResultPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawMemoryContentResultPayload::deserialize(deserializer)?;
+        let valid = match raw.status {
+            MemoryContentStatus::Success => raw.content.is_some() && raw.error.is_none(),
+            MemoryContentStatus::Error => raw.content.is_none() && raw.error.is_some(),
+        };
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "memory content fields do not match the status",
+            ));
+        }
+        Ok(Self {
+            request_id: raw.request_id,
+            memory_id: raw.memory_id,
+            reviewed_updated_at_utc: raw.reviewed_updated_at_utc,
+            status: raw.status,
+            content: raw.content,
+            error: raw.error,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1518,7 +1623,10 @@ pub struct NoteAddPayload {
     pub visibility: NoteVisibility,
 }
 
-strict_struct!(AlertDismissPayload { alert_id: SafeId });
+strict_struct!(AlertDismissPayload {
+    alert_id: SafeId,
+    created_at_utc: UtcTimestamp,
+});
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2141,6 +2249,27 @@ pub enum AgentStage {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentActivityKind {
+    Stage,
+    Tool,
+    File,
+    Decision,
+    Error,
+    Result,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentActivityRow {
+    pub activity_id: SafeId,
+    pub kind: AgentActivityKind,
+    pub summary: NonEmptyString,
+    pub occurred_at_utc: UtcTimestamp,
+    pub evidence_ids: Vec<SafeId>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCard {
@@ -2155,6 +2284,17 @@ pub struct AgentCard {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub model: Option<String>,
     pub affected_areas: Vec<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub session_id: Option<SafeId>,
+    pub plan_steps: Vec<NonEmptyString>,
+    pub activity: Vec<AgentActivityRow>,
+    pub evidence_ids: Vec<SafeId>,
+    #[serde(deserialize_with = "deserialize_optional_percent")]
+    pub context_percent: Option<f64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub chat_agent_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub detail_next_cursor: Option<NonEmptyString>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2176,6 +2316,8 @@ pub struct TimelineRow {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub order_id: Option<SafeId>,
     pub evidence_ids: Vec<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub work_id: Option<SafeId>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2356,6 +2498,82 @@ pub struct CandidateRow {
     pub status: CandidateStatus,
     pub evidence_ids: Vec<SafeId>,
     pub created_at_utc: UtcTimestamp,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub feature_set_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub data_identity: Option<Sha256Hex>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub evaluation_contract: Option<Sha256Hex>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub status_reason: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub status_at_utc: Option<UtcTimestamp>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateComparison {
+    Gte,
+    Lte,
+    Gt,
+    Lt,
+    Eq,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelGateState {
+    Pass,
+    Fail,
+    Pending,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelGateRow {
+    pub gate_id: SafeId,
+    pub candidate_id: SafeId,
+    pub metric_id: SafeId,
+    #[serde(deserialize_with = "deserialize_optional_finite")]
+    pub candidate_value: Option<f64>,
+    #[serde(deserialize_with = "deserialize_optional_finite")]
+    pub baseline_value: Option<f64>,
+    pub comparison: GateComparison,
+    #[serde(deserialize_with = "deserialize_finite")]
+    pub threshold: f64,
+    pub evaluation_window: NonEmptyString,
+    pub state: ModelGateState,
+    pub reason: NonEmptyString,
+    pub evidence_ids: Vec<SafeId>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegimeState {
+    Decided,
+    Uncertain,
+    Unavailable,
+}
+
+fn validate_model_regime(
+    regime_state: RegimeState,
+    final_regime: Option<&NonEmptyString>,
+    final_regime_confidence: Option<f64>,
+    automatic_changes_blocked: bool,
+    block_reason: Option<&NonEmptyString>,
+) -> Result<(), &'static str> {
+    match regime_state {
+        RegimeState::Decided if final_regime.is_none() || final_regime_confidence.is_none() => {
+            Err("decided regime requires a final regime and confidence")
+        }
+        RegimeState::Uncertain | RegimeState::Unavailable
+            if !automatic_changes_blocked || block_reason.is_none() =>
+        {
+            Err("uncertain and unavailable regimes must block automatic changes with a reason")
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -2367,6 +2585,16 @@ pub enum RiskLimitStatus {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RiskReviewState {
+    NotRequired,
+    Pending,
+    Approved,
+    Rejected,
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RiskLimitRow {
@@ -2375,6 +2603,10 @@ pub struct RiskLimitRow {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub proposed_value: Option<DecimalString>,
     pub status: RiskLimitStatus,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub proposal_reason: Option<NonEmptyString>,
+    pub review_state: RiskReviewState,
+    pub evidence_ids: Vec<SafeId>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -2390,15 +2622,134 @@ pub enum ApprovalState {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ApprovalWeightChange {
+    pub symbol: SafeId,
+    #[serde(deserialize_with = "deserialize_finite")]
+    pub current_weight: f64,
+    #[serde(deserialize_with = "deserialize_finite")]
+    pub proposed_weight: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ApprovalRow {
     pub approval_id: SafeId,
     pub run_id: SafeId,
     pub checkpoint_id: SafeId,
     pub state: ApprovalState,
-    #[serde(deserialize_with = "deserialize_required_option")]
     pub reason: Option<String>,
     pub evidence_ids: Vec<SafeId>,
     pub requested_at_utc: UtcTimestamp,
+    pub affected_symbols: Vec<SafeId>,
+    pub weight_changes: Vec<ApprovalWeightChange>,
+    pub risks: Vec<NonEmptyString>,
+    pub expected_consequences: Vec<NonEmptyString>,
+    pub basis_sha256: Option<Sha256Hex>,
+    pub stale_reason: Option<NonEmptyString>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApprovalRow {
+    approval_id: SafeId,
+    run_id: SafeId,
+    checkpoint_id: SafeId,
+    state: ApprovalState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    reason: Option<String>,
+    evidence_ids: Vec<SafeId>,
+    requested_at_utc: UtcTimestamp,
+    affected_symbols: Vec<SafeId>,
+    weight_changes: Vec<ApprovalWeightChange>,
+    risks: Vec<NonEmptyString>,
+    expected_consequences: Vec<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    basis_sha256: Option<Sha256Hex>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    stale_reason: Option<NonEmptyString>,
+}
+
+impl<'de> Deserialize<'de> for ApprovalRow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawApprovalRow::deserialize(deserializer)?;
+        if raw.state == ApprovalState::Stale && raw.stale_reason.is_none() {
+            return Err(serde::de::Error::custom(
+                "stale approvals require a stale reason",
+            ));
+        }
+        Ok(Self {
+            approval_id: raw.approval_id,
+            run_id: raw.run_id,
+            checkpoint_id: raw.checkpoint_id,
+            state: raw.state,
+            reason: raw.reason,
+            evidence_ids: raw.evidence_ids,
+            requested_at_utc: raw.requested_at_utc,
+            affected_symbols: raw.affected_symbols,
+            weight_changes: raw.weight_changes,
+            risks: raw.risks,
+            expected_consequences: raw.expected_consequences,
+            basis_sha256: raw.basis_sha256,
+            stale_reason: raw.stale_reason,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedActionRow {
+    pub action_id: SafeId,
+    pub action: NonEmptyString,
+    pub reason: NonEmptyString,
+    pub affected_symbols: Vec<SafeId>,
+    pub created_at_utc: UtcTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CircuitBreakerState {
+    Armed,
+    Tripped,
+    Reset,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CircuitBreakerView {
+    pub state: CircuitBreakerState,
+    pub reason: Option<NonEmptyString>,
+    pub observed_at_utc: Option<UtcTimestamp>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCircuitBreakerView {
+    state: CircuitBreakerState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    reason: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    observed_at_utc: Option<UtcTimestamp>,
+}
+
+impl<'de> Deserialize<'de> for CircuitBreakerView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawCircuitBreakerView::deserialize(deserializer)?;
+        if raw.state == CircuitBreakerState::Unavailable && raw.reason.is_none() {
+            return Err(serde::de::Error::custom(
+                "unavailable circuit breaker requires a reason",
+            ));
+        }
+        Ok(Self {
+            state: raw.state,
+            reason: raw.reason,
+            observed_at_utc: raw.observed_at_utc,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2415,16 +2766,84 @@ pub struct SourceRow {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub error: Option<String>,
     pub consumers: Vec<NonEmptyString>,
+    pub dependencies: Vec<NonEmptyString>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EvidenceRow {
     pub evidence_id: SafeId,
     pub evidence_type: NonEmptyString,
     pub source: NonEmptyString,
     pub created_at_utc: UtcTimestamp,
     pub sha256: Sha256Hex,
+    pub symbols: Vec<SafeId>,
+    pub agent_ids: Vec<SafeId>,
+    pub model_ids: Vec<SafeId>,
+    pub order_ids: Vec<SafeId>,
+    pub approval_ids: Vec<SafeId>,
+    pub source_ids: Vec<SafeId>,
+    pub raw_log_id: Option<SafeId>,
+    pub raw_log_excerpt: Vec<NonEmptyString>,
+    pub raw_log_truncated: bool,
+    pub raw_log_next_cursor: Option<NonEmptyString>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEvidenceRow {
+    evidence_id: SafeId,
+    evidence_type: NonEmptyString,
+    source: NonEmptyString,
+    created_at_utc: UtcTimestamp,
+    sha256: Sha256Hex,
+    symbols: Vec<SafeId>,
+    agent_ids: Vec<SafeId>,
+    model_ids: Vec<SafeId>,
+    order_ids: Vec<SafeId>,
+    approval_ids: Vec<SafeId>,
+    source_ids: Vec<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    raw_log_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_bounded_log_excerpt")]
+    raw_log_excerpt: Vec<NonEmptyString>,
+    raw_log_truncated: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    raw_log_next_cursor: Option<NonEmptyString>,
+}
+
+impl<'de> Deserialize<'de> for EvidenceRow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawEvidenceRow::deserialize(deserializer)?;
+        if raw.raw_log_id.is_none()
+            && (!raw.raw_log_excerpt.is_empty()
+                || raw.raw_log_truncated
+                || raw.raw_log_next_cursor.is_some())
+        {
+            return Err(serde::de::Error::custom(
+                "raw log detail requires a raw log ID",
+            ));
+        }
+        Ok(Self {
+            evidence_id: raw.evidence_id,
+            evidence_type: raw.evidence_type,
+            source: raw.source,
+            created_at_utc: raw.created_at_utc,
+            sha256: raw.sha256,
+            symbols: raw.symbols,
+            agent_ids: raw.agent_ids,
+            model_ids: raw.model_ids,
+            order_ids: raw.order_ids,
+            approval_ids: raw.approval_ids,
+            source_ids: raw.source_ids,
+            raw_log_id: raw.raw_log_id,
+            raw_log_excerpt: raw.raw_log_excerpt,
+            raw_log_truncated: raw.raw_log_truncated,
+            raw_log_next_cursor: raw.raw_log_next_cursor,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -2442,6 +2861,9 @@ pub struct MemoryRow {
     pub summary: NonEmptyString,
     pub evidence_ids: Vec<SafeId>,
     pub updated_at_utc: UtcTimestamp,
+    pub used_by_agents: Vec<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub change_reason: Option<NonEmptyString>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -2464,6 +2886,58 @@ pub struct ServiceRow {
     pub observed_at_utc: UtcTimestamp,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepositoryCheckState {
+    Pass,
+    Fail,
+    Running,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RepositoryCheckRow {
+    pub check_id: SafeId,
+    pub state: RepositoryCheckState,
+    pub reason: Option<NonEmptyString>,
+    pub observed_at_utc: Option<UtcTimestamp>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRepositoryCheckRow {
+    check_id: SafeId,
+    state: RepositoryCheckState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    reason: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    observed_at_utc: Option<UtcTimestamp>,
+}
+
+impl<'de> Deserialize<'de> for RepositoryCheckRow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawRepositoryCheckRow::deserialize(deserializer)?;
+        if matches!(
+            raw.state,
+            RepositoryCheckState::Fail | RepositoryCheckState::Unavailable
+        ) && raw.reason.is_none()
+        {
+            return Err(serde::de::Error::custom(
+                "failed and unavailable repository checks require a reason",
+            ));
+        }
+        Ok(Self {
+            check_id: raw.check_id,
+            state: raw.state,
+            reason: raw.reason,
+            observed_at_utc: raw.observed_at_utc,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryRow {
@@ -2483,6 +2957,224 @@ pub struct RepositoryRow {
     pub worktrees: Vec<NonEmptyString>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub unpushed_commit_count: Option<u64>,
+    pub checks: Vec<RepositoryCheckRow>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QwenState {
+    Loading,
+    Ready,
+    Busy,
+    Quiet,
+    Stopped,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct QwenStatusView {
+    pub state: QwenState,
+    pub loaded_model: Option<NonEmptyString>,
+    pub current_agent: Option<SafeId>,
+    pub queue_length: Option<u64>,
+    pub context_percent: Option<f64>,
+    pub last_inference_ms: Option<f64>,
+    pub observed_at_utc: Option<UtcTimestamp>,
+    pub error: Option<NonEmptyString>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawQwenStatusView {
+    state: QwenState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    loaded_model: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    current_agent: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    queue_length: Option<u64>,
+    #[serde(deserialize_with = "deserialize_optional_percent")]
+    context_percent: Option<f64>,
+    #[serde(deserialize_with = "deserialize_optional_nonnegative_finite")]
+    last_inference_ms: Option<f64>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    observed_at_utc: Option<UtcTimestamp>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    error: Option<NonEmptyString>,
+}
+
+impl<'de> Deserialize<'de> for QwenStatusView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawQwenStatusView::deserialize(deserializer)?;
+        if raw.state == QwenState::Unavailable && raw.error.is_none() {
+            return Err(serde::de::Error::custom(
+                "unavailable Qwen state requires an error",
+            ));
+        }
+        if raw.state != QwenState::Unavailable && raw.observed_at_utc.is_none() {
+            return Err(serde::de::Error::custom(
+                "available Qwen state requires an observation time",
+            ));
+        }
+        Ok(Self {
+            state: raw.state,
+            loaded_model: raw.loaded_model,
+            current_agent: raw.current_agent,
+            queue_length: raw.queue_length,
+            context_percent: raw.context_percent,
+            last_inference_ms: raw.last_inference_ms,
+            observed_at_utc: raw.observed_at_utc,
+            error: raw.error,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SystemHealthCheckState {
+    Pass,
+    Fail,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SystemHealthCheckRow {
+    pub check_id: SafeId,
+    pub state: SystemHealthCheckState,
+    pub reason: Option<NonEmptyString>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSystemHealthCheckRow {
+    check_id: SafeId,
+    state: SystemHealthCheckState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    reason: Option<NonEmptyString>,
+}
+
+impl<'de> Deserialize<'de> for SystemHealthCheckRow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSystemHealthCheckRow::deserialize(deserializer)?;
+        if matches!(
+            raw.state,
+            SystemHealthCheckState::Fail | SystemHealthCheckState::Unavailable
+        ) && raw.reason.is_none()
+        {
+            return Err(serde::de::Error::custom(
+                "failed and unavailable system health checks require a reason",
+            ));
+        }
+        Ok(Self {
+            check_id: raw.check_id,
+            state: raw.state,
+            reason: raw.reason,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SystemHealthComponent {
+    Backup,
+    Recovery,
+    Notifications,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SystemHealthState {
+    Healthy,
+    Degraded,
+    Blocked,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SystemHealthRow {
+    pub component: SystemHealthComponent,
+    pub state: SystemHealthState,
+    pub reason: Option<NonEmptyString>,
+    pub observed_at_utc: Option<UtcTimestamp>,
+    pub checks: Vec<SystemHealthCheckRow>,
+    pub broker_actions_blocked: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSystemHealthRow {
+    component: SystemHealthComponent,
+    state: SystemHealthState,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    reason: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    observed_at_utc: Option<UtcTimestamp>,
+    checks: Vec<SystemHealthCheckRow>,
+    broker_actions_blocked: bool,
+}
+
+impl<'de> Deserialize<'de> for SystemHealthRow {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSystemHealthRow::deserialize(deserializer)?;
+        if matches!(
+            raw.state,
+            SystemHealthState::Degraded
+                | SystemHealthState::Blocked
+                | SystemHealthState::Unavailable
+        ) && raw.reason.is_none()
+        {
+            return Err(serde::de::Error::custom(
+                "non-healthy system health requires a reason",
+            ));
+        }
+        Ok(Self {
+            component: raw.component,
+            state: raw.state,
+            reason: raw.reason,
+            observed_at_utc: raw.observed_at_utc,
+            checks: raw.checks,
+            broker_actions_blocked: raw.broker_actions_blocked,
+        })
+    }
+}
+
+fn deserialize_complete_system_health<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SystemHealthRow>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<SystemHealthRow>::deserialize(deserializer)?;
+    let exact = values.len() == 3
+        && [
+            SystemHealthComponent::Backup,
+            SystemHealthComponent::Recovery,
+            SystemHealthComponent::Notifications,
+        ]
+        .into_iter()
+        .all(|component| {
+            values
+                .iter()
+                .filter(|row| row.component == component)
+                .count()
+                == 1
+        });
+    if exact {
+        Ok(values)
+    } else {
+        Err(serde::de::Error::custom(
+            "system health requires exactly backup, recovery, and notifications",
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -2712,6 +3404,21 @@ pub struct EventPresentation {
     pub system: ScreenMeta,
     pub portfolio_rank_source: Option<NonEmptyString>,
     pub timeline_hidden_event_count: u64,
+    pub model_active_model_id: Option<SafeId>,
+    pub model_rollback_model_id: Option<SafeId>,
+    pub model_approved_family: Option<NonEmptyString>,
+    pub model_approved_strategy: Option<StrategyName>,
+    pub model_approved_feature_set_id: Option<SafeId>,
+    pub model_final_regime: Option<NonEmptyString>,
+    pub model_final_regime_confidence: Option<f64>,
+    pub model_regime_state: RegimeState,
+    pub model_automatic_changes_blocked: bool,
+    pub model_block_reason: Option<NonEmptyString>,
+    pub model_gates: Vec<ModelGateRow>,
+    pub risk_blocked_actions: Vec<BlockedActionRow>,
+    pub risk_circuit_breaker: CircuitBreakerView,
+    pub system_qwen: QwenStatusView,
+    pub system_health: Vec<SystemHealthRow>,
 }
 
 #[derive(Deserialize)]
@@ -2735,6 +3442,30 @@ struct RawEventPresentation {
     #[serde(deserialize_with = "deserialize_required_option")]
     portfolio_rank_source: Option<NonEmptyString>,
     timeline_hidden_event_count: u64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    model_active_model_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    model_rollback_model_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    model_approved_family: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    model_approved_strategy: Option<StrategyName>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    model_approved_feature_set_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    model_final_regime: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_optional_confidence")]
+    model_final_regime_confidence: Option<f64>,
+    model_regime_state: RegimeState,
+    model_automatic_changes_blocked: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    model_block_reason: Option<NonEmptyString>,
+    model_gates: Vec<ModelGateRow>,
+    risk_blocked_actions: Vec<BlockedActionRow>,
+    risk_circuit_breaker: CircuitBreakerView,
+    system_qwen: QwenStatusView,
+    #[serde(deserialize_with = "deserialize_complete_system_health")]
+    system_health: Vec<SystemHealthRow>,
 }
 
 impl<'de> Deserialize<'de> for EventPresentation {
@@ -2744,6 +3475,14 @@ impl<'de> Deserialize<'de> for EventPresentation {
     {
         let raw = RawEventPresentation::deserialize(deserializer)?;
         validate_window_omissions(&raw.window_omissions).map_err(serde::de::Error::custom)?;
+        validate_model_regime(
+            raw.model_regime_state,
+            raw.model_final_regime.as_ref(),
+            raw.model_final_regime_confidence,
+            raw.model_automatic_changes_blocked,
+            raw.model_block_reason.as_ref(),
+        )
+        .map_err(serde::de::Error::custom)?;
         Ok(Self {
             generated_at_utc: raw.generated_at_utc,
             header: raw.header,
@@ -2762,6 +3501,21 @@ impl<'de> Deserialize<'de> for EventPresentation {
             system: raw.system,
             portfolio_rank_source: raw.portfolio_rank_source,
             timeline_hidden_event_count: raw.timeline_hidden_event_count,
+            model_active_model_id: raw.model_active_model_id,
+            model_rollback_model_id: raw.model_rollback_model_id,
+            model_approved_family: raw.model_approved_family,
+            model_approved_strategy: raw.model_approved_strategy,
+            model_approved_feature_set_id: raw.model_approved_feature_set_id,
+            model_final_regime: raw.model_final_regime,
+            model_final_regime_confidence: raw.model_final_regime_confidence,
+            model_regime_state: raw.model_regime_state,
+            model_automatic_changes_blocked: raw.model_automatic_changes_blocked,
+            model_block_reason: raw.model_block_reason,
+            model_gates: raw.model_gates,
+            risk_blocked_actions: raw.risk_blocked_actions,
+            risk_circuit_breaker: raw.risk_circuit_breaker,
+            system_qwen: raw.system_qwen,
+            system_health: raw.system_health,
         })
     }
 }
@@ -2814,12 +3568,100 @@ screen_view!(AgentsView {
     rows: Vec<AgentCard>,
     history: Vec<TimelineRow>,
 });
-screen_view!(ModelsView {
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ModelsView {
+    pub freshness: Freshness,
+    pub as_of_utc: Option<UtcTimestamp>,
+    pub source: NonEmptyString,
+    pub error: Option<String>,
+    pub opinions: Vec<ModelOpinionRow>,
+    pub candidates: Vec<CandidateRow>,
+    pub metrics: Vec<MetricRow>,
+    pub evidence: Vec<EvidenceRow>,
+    pub active_model_id: Option<SafeId>,
+    pub rollback_model_id: Option<SafeId>,
+    pub approved_family: Option<NonEmptyString>,
+    pub approved_strategy: Option<StrategyName>,
+    pub approved_feature_set_id: Option<SafeId>,
+    pub final_regime: Option<NonEmptyString>,
+    pub final_regime_confidence: Option<f64>,
+    pub regime_state: RegimeState,
+    pub automatic_changes_blocked: bool,
+    pub block_reason: Option<NonEmptyString>,
+    pub gates: Vec<ModelGateRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawModelsView {
+    freshness: Freshness,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    as_of_utc: Option<UtcTimestamp>,
+    source: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    error: Option<String>,
     opinions: Vec<ModelOpinionRow>,
     candidates: Vec<CandidateRow>,
     metrics: Vec<MetricRow>,
     evidence: Vec<EvidenceRow>,
-});
+    #[serde(deserialize_with = "deserialize_required_option")]
+    active_model_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    rollback_model_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    approved_family: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    approved_strategy: Option<StrategyName>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    approved_feature_set_id: Option<SafeId>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    final_regime: Option<NonEmptyString>,
+    #[serde(deserialize_with = "deserialize_optional_confidence")]
+    final_regime_confidence: Option<f64>,
+    regime_state: RegimeState,
+    automatic_changes_blocked: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    block_reason: Option<NonEmptyString>,
+    gates: Vec<ModelGateRow>,
+}
+
+impl<'de> Deserialize<'de> for ModelsView {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawModelsView::deserialize(deserializer)?;
+        validate_model_regime(
+            raw.regime_state,
+            raw.final_regime.as_ref(),
+            raw.final_regime_confidence,
+            raw.automatic_changes_blocked,
+            raw.block_reason.as_ref(),
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            freshness: raw.freshness,
+            as_of_utc: raw.as_of_utc,
+            source: raw.source,
+            error: raw.error,
+            opinions: raw.opinions,
+            candidates: raw.candidates,
+            metrics: raw.metrics,
+            evidence: raw.evidence,
+            active_model_id: raw.active_model_id,
+            rollback_model_id: raw.rollback_model_id,
+            approved_family: raw.approved_family,
+            approved_strategy: raw.approved_strategy,
+            approved_feature_set_id: raw.approved_feature_set_id,
+            final_regime: raw.final_regime,
+            final_regime_confidence: raw.final_regime_confidence,
+            regime_state: raw.regime_state,
+            automatic_changes_blocked: raw.automatic_changes_blocked,
+            block_reason: raw.block_reason,
+            gates: raw.gates,
+        })
+    }
+}
 screen_view!(TimelineView {
     rows: Vec<TimelineRow>,
     hidden_event_count: u64,
@@ -2829,6 +3671,8 @@ screen_view!(RiskView {
     approvals: Vec<ApprovalRow>,
     alerts: Vec<AlertRow>,
     metrics: Vec<MetricRow>,
+    blocked_actions: Vec<BlockedActionRow>,
+    circuit_breaker: CircuitBreakerView,
 });
 screen_view!(DataView {
     sources: Vec<SourceRow>,
@@ -2837,6 +3681,7 @@ screen_view!(DataView {
 screen_view!(MemoryView {
     rows: Vec<MemoryRow>,
     history: Vec<TimelineRow>,
+    agent_usage_error: NonEmptyString,
 });
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2855,6 +3700,9 @@ pub struct SystemView {
     pub live_account: Option<AccountSummaryView>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub live_transition_plan: Option<TransitionPlanView>,
+    pub qwen: QwenStatusView,
+    #[serde(deserialize_with = "deserialize_complete_system_health")]
+    pub health: Vec<SystemHealthRow>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]

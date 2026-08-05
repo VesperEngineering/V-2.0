@@ -36,19 +36,19 @@ AGENTS
 
 MODELS & REGIME
 ┌MODEL OPINIONS / FINAL - PANEL 1/3────────────────────────────────────────┐
-│FINAL REGIME: UNAVAILABLE - controller truth not provided                 │
-│OPINION CONSENSUS: UNCERTAIN                                              │
-│                                                                          │
+│FINAL REGIME: sideways | CONFIDENCE 73.0%                                 │
+│ACTIVE model:active                                                       │
+│ROLLBACK model:rollback                                                   │
+│FAMILY approved-family                                                    │
+│STRATEGY ml_model                                                         │
+│FEATURE SET features:v20                                                  │
+│AUTOMATIC CHANGES: BLOCKED                                                │
+│BLOCK REASON: Risk gate requires review.                                  │
+│MODEL OPINIONS                                                            │
 │  model:macro | risk-on | 80.0%                                           │
 │2026-08-02 20:00:00 EDT                                                   │
 │  model:micro | risk-off | 60.0%                                          │
 │2026-08-02 20:00:00 EDT                                                   │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
 │                                                                          │
 │                                                                          │
 │                                                                          │

@@ -8,12 +8,14 @@ import pytest
 from vesper.platform.tui.contracts import MessageType, SnapshotPayload, WireEnvelope
 from vesper.platform.tui.ports import (
     AgentFacts,
+    AttentionFacts,
     ConfiguredAgentFact,
     DataFacts,
     LegacyPositionFact,
     MemoryFacts,
     ModelFacts,
     OrderFacts,
+    PlatformRuntimeFacts,
     PortfolioFacts,
     RiskFacts,
     SourceSample,
@@ -30,17 +32,24 @@ from vesper.platform.tui.snapshot import (
 from vesper.platform.tui.views import (
     AccountSummaryView,
     AgentCard,
+    AlertView,
+    BlockedActionRow,
+    CircuitBreakerView,
     CandidateRow,
     EvidenceRow,
     Freshness,
     MemoryRow,
     MetricRow,
+    ModelGateRow,
     ModelOpinionRow,
     OrderRow,
     PortfolioRow,
+    QwenStatusView,
     RepositoryRow,
     ServiceRow,
     SourceRow,
+    SystemHealthCheckRow,
+    SystemHealthRow,
     TimelineRow,
     TransitionPlanView,
 )
@@ -101,6 +110,7 @@ def _repository(*, clean: bool = True) -> RepositoryRow:
         clean=clean,
         worktrees=("C:/Users/bgonn/Desktop/v20",),
         unpushed_commit_count=0,
+        checks=(),
     )
 
 
@@ -121,6 +131,10 @@ def _system_samples(*, metric_value: float = 12.5) -> dict[str, SourceSample[obj
         metrics_error="Repository projection does not provide metrics.",
         repositories=(_repository(),),
         repositories_error=None,
+        qwen=None,
+        qwen_error="Repository projection does not provide Qwen status.",
+        health=None,
+        health_error="Repository projection does not provide system health.",
     )
     windows = SystemFacts(
         services=(_service(),),
@@ -129,6 +143,10 @@ def _system_samples(*, metric_value: float = 12.5) -> dict[str, SourceSample[obj
         metrics_error=None,
         repositories=None,
         repositories_error="Windows projection does not provide repositories.",
+        qwen=None,
+        qwen_error="Windows projection does not provide Qwen status.",
+        health=None,
+        health_error="Windows projection does not provide system health.",
     )
     return {
         "repository.system": _sample(repository, source="git"),
@@ -164,6 +182,14 @@ def _risk_sample(
         breaker_tripped=breaker,
         positions=(),
         broker_reconciled=False,
+        blocked_actions=None,
+        blocked_actions_error="Legacy risk state does not include blocked-action detail.",
+        circuit_breaker=CircuitBreakerView(
+            state="tripped" if breaker else "armed",
+            reason="Legacy breaker is tripped." if breaker else None,
+            observed_at_utc=NOW,
+        ),
+        circuit_breaker_error=None,
     )
     return _sample(facts, source="legacy saved engine state")
 
@@ -224,6 +250,13 @@ def _agent_sample(*, model: str | None) -> SourceSample[object]:
                     elapsed_seconds=1.0,
                     model=model,
                     affected_areas=("models",),
+                    session_id=None,
+                    plan_steps=(),
+                    activity=(),
+                    evidence_ids=(),
+                    context_percent=None,
+                    chat_agent_id="v20-model-researcher",
+                    detail_next_cursor=None,
                 ),
             ),
             active_work_error=None,
@@ -245,6 +278,7 @@ def _event(index: int, *, impact: bool = False, symbol: str | None = None) -> Ti
         approval_id=None,
         order_id=None,
         evidence_ids=(),
+        work_id=None,
     )
 
 
@@ -293,6 +327,11 @@ def _candidate(candidate_id: str) -> CandidateRow:
         status="evaluating",
         evidence_ids=(),
         created_at_utc=NOW,
+        feature_set_id=None,
+        data_identity=None,
+        evaluation_contract=None,
+        status_reason=None,
+        status_at_utc=None,
     )
 
 
@@ -303,6 +342,16 @@ def _evidence(evidence_id: str) -> EvidenceRow:
         source="test",
         created_at_utc=NOW,
         sha256=SHA256,
+        symbols=(),
+        agent_ids=(),
+        model_ids=(),
+        order_ids=(),
+        approval_ids=(),
+        source_ids=(),
+        raw_log_id=None,
+        raw_log_excerpt=(),
+        raw_log_truncated=False,
+        raw_log_next_cursor=None,
     )
 
 
@@ -315,6 +364,7 @@ def _source(source_id: str) -> SourceRow:
         coverage="S&P 500",
         error=None,
         consumers=("ml_model",),
+        dependencies=(),
     )
 
 
@@ -325,6 +375,8 @@ def _memory(memory_id: str) -> MemoryRow:
         summary="Keep controller truth.",
         evidence_ids=(),
         updated_at_utc=NOW,
+        used_by_agents=(),
+        change_reason=None,
     )
 
 
@@ -333,13 +385,92 @@ def _model_facts(
     opinions: tuple[ModelOpinionRow, ...] = (),
     candidates: tuple[CandidateRow, ...] = (),
     evidence: tuple[EvidenceRow, ...] = (),
+    gates: tuple[ModelGateRow, ...] = (),
+    regime_state: str = "decided",
+    automatic_changes_blocked: bool = False,
 ) -> ModelFacts:
     return ModelFacts(
         configured_strategy="ml_model",
         configured_model_id="model:active",
         opinions=opinions,
         candidates=candidates,
+        metrics=(),
         evidence=evidence,
+        rollback_model_id="model:rollback",
+        approved_family="approved-family",
+        approved_feature_set_id="features:v1",
+        final_regime="risk-on" if regime_state == "decided" else None,
+        final_regime_confidence=0.8 if regime_state == "decided" else None,
+        regime_state=regime_state,
+        automatic_changes_blocked=automatic_changes_blocked,
+        block_reason=(
+            "Model regime is not decided." if automatic_changes_blocked else None
+        ),
+        gates=gates,
+    )
+
+
+def _gate(state: str = "pass") -> ModelGateRow:
+    return ModelGateRow(
+        gate_id="gate:oos-ic",
+        candidate_id="candidate:1",
+        metric_id="model.oos-ic",
+        candidate_value=0.12,
+        baseline_value=0.08,
+        comparison="gte",
+        threshold=0.1,
+        evaluation_window="2025-01-01/2025-12-31",
+        state=state,
+        reason="Candidate gate result.",
+        evidence_ids=("evidence:1",),
+    )
+
+
+def _deep_system_sample(*, recovery_blocked: bool = False) -> SourceSample[object]:
+    health = tuple(
+        SystemHealthRow(
+            component=component,
+            state="blocked" if component == "recovery" and recovery_blocked else "healthy",
+            reason=(
+                "Recovery checks block broker actions."
+                if component == "recovery" and recovery_blocked
+                else None
+            ),
+            observed_at_utc=NOW,
+            checks=(
+                SystemHealthCheckRow(
+                    check_id=f"check:{component}",
+                    state="pass",
+                    reason=None,
+                ),
+            ),
+            broker_actions_blocked=component == "recovery" and recovery_blocked,
+        )
+        for component in ("backup", "recovery", "notifications")
+    )
+    return _sample(
+        SystemFacts(
+            services=(_service(),),
+            services_error=None,
+            metrics=(_metric("system.cpu.percent", 12.5),),
+            metrics_error=None,
+            repositories=(_repository(),),
+            repositories_error=None,
+            qwen=QwenStatusView(
+                state="ready",
+                loaded_model="qwen:64k",
+                current_agent=None,
+                queue_length=0,
+                context_percent=10.0,
+                last_inference_ms=200.0,
+                observed_at_utc=NOW,
+                error=None,
+            ),
+            qwen_error=None,
+            health=health,
+            health_error=None,
+        ),
+        source="controller system",
     )
 
 
@@ -377,11 +508,17 @@ def _build(
 def test_snapshot_maps_system_and_legacy_risk_without_inventing_other_truth() -> None:
     snapshot = _build({**_system_samples(), "legacy.risk": _risk_sample()})
 
-    assert snapshot.system.freshness is Freshness.FRESH
+    assert snapshot.system.freshness is Freshness.STALE
     assert tuple(row.service_id for row in snapshot.system.services) == ("service:qwen",)
     assert tuple(row.metric_id for row in snapshot.system.metrics) == ("system.cpu.percent",)
     assert tuple(row.repository_id for row in snapshot.system.repositories) == ("repository:v20",)
     assert snapshot.system.source == "git + windows"
+    assert snapshot.system.qwen.state == "unavailable"
+    assert {row.component for row in snapshot.system.health} == {
+        "backup",
+        "recovery",
+        "notifications",
+    }
 
     assert snapshot.risk.freshness is Freshness.STALE
     assert "not broker-reconciled" in (snapshot.risk.error or "")
@@ -429,6 +566,10 @@ def test_system_merge_is_order_independent_and_conflicts_fail_closed() -> None:
         metrics_error="No metrics.",
         repositories=(_repository(),),
         repositories_error=None,
+        qwen=None,
+        qwen_error="No Qwen status.",
+        health=None,
+        health_error="No system health.",
     )
     failed = _build(
         {
@@ -441,6 +582,108 @@ def test_system_merge_is_order_independent_and_conflicts_fail_closed() -> None:
     assert failed.system.metrics == ()
     assert failed.system.repositories == ()
     assert "conflict" in (failed.system.error or "").lower()
+
+
+def test_complementary_fresh_system_sources_merge_to_fresh() -> None:
+    deep_value = _deep_system_sample().value
+    deep_only = SystemFacts.model_validate(
+        {
+            **deep_value.model_dump(mode="python"),
+            "services": None,
+            "services_error": "Deep status does not provide services.",
+            "metrics": None,
+            "metrics_error": "Deep status does not provide metrics.",
+            "repositories": None,
+            "repositories_error": "Deep status does not provide repositories.",
+        }
+    )
+    snapshot = _build(
+        {
+            **_system_samples(),
+            "operations.notification-health": _sample(
+                deep_only,
+                source="controller deep status",
+            ),
+        }
+    )
+
+    assert snapshot.system.freshness is Freshness.FRESH
+    assert snapshot.system.error is None
+
+
+def test_attention_and_notification_health_are_display_only_exact_targets() -> None:
+    alert = AlertView(
+        alert_id="alert:0123456789abcdef0123456789abcdef",
+        severity="urgent",
+        summary="V20 needs attention",
+        created_at_utc=NOW,
+        resolved_at_utc=None,
+    )
+    attention = _sample(AttentionFacts(alerts=(alert,)), source="operations attention")
+    notification_health = _sample(
+        SystemFacts(
+            services=(
+                ServiceRow(
+                    service_id="service:windows-notifications",
+                    state="failed",
+                    health_reason="Windows notification delivery failed.",
+                    observed_at_utc=NOW,
+                ),
+            ),
+            services_error=None,
+            metrics=None,
+            metrics_error="Notification health does not provide system metrics.",
+            repositories=None,
+            repositories_error="Notification health does not provide repositories.",
+            qwen=None,
+            qwen_error="Notification health does not provide Qwen status.",
+            health=None,
+            health_error="Notification health detail is unavailable.",
+        ),
+        source="operations notification health",
+    )
+
+    snapshot = _build(
+        {
+            **_system_samples(),
+            "operations.attention": attention,
+            "operations.notification-health": notification_health,
+        }
+    )
+
+    assert snapshot.shell.alerts == (alert,)
+    assert snapshot.risk.alerts == (alert,)
+    assert any(
+        row.service_id == "service:windows-notifications" and row.state == "failed"
+        for row in snapshot.system.services
+    )
+
+    baseline = ControlStateBuilder().build({})
+    display_only = ControlStateBuilder().build(
+        {
+            "operations.attention": attention,
+            "operations.notification-health": notification_health,
+        },
+        previous=baseline,
+    )
+    assert display_only == baseline
+
+
+def test_unavailable_attention_is_unknown_in_shell_and_degrades_risk_truthfully() -> None:
+    snapshot = _build(
+        {
+            "legacy.risk": _risk_sample(),
+            "operations.attention": _unavailable(
+                "operations attention",
+                "Attention alert state is invalid.",
+            ),
+        }
+    )
+
+    assert snapshot.shell.alerts is None
+    assert snapshot.risk.alerts == ()
+    assert snapshot.risk.freshness is Freshness.STALE
+    assert "attention" in (snapshot.risk.error or "").casefold()
 
 
 def test_system_merge_bounds_combined_source_labels() -> None:
@@ -571,17 +814,42 @@ def test_partial_or_unreconciled_rank_never_reorders_confirmed_holdings() -> Non
     assert confirmed_with_cash.portfolio.rank_source == "confirmed executed ranks"
 
 
-def test_qwen_status_requires_an_explicit_qwen_running_card() -> None:
-    unknown_model = _build({"native.agents": _agent_sample(model=None)})
-    explicit_qwen = _build(
-        {"native.agents": _agent_sample(model="qwen:64k")},
-        previous=unknown_model,
-        generated_at=NOW + timedelta(seconds=1),
+def test_header_qwen_status_uses_controller_system_truth_not_agent_assignment() -> None:
+    assigned_agent = _build({"native.agents": _agent_sample(model="qwen:64k")})
+    system_sample = _deep_system_sample()
+    busy_qwen = system_sample.value.qwen.model_copy(
+        update={"state": "busy", "context_percent": 62.5}
+    )
+    controller_status = _build(
+        {
+            "windows.system": system_sample.model_copy(
+                update={"value": system_sample.value.model_copy(update={"qwen": busy_qwen})}
+            )
+        }
     )
 
-    assert unknown_model.shell.header.active_agent == "v20-model-researcher"
-    assert unknown_model.shell.header.qwen_state == "Configured"
-    assert explicit_qwen.shell.header.qwen_state == "Running"
+    assert assigned_agent.shell.header.active_agent == "v20-model-researcher"
+    assert assigned_agent.shell.header.qwen_state == "Unavailable"
+    assert assigned_agent.shell.header.qwen_context_percent is None
+    assert controller_status.shell.header.qwen_state == "busy"
+    assert controller_status.shell.header.qwen_context_percent == 62.5
+
+
+def test_header_agent_queue_uses_fresh_runtime_work_without_agent_profile_facts() -> None:
+    queued = _agent_sample(model="qwen:64k").value.active_work[0].model_copy(
+        update={"stage": "queued"}
+    )
+    snapshot = _build(
+        {
+            "platform.runtime": _sample(
+                PlatformRuntimeFacts(pending_approvals=(), active_work=(queued,)),
+                source="platform runtime",
+            )
+        }
+    )
+
+    assert snapshot.agents.freshness is Freshness.FRESH
+    assert snapshot.shell.header.agent_queue_length == 1
 
 
 def test_model_linked_timeline_events_are_not_relabelled_as_memory_history() -> None:
@@ -592,6 +860,32 @@ def test_model_linked_timeline_events_are_not_relabelled_as_memory_history() -> 
     assert snapshot.memory.history == ()
 
 
+def test_managed_memory_change_history_is_projected_only_to_memory() -> None:
+    row = _event(1).model_copy(
+        update={
+            "event_id": "change:one",
+            "symbol": None,
+            "summary": "Daily memory curation committed.",
+        }
+    )
+    snapshot = _build(
+        {
+            "native.memory": _sample(
+                MemoryFacts(
+                    rows=(),
+                    history=(row,),
+                    agent_usage_error="No trusted memory-use source is configured.",
+                ),
+                source="managed V20 working memory",
+            )
+        }
+    )
+
+    assert snapshot.memory.freshness is Freshness.FRESH
+    assert snapshot.memory.history == (row,)
+    assert snapshot.timeline.rows == ()
+
+
 def test_duplicate_timeline_identity_fails_the_affected_views_closed() -> None:
     row = _event(1, impact=True, symbol="AAPL")
     snapshot = _build({"events.timeline": _timeline_sample((row, row))})
@@ -600,6 +894,48 @@ def test_duplicate_timeline_identity_fails_the_affected_views_closed() -> None:
     assert snapshot.timeline.rows == ()
     assert snapshot.impact.freshness is Freshness.UNAVAILABLE
     assert "duplicate" in (snapshot.timeline.error or "").lower()
+
+
+def test_impact_keeps_every_holding_and_filters_only_events_and_agents() -> None:
+    impacted = _event(1, impact=True, symbol="AAPL").model_copy(
+        update={"agent_id": "v20-model-researcher"}
+    )
+    unrelated = _event(2, impact=False, symbol="MSFT").model_copy(
+        update={"agent_id": "another-agent"}
+    )
+    snapshot = _build(
+        {
+            "native.portfolio": _portfolio_sample(
+                (
+                    _holding("AAPL", price="100", weight=0.6),
+                    _holding("MSFT", price="200", weight=0.4),
+                )
+            ),
+            "native.agents": _agent_sample(model="qwen:64k"),
+            "events.timeline": _timeline_sample((impacted, unrelated)),
+        }
+    )
+
+    assert snapshot.impact.freshness is Freshness.FRESH
+    assert [row.symbol for row in snapshot.impact.holdings] == ["AAPL", "MSFT"]
+    assert snapshot.impact.events == (impacted,)
+    assert [row.agent for row in snapshot.impact.agents] == ["v20-model-researcher"]
+
+
+def test_impact_retains_usable_holdings_when_other_sources_are_unavailable() -> None:
+    snapshot = _build(
+        {
+            "native.portfolio": _portfolio_sample(
+                (_holding("AAPL", price="100", weight=1.0),)
+            )
+        }
+    )
+
+    assert snapshot.impact.freshness is Freshness.STALE
+    assert [row.symbol for row in snapshot.impact.holdings] == ["AAPL"]
+    assert snapshot.impact.events == ()
+    assert snapshot.impact.agents == ()
+    assert "timeline" in (snapshot.impact.error or "").casefold()
 
 
 @pytest.mark.parametrize(
@@ -662,9 +998,23 @@ def test_duplicate_timeline_identity_fails_the_affected_views_closed() -> None:
         ),
         (
             "native.memory",
-            MemoryFacts(rows=(_memory("memory:1"), _memory("memory:1"))),
+            MemoryFacts(
+                rows=(_memory("memory:1"), _memory("memory:1")),
+                history=(),
+                agent_usage_error="No trusted memory-use source is configured.",
+            ),
             "memory",
-            ("rows",),
+            ("rows", "history"),
+        ),
+        (
+            "native.memory",
+            MemoryFacts(
+                rows=(),
+                history=(_event(1), _event(1)),
+                agent_usage_error="No trusted memory-use source is configured.",
+            ),
+            "memory",
+            ("rows", "history"),
         ),
     ),
 )
@@ -727,8 +1077,8 @@ def test_stale_samples_do_not_leak_unmarked_facts_into_the_header() -> None:
 
     header = snapshot.shell.header
     assert header.portfolio_value is None
-    assert header.regime_label == "Unavailable"
-    assert header.regime_confidence is None
+    assert header.regime_label == "STALE risk-on"
+    assert header.regime_confidence == 0.8
     assert header.active_agent is None
     assert header.agent_queue_length is None
     assert header.qwen_state == "Unavailable"
@@ -742,7 +1092,9 @@ def test_model_opinions_do_not_invent_a_controller_final_regime() -> None:
                     opinions=(
                         _opinion("model:one"),
                         _opinion("model:two"),
-                    )
+                    ),
+                    regime_state="uncertain",
+                    automatic_changes_blocked=True,
                 ),
                 source="native models",
             )
@@ -750,8 +1102,103 @@ def test_model_opinions_do_not_invent_a_controller_final_regime() -> None:
     )
 
     assert len(snapshot.models.opinions) == 2
-    assert snapshot.shell.header.regime_label == "Unavailable"
+    assert snapshot.shell.header.regime_label == "UNCERTAIN"
     assert snapshot.shell.header.regime_confidence is None
+
+
+def test_snapshot_projects_deep_model_risk_and_system_truth() -> None:
+    model_facts = _model_facts(
+        candidates=(_candidate("candidate:1"),),
+        gates=(_gate(),),
+    )
+    risk = _risk_sample(breaker=True)
+    blocked = BlockedActionRow(
+        action_id="block:rebalance",
+        action="rebalance",
+        reason="Broker read-back mismatch.",
+        affected_symbols=("AAPL",),
+        created_at_utc=NOW,
+    )
+    risk_value = RiskFacts.model_validate(
+        {
+            **risk.value.model_dump(mode="python"),
+            "blocked_actions": (blocked,),
+            "blocked_actions_error": None,
+        }
+    )
+    snapshot = _build(
+        {
+            "native.models": _sample(model_facts, source="native models"),
+            "legacy.risk": _sample(risk_value, source="legacy saved engine state"),
+            "windows.system": _deep_system_sample(),
+        }
+    )
+
+    assert snapshot.models.active_model_id == "model:active"
+    assert snapshot.models.regime_state == "decided"
+    assert snapshot.models.gates == (_gate(),)
+    assert snapshot.risk.blocked_actions == (blocked,)
+    assert snapshot.risk.circuit_breaker.state == "tripped"
+    assert snapshot.system.qwen.state == "ready"
+    assert all(row.state == "healthy" for row in snapshot.system.health)
+    assert snapshot.shell.header.regime_label == "risk-on"
+    assert snapshot.shell.header.regime_confidence == 0.8
+
+
+def test_direct_deep_summary_changes_require_a_full_snapshot() -> None:
+    first = _build(
+        {
+            "native.models": _sample(
+                _model_facts(gates=(_gate(),)),
+                source="native models",
+            ),
+            "legacy.risk": _risk_sample(),
+            "windows.system": _deep_system_sample(),
+        }
+    )
+    changed_models = first.models.model_copy(
+        update={"automatic_changes_blocked": True, "block_reason": "Operator hold."}
+    )
+    changed = first.model_copy(update={"models": changed_models})
+
+    assert requires_full_snapshot(first, changed) is True
+
+
+def test_command_gating_deep_facts_advance_control_hash() -> None:
+    builder = ControlStateBuilder()
+
+    model_pass = _sample(_model_facts(gates=(_gate("pass"),)), source="native models")
+    model_fail = _sample(_model_facts(gates=(_gate("fail"),)), source="native models")
+    first_model = builder.build({"native.models": model_pass})
+    changed_model = builder.build({"native.models": model_fail}, previous=first_model)
+    assert changed_model.version == first_model.version + 1
+    assert changed_model.hash != first_model.hash
+
+    first_risk = builder.build({"legacy.risk": _risk_sample(breaker=False)})
+    changed_risk = builder.build(
+        {"legacy.risk": _risk_sample(breaker=True)},
+        previous=first_risk,
+    )
+    assert changed_risk.version == first_risk.version + 1
+    assert changed_risk.hash != first_risk.hash
+
+    first_system = builder.build({"windows.system": _deep_system_sample()})
+    changed_system = builder.build(
+        {"windows.system": _deep_system_sample(recovery_blocked=True)},
+        previous=first_system,
+    )
+    assert changed_system.version == first_system.version + 1
+    assert changed_system.hash != first_system.hash
+
+    first_notification_health = builder.build(
+        {"operations.notification-health": _deep_system_sample()}
+    )
+    changed_notification_health = builder.build(
+        {"operations.notification-health": _deep_system_sample(recovery_blocked=True)},
+        previous=first_notification_health,
+    )
+    assert changed_notification_health.version == first_notification_health.version + 1
+    assert changed_notification_health.hash != first_notification_health.hash
 
 
 def test_state_and_control_versions_change_for_their_separate_inputs() -> None:
@@ -943,9 +1390,9 @@ def test_snapshot_diff_emits_canonical_upserts_and_removals() -> None:
     assert [
         (event.entity_type, event.entity_id, event.operation, event.targets) for event in events
     ] == [
-        ("portfolio-row", "AAPL", "upsert", ("portfolio.rows",)),
-        ("portfolio-row", "MSFT", "remove", ("portfolio.rows",)),
-        ("portfolio-row", "NVDA", "upsert", ("portfolio.rows",)),
+        ("portfolio-row", "AAPL", "upsert", ("impact.holdings", "portfolio.rows")),
+        ("portfolio-row", "MSFT", "remove", ("impact.holdings", "portfolio.rows")),
+        ("portfolio-row", "NVDA", "upsert", ("impact.holdings", "portfolio.rows")),
     ]
     assert events[0].entity == second.portfolio.rows[0]
     assert events[1].entity is None

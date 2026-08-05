@@ -17,6 +17,8 @@ from typing import Literal, Sequence
 from vesper.platform.persistence import PlatformPaths, default_platform_paths
 from vesper.platform.service import LocalPlatformService
 
+from .alert_dismissals import AlertDismissalStore
+from .command_contracts import CommandReceipt
 from .command_ports import LocalPlatformCommandPort
 from .command_registry import CommandRegistry
 from .contracts import SafeId, WireEnvelope
@@ -28,22 +30,31 @@ from .pipe_security import current_logon_sid, pipe_name
 from .pipe_server import ConnectionFactory, WindowsPipeServer
 from .ports import UnavailablePort
 from .projections import (
+    AttentionAlertProjection,
     EventTimelineProjection,
     LegacyStateProjection,
+    ManagedMemoryProjection,
     NativePlatformProjection,
+    NotificationHealthProjection,
     PlatformRuntimeProjection,
 )
 from .projections.repository import RepositoryProjection
 from .projections.windows_system import WindowsSystemProjection
 from .snapshot import SnapshotBuilder
 from .search import GlobalSearchService
+from .session_presence import NamedEventSessionPresence, SessionPresencePublisher
 from .snapshot_cache import SnapshotCache
 from .sqlite_ledger import TuiLedger
 from .stream import ProjectionLoop
 from .views import Freshness
+from .working_memory import default_vault_path
 
 _PARENT_IDLE_SECONDS = 30.0
 _COORDINATOR_WAIT_SECONDS = 10.0
+_COORDINATOR_JOIN_SECONDS = 1.0
+_RECOVERY_POLL_SECONDS = 5.0
+_PROJECTION_JOIN_SECONDS = 2.0
+_RECOVERY_JOIN_SECONDS = 1.0
 _OPERATIONAL_ADAPTER_ERRORS = (OSError, RuntimeError, ValueError)
 
 
@@ -100,12 +111,17 @@ def _serving_state_root(value: Path | None) -> Path:
     return canonical
 
 
-def _build_gateway(state_root: Path) -> Gateway:
+def _build_gateway(
+    state_root: Path,
+    *,
+    session_presence: SessionPresencePublisher | None = None,
+) -> Gateway:
     """Build the production gateway with current-user encrypted startup cache."""
 
     return Gateway(
         state_root,
         snapshot_cache=SnapshotCache(state_root / "snapshot-cache.dpapi"),
+        session_presence=session_presence,
     )
 
 
@@ -119,6 +135,20 @@ class _ProjectionRuntime:
     platform_runtime_reader: PlatformRuntimeProjection
     command_registry: CommandRegistry | None
     conversation_store: ConversationStore | None
+
+    def recover_commands(
+        self,
+        now_utc: datetime | None = None,
+    ) -> tuple[CommandReceipt, ...]:
+        registry = self.command_registry
+        if registry is None:
+            return ()
+        now = datetime.now(timezone.utc) if now_utc is None else now_utc
+        recovered = list(registry.recover_local_running(now))
+        runtime_sample = self.platform_runtime_reader.read()
+        if runtime_sample.freshness is Freshness.FRESH:
+            recovered.extend(registry.recover_running(now))
+        return tuple(recovered)
 
     def close(self) -> None:
         self.search_service.close()
@@ -150,12 +180,14 @@ def _build_projection_runtime(
     command_registry: CommandRegistry | None = None
     conversation_store: ConversationStore | None = None
     search_service: GlobalSearchService | None = None
+    dismissal_projection_store: AlertDismissalStore | None = None
     persistent_search_error: str | None = None
     try:
         try:
             ledger = TuiLedger(state_root / "operations.sqlite3")
             event_store = EventStore(ledger)
             note_store = NoteStore(ledger)
+            dismissal_projection_store = AlertDismissalStore(ledger, state_root)
         except _OPERATIONAL_ADAPTER_ERRORS:
             if event_store is not None:
                 event_store.close()
@@ -166,6 +198,7 @@ def _build_projection_runtime(
             if ledger is not None:
                 ledger.close()
                 ledger = None
+            dismissal_projection_store = None
             persistent_search_error = "Persisted search history is unavailable."
 
         try:
@@ -227,12 +260,19 @@ def _build_projection_runtime(
                 "tui event store",
             )
         )
+        try:
+            memory = ManagedMemoryProjection(default_vault_path())
+        except _OPERATIONAL_ADAPTER_ERRORS:
+            memory = unavailable(
+                "Managed V20 working-memory projection could not be initialized.",
+                "managed V20 working memory",
+            )
         sources = {
             "native.agents": agents,
             "native.portfolio": portfolio,
             "native.orders": orders,
             "native.models": UnavailablePort(
-                "No controller-owned typed model source is configured.",
+                "No controller-owned active, rollback, candidate, and regime registry is configured.",
                 source="native platform",
             ),
             "legacy.risk": risk,
@@ -240,11 +280,13 @@ def _build_projection_runtime(
                 "No controller-owned typed data-status source is configured.",
                 source="native platform",
             ),
-            "native.memory": UnavailablePort(
-                "No controller-owned typed memory-status source is configured.",
-                source="native platform",
-            ),
+            "native.memory": memory,
             "platform.runtime": platform_runtime_reader,
+            "operations.attention": AttentionAlertProjection(
+                state_root,
+                dismissals=dismissal_projection_store,
+            ),
+            "operations.notification-health": NotificationHealthProjection(state_root),
             "repository.system": repository,
             "windows.system": windows,
             "events.timeline": timeline,
@@ -258,9 +300,12 @@ def _build_projection_runtime(
             gateway.snapshot(),
             event_store,
             note_store,
+            memory_archive=(memory if isinstance(memory, ManagedMemoryProjection) else None),
             persistent_error=persistent_search_error,
         )
         gateway.attach_search_service(search_service)
+        if isinstance(memory, ManagedMemoryProjection):
+            gateway.attach_memory_projection(memory)
 
         if ledger is not None:
             try:
@@ -272,10 +317,16 @@ def _build_projection_runtime(
                     service,
                     operator_id=gateway.operator_id,
                 )
-                command_registry = CommandRegistry(ledger, port)
+                command_registry = CommandRegistry(
+                    ledger,
+                    port,
+                    alert_store=AlertDismissalStore(ledger, state_root),
+                )
+                recovery_now = datetime.now(timezone.utc)
+                command_registry.recover_local_running(recovery_now)
                 initial_runtime = platform_runtime_reader.read()
                 if initial_runtime.freshness is Freshness.FRESH:
-                    command_registry.recover_running(datetime.now(timezone.utc))
+                    command_registry.recover_running(recovery_now)
                 gateway.attach_command_registry(command_registry)
             except _OPERATIONAL_ADAPTER_ERRORS:
                 if command_registry is not None:
@@ -362,7 +413,8 @@ class _GatewayCoordinator:
         with self._admission_lock:
             if not self._closed:
                 raise RuntimeError("coordinator is still accepting disconnects")
-        self._thread.join()
+        if self._thread.is_alive():
+            return
         self._gateway.disconnect(client_id)
 
     def _submit(self, request: _Request) -> None:
@@ -378,7 +430,7 @@ class _GatewayCoordinator:
             if not self._closed:
                 self._closed = True
                 self._requests.put(None)
-        self._thread.join()
+        self._thread.join(timeout=_COORDINATOR_JOIN_SECONDS)
 
     def _run(self) -> None:
         while True:
@@ -497,14 +549,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         state_root = _serving_state_root(args.state_root)
     except ValueError as error:
         parser.error(str(error))
-    gateway = _build_gateway(state_root)
-    runtime = _build_projection_runtime(state_root, gateway)
+    presence = NamedEventSessionPresence()
+    try:
+        gateway = _build_gateway(state_root, session_presence=presence)
+    except BaseException:
+        presence.close()
+        raise
+    try:
+        runtime = _build_projection_runtime(state_root, gateway)
+    except BaseException:
+        gateway.close()
+        raise
     stop_event = threading.Event()
     coordinator: _GatewayCoordinator | None = None
     server: WindowsPipeServer | None = None
     watcher: threading.Thread | None = None
     projection_thread: threading.Thread | None = None
+    recovery_thread: threading.Thread | None = None
     projection_errors: list[BaseException] = []
+    recovery_errors: list[BaseException] = []
+    projection_stuck = False
+    recovery_stuck = False
     try:
         coordinator = _GatewayCoordinator(gateway)
         server = WindowsPipeServer(selected_pipe)
@@ -533,12 +598,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stop_event.set()
                 server.stop()
 
+        def run_recovery() -> None:
+            while not stop_event.wait(_RECOVERY_POLL_SECONDS):
+                try:
+                    runtime.recover_commands()
+                except BaseException as error:
+                    recovery_errors.append(error)
+                    stop_event.set()
+                    server.stop()
+                    return
+
         projection_thread = threading.Thread(
             target=run_projection,
             name="v20-tui-projection",
             daemon=True,
         )
         projection_thread.start()
+        recovery_callback = getattr(runtime, "recover_commands", None)
+        if callable(recovery_callback):
+            recovery_thread = threading.Thread(
+                target=run_recovery,
+                name="v20-tui-command-recovery",
+                daemon=True,
+            )
+            recovery_thread.start()
         watcher = threading.Thread(
             target=watch_parent,
             name="v20-tui-parent-watch",
@@ -563,12 +646,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         if watcher is not None:
             watcher.join(timeout=1)
         if projection_thread is not None:
-            projection_thread.join(timeout=2)
-        runtime.close()
-    if projection_thread is not None and projection_thread.is_alive():
-        raise RuntimeError("projection loop did not stop")
+            projection_thread.join(timeout=_PROJECTION_JOIN_SECONDS)
+        if recovery_thread is not None:
+            recovery_thread.join(timeout=_RECOVERY_JOIN_SECONDS)
+        projection_stuck = projection_thread is not None and projection_thread.is_alive()
+        recovery_stuck = recovery_thread is not None and recovery_thread.is_alive()
+        if projection_stuck or recovery_stuck:
+            gateway.close()
+        else:
+            try:
+                runtime.close()
+            finally:
+                gateway.close()
+    if projection_stuck:
+        raise RuntimeError("projection loop did not stop; runtime was left open")
+    if recovery_stuck:
+        raise RuntimeError("command recovery loop did not stop; runtime was left open")
     if projection_errors:
         raise RuntimeError("projection loop failed") from projection_errors[0]
+    if recovery_errors:
+        raise RuntimeError("command recovery loop failed") from recovery_errors[0]
     return 0
 
 

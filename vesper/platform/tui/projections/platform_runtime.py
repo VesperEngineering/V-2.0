@@ -357,6 +357,12 @@ def _pending_approvals(
                 reason=request.summary,
                 evidence_ids=tuple(item.artifact_id for item in request.evidence),
                 requested_at_utc=request.created_at,
+                affected_symbols=(),
+                weight_changes=(),
+                risks=(),
+                expected_consequences=(),
+                basis_sha256=None,
+                stale_reason=None,
             )
         )
     pending.sort(key=lambda item: (item.requested_at_utc, item.approval_id))
@@ -547,6 +553,13 @@ def _active_work(
                     elapsed_seconds=None,
                     model="qwen:64k",
                     affected_areas=(),
+                    session_id=item.session_id,
+                    plan_steps=(),
+                    activity=(),
+                    evidence_ids=(),
+                    context_percent=None,
+                    chat_agent_id=item.role.value,
+                    detail_next_cursor=None,
                 ),
                 item.created_at,
             )

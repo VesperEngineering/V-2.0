@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use ratatui::Frame;
@@ -17,7 +18,8 @@ use crate::command::TrackedCommandState;
 use crate::confirm::{ConfirmationStep, Selection};
 use crate::contract::{AlertSeverity, ConfirmationLevel, Freshness, OperatingMode, UtcTimestamp};
 use crate::controls::{ButtonState, ControlMenu, ControlMenuEntry, ControlOverlay};
-use crate::layout::{DisplayMode, ViewportClass, chat_shell_layout, shell_layout};
+use crate::layout::{DisplayMode, ShellLayout, ViewportClass, chat_shell_layout, shell_layout};
+use crate::render_plan::ShellRegion;
 use crate::screens::agents::render_agents;
 use crate::screens::data::render_data;
 use crate::screens::detail::render_direct_detail;
@@ -30,7 +32,10 @@ use crate::screens::risk::render_risk;
 use crate::screens::system::render_system;
 use crate::screens::timeline::render_timeline;
 use crate::search::{SearchKind, SearchStatus, format_filter_expression};
-use crate::state::{AccessState, AppState, AuthFeedback, AuthStage, LocalMode, Screen};
+use crate::state::{
+    AccessState, AppState, AuthFeedback, AuthStage, LocalMode, MemoryContentPhase,
+    MemoryContentView, Screen,
+};
 use crate::theme::Palette;
 
 const EASTERN_TIME_ZONE: &str = "Eastern Standard Time";
@@ -43,6 +48,9 @@ pub(crate) const CONTROL_CELL_WIDTH: u16 = 26;
 pub const MAX_CHAT_RENDER_ROWS: usize = 4_096;
 /// Maximum retained message bytes inspected while building one chat frame.
 pub const MAX_CHAT_RENDER_BYTES: usize = 256 * 1024;
+pub(crate) const PREVIOUS_MARKET_PANEL_HINT: &str = "[ Prev";
+pub(crate) const NEXT_MARKET_PANEL_HINT: &str = "] Next";
+pub(crate) const MARKET_PANEL_HINT_SEPARATOR: &str = " | ";
 
 const OMITTED_CHAT_MARKER: &str = "OLDER CHAT CONTENT HIDDEN - retained in controller history.";
 
@@ -56,28 +64,86 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
         return;
     }
 
-    let layout = if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
-        chat_shell_layout(area, state.display_mode())
-    } else {
-        shell_layout(area, state.display_mode())
-    };
+    let layout = active_shell_layout(area, state);
     render_header(frame, layout.header, state, palette);
     render_navigation(frame, layout.navigation, state, palette);
     render_alerts(frame, layout.alerts, state, palette);
+    render_body_region(frame, layout, state, palette);
+    render_input_region(frame, layout, state, palette);
+    render_footer_region(frame, layout, state, palette);
+}
+
+/// Render only full-width shell strips into a buffer seeded from the committed frame.
+pub fn render_regions(frame: &mut Frame<'_>, state: &AppState, regions: &BTreeSet<ShellRegion>) {
+    debug_assert!(state.access.is_unlocked());
+    let palette = state.theme().palette();
+    let layout = active_shell_layout(frame.area(), state);
+    for region in regions {
+        let area = shell_region_area(layout, *region);
+        debug_assert_eq!(area.x, frame.area().x);
+        debug_assert_eq!(area.width, frame.area().width);
+        frame.render_widget(Clear, area);
+        frame.render_widget(Block::default().style(base_style(palette)), area);
+    }
+    for region in regions {
+        match region {
+            ShellRegion::Header => render_header(frame, layout.header, state, palette),
+            ShellRegion::Navigation => {
+                render_navigation(frame, layout.navigation, state, palette);
+            }
+            ShellRegion::Alerts => render_alerts(frame, layout.alerts, state, palette),
+            ShellRegion::Body => render_body_region(frame, layout, state, palette),
+            ShellRegion::Input => render_input_region(frame, layout, state, palette),
+            ShellRegion::Footer => render_footer_region(frame, layout, state, palette),
+        }
+    }
+}
+
+fn active_shell_layout(area: Rect, state: &AppState) -> ShellLayout {
+    if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+        chat_shell_layout(area, state.display_mode())
+    } else {
+        shell_layout(area, state.display_mode())
+    }
+}
+
+const fn shell_region_area(layout: ShellLayout, region: ShellRegion) -> Rect {
+    match region {
+        ShellRegion::Header => layout.header,
+        ShellRegion::Navigation => layout.navigation,
+        ShellRegion::Alerts => layout.alerts,
+        ShellRegion::Body => layout.body,
+        ShellRegion::Input => layout.input,
+        ShellRegion::Footer => layout.footer,
+    }
+}
+
+fn body_parts(state: &AppState, layout: ShellLayout) -> (Rect, Option<Rect>) {
     let show_action_bar = state.snapshot.is_some()
         && state.search_detail().is_none()
+        && state.memory_content_view().is_none()
         && matches!(
             state.mode,
             LocalMode::Browse | LocalMode::Open | LocalMode::Menu
         );
-    let (body, action_bar) = if show_action_bar {
+    if show_action_bar {
         let (body, controls) = split_control_area(layout.body, state.display_mode());
         (body, Some(controls))
     } else {
         (layout.body, None)
-    };
-    let inline_actions = action_bar.is_some_and(|area| area.height == 0);
-    if state.mode == LocalMode::AgentSelector {
+    }
+}
+
+fn render_body_region(
+    frame: &mut Frame<'_>,
+    layout: ShellLayout,
+    state: &AppState,
+    palette: Palette,
+) {
+    let (body, action_bar) = body_parts(state, layout);
+    if let Some(view) = state.memory_content_view() {
+        render_memory_content(frame, body, state, view, palette);
+    } else if state.mode == LocalMode::AgentSelector {
         render_chat_selector(frame, body, state, palette);
     } else if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
         render_chat(frame, body, state, palette);
@@ -114,13 +180,36 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState) {
     {
         render_action_bar(frame, area, state, palette);
     }
-    if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
-        render_agent_input(frame, layout.input, state, palette);
-    }
-    render_footer(frame, layout.footer, state, palette, inline_actions);
     if let Some(overlay) = state.control_overlay() {
         render_control_overlay(frame, layout.body, overlay, palette);
     }
+}
+
+fn render_input_region(
+    frame: &mut Frame<'_>,
+    layout: ShellLayout,
+    state: &AppState,
+    palette: Palette,
+) {
+    if matches!(state.mode, LocalMode::AgentChat | LocalMode::AgentInput) {
+        render_agent_input(frame, layout.input, state, palette);
+    }
+}
+
+fn render_footer_region(
+    frame: &mut Frame<'_>,
+    layout: ShellLayout,
+    state: &AppState,
+    palette: Palette,
+) {
+    let (_, action_bar) = body_parts(state, layout);
+    render_footer(
+        frame,
+        layout.footer,
+        state,
+        palette,
+        action_bar.is_some_and(|area| area.height == 0),
+    );
 }
 
 #[doc(hidden)]
@@ -797,7 +886,11 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: P
             }
         }
     }
-    lines.push(Line::from("Enter Open | Up/Down Select | Esc Close"));
+    lines.push(Line::from(if state.can_open_memory_content() {
+        "o Full Content | Enter Summary | Up/Down Select | Esc Close"
+    } else {
+        "Enter Open | Up/Down Select | Esc Close"
+    }));
     frame.render_widget(
         Paragraph::new(lines)
             .style(base_style(palette))
@@ -889,6 +982,67 @@ fn render_search_detail(
     );
 }
 
+fn render_memory_content(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    view: &MemoryContentView,
+    palette: Palette,
+) {
+    frame.render_widget(
+        Paragraph::new(memory_content_lines(view))
+            .style(base_style(palette))
+            .wrap(Wrap { trim: false })
+            .scroll((
+                u16::try_from(state.screen_state().scroll_offset).unwrap_or(u16::MAX),
+                0,
+            ))
+            .block(panel("MEMORY CONTENT", palette)),
+        area,
+    );
+}
+
+pub(crate) fn memory_content_line_count(view: &MemoryContentView, width: u16) -> usize {
+    Paragraph::new(memory_content_lines(view))
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+}
+
+fn memory_content_lines(view: &MemoryContentView) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!(
+            "MEMORY {}",
+            sanitize_text(view.memory_id().as_str())
+        )),
+        Line::from(format!(
+            "REVIEWED {}",
+            format_eastern_time(view.reviewed_updated_at_utc())
+        )),
+        Line::default(),
+    ];
+    match view.phase() {
+        MemoryContentPhase::Loading => {
+            lines.push(Line::from("Loading current content..."));
+        }
+        MemoryContentPhase::Ready(content) => {
+            lines.push(Line::from("FULL CURRENT CONTENT"));
+            lines.push(Line::default());
+            lines.extend(
+                content
+                    .split('\n')
+                    .map(|line| Line::from(sanitize_text(line))),
+            );
+        }
+        MemoryContentPhase::Unavailable(reason) => {
+            lines.push(Line::from("CONTENT UNAVAILABLE"));
+            lines.push(Line::from(sanitize_text(reason)));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(Line::from("Up/Down/Page Scroll | Esc Back"));
+    lines
+}
+
 pub(crate) fn search_detail_line_count(
     state: &AppState,
     result: &crate::search::SearchResult,
@@ -925,6 +1079,9 @@ fn search_detail_lines(
         lines.push(Line::from(
             "CONTEXT ONLY - This note is not an agent command.",
         ));
+    }
+    if result.kind == SearchKind::Memory && result.timestamp_utc.is_some() {
+        lines.push(Line::from("o Open full current content"));
     }
     lines.push(Line::from("Esc Back"));
     lines
@@ -1189,14 +1346,20 @@ fn render_footer(
     palette: Palette,
     inline_actions: bool,
 ) {
-    let text = if state.mode == LocalMode::AgentSelector {
+    let text = if state.memory_content_view().is_some() {
+        "Memory Content | Up/Down/Page Scroll | Esc Back"
+    } else if state.mode == LocalMode::AgentSelector {
         "Agent Chat Selector | Up/Down Select | Enter Open | Esc Back"
     } else if state.mode == LocalMode::AgentChat {
         "Agent Chat | i Compose | Up/Down/Page Scroll | Esc Back"
     } else if state.mode == LocalMode::AgentInput {
         "Agent Chat Input | Enter Send | Esc History"
     } else if state.mode == LocalMode::Search {
-        "Search | Type Query | Up/Down Select | Enter Open | Esc Close"
+        if state.can_open_memory_content() {
+            "Search | o Full Content | Enter Summary | Up/Down Select | Esc Close"
+        } else {
+            "Search | Type Query | Up/Down Select | Enter Open | Esc Close"
+        }
     } else if state.mode == LocalMode::Filter {
         "Filter Search on Current Screen | Enter Apply | Esc Cancel"
     } else if state.mode == LocalMode::NoteEditor {
@@ -1211,8 +1374,13 @@ fn render_footer(
         "1-9,0 Screens | q Close TUI only | PREFERENCES UNAVAILABLE"
     } else if state.snapshot.is_some() {
         match state.screen {
-            Screen::Impact if area.width < 120 => "Up/Down Holdings | o Open | q Close | f Filter",
+            Screen::Impact if area.width < 120 => {
+                "[ Prev | ] Next | Up/Down | o Open | f Filter | q Close"
+            }
             Screen::Impact => "Up/Down Holdings | o Open | q Close | f Filter",
+            Screen::Portfolio if area.width < 120 => {
+                "[ Prev | ] Next | Up/Down | Left/Right Period | o Open | f Filter | q Close"
+            }
             Screen::Portfolio => {
                 "Up/Down Holdings | Left/Right Period | o Open | q Close | f Filter"
             }
@@ -1230,7 +1398,9 @@ fn render_footer(
             Screen::DataEvidence => {
                 "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter"
             }
-            Screen::Memory => "Up/Down Rows | Left/Right Panels | o Open | q Close | f Filter",
+            Screen::Memory => {
+                "Up/Down Rows | Left/Right Panels | o Full Content | q Close | f Filter"
+            }
             Screen::System => {
                 "Up/Down Rows | Left/Right Panels | p Account Privacy | o Open | q Close | f Filter"
             }

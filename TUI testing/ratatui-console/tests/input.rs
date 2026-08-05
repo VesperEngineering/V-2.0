@@ -23,7 +23,8 @@ use vesper_ratatui_console::app::{
 };
 use vesper_ratatui_console::contract::{Envelope, Message, MessageType, UtcTimestamp};
 use vesper_ratatui_console::input::InputEvent;
-use vesper_ratatui_console::layout::shell_layout;
+use vesper_ratatui_console::layout::{impact_panels, portfolio_panels, shell_layout};
+use vesper_ratatui_console::preferences::{ScreenId, ScreenPreferences};
 use vesper_ratatui_console::state::{
     AccessState, AppState, AuthRequest, AuthStage, ClientAction, LocalMode, ReduceOutcome, Screen,
 };
@@ -560,6 +561,34 @@ async fn due_search_from_merged_idle_effect_is_dispatched_to_the_session() {
     assert_eq!(payload.query.as_str(), "AAPL");
 }
 
+#[tokio::test]
+async fn direct_memory_open_dispatches_one_exact_content_request() {
+    let mut client = FoundationClient::from_app(App::new(AppState::controller()));
+    client.app_mut().reduce(snapshot_envelope(1)).unwrap();
+    let mut inputs = [InputEvent::Char('9'), InputEvent::Char('o')].into_iter();
+    let effect = process_input_batch(&mut client, &mut inputs);
+
+    let mut session = FakeSession::default();
+    assert_eq!(
+        client.dispatch(effect, &mut session).await.unwrap(),
+        SessionStep::Continue
+    );
+    assert_eq!(session.sent.len(), 1);
+    assert_eq!(
+        session.sent[0].message_type(),
+        MessageType::MemoryContentRequest
+    );
+    let Message::MemoryContentRequest(payload) = &session.sent[0].message else {
+        panic!("memory action must serialize as memory-content-request");
+    };
+    assert_eq!(payload.request_id.get(), 1);
+    assert_eq!(payload.memory_id.as_str(), "memory:1");
+    assert_eq!(
+        payload.reviewed_updated_at_utc.as_str(),
+        "2026-08-03T00:00:00Z"
+    );
+}
+
 #[test]
 fn models_header_click_without_typed_selection_does_not_open_a_detail() {
     let mut state = AppState::controller();
@@ -612,6 +641,84 @@ fn system_mouse_boundary_matches_the_rendered_source_and_live_panel_split() {
         Some(InputEvent::OpenBrowseRow { panel: 2, index: 0 })
     );
     assert_eq!(mouse_to_input(click(bottom[1].x), area, &state), None);
+}
+
+#[test]
+fn market_mouse_hitboxes_use_the_same_preference_aware_panel_boundaries() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot_envelope(1)).unwrap();
+    state.set_screen_preferences(
+        ScreenId::Impact,
+        ScreenPreferences {
+            visible_columns: Vec::new(),
+            panel_sizes: vec![70, 30],
+            performance_period: None,
+        },
+    );
+    let area = Rect::new(0, 0, 140, 40);
+    let body = split_control_area(
+        shell_layout(area, state.display_mode()).body,
+        state.display_mode(),
+    )
+    .0;
+    let impact = impact_panels(body, &state.screen_state().panel_sizes);
+    let click = |column, row| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_to_input(click(impact[0].right() - 2, impact[0].y + 2), area, &state),
+        Some(InputEvent::OpenBrowseRow { panel: 0, index: 0 })
+    );
+    assert_eq!(
+        mouse_to_input(click(impact[1].x + 1, impact[1].y + 2), area, &state),
+        None
+    );
+
+    state.handle(InputEvent::Char('2'));
+    state.set_screen_preferences(
+        ScreenId::Portfolio,
+        ScreenPreferences {
+            visible_columns: Vec::new(),
+            panel_sizes: vec![63, 22, 15],
+            performance_period: None,
+        },
+    );
+    let portfolio = portfolio_panels(body, &state.screen_state().panel_sizes);
+    assert_eq!(
+        mouse_to_input(click(portfolio[0].x + 2, portfolio[0].y + 2), area, &state),
+        Some(InputEvent::OpenBrowseRow { panel: 0, index: 0 })
+    );
+    assert_eq!(
+        mouse_to_input(click(portfolio[1].x + 2, portfolio[1].y + 1), area, &state),
+        None
+    );
+}
+
+#[test]
+fn narrow_market_footer_exposes_mouse_reachable_panel_focus_controls() {
+    let mut state = AppState::controller();
+    state.reduce(snapshot_envelope(1)).unwrap();
+    state.handle(InputEvent::Char('2'));
+    let area = Rect::new(0, 0, 100, 30);
+    let footer = shell_layout(area, state.display_mode()).footer;
+    let click = |column| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row: footer.y + 1,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    assert_eq!(
+        mouse_to_input(click(footer.x + 2), area, &state),
+        Some(InputEvent::Char('['))
+    );
+    assert_eq!(
+        mouse_to_input(click(footer.x + 11), area, &state),
+        Some(InputEvent::Char(']'))
+    );
 }
 
 #[test]
@@ -820,10 +927,39 @@ fn repository_root_rejects_every_missing_gateway_runtime_dependency() {
 }
 
 #[test]
-fn gateway_runtime_dependency_closure_includes_conversations_and_compression() {
+fn gateway_runtime_dependency_closure_includes_all_new_transitive_imports() {
     let required = required_gateway_runtime_files();
-    assert!(required.contains(&"vesper/platform/tui/conversations.py"));
-    assert!(required.contains(&"vesper/platform/tui/compression.py"));
+    for dependency in [
+        "vesper/platform/ops/__init__.py",
+        "vesper/platform/ops/activation.py",
+        "vesper/platform/ops/alerts.py",
+        "vesper/platform/ops/notification_health.py",
+        "vesper/platform/ops/policy.py",
+        "vesper/platform/ops/services.py",
+        "vesper/platform/ops/supervisor.py",
+        "vesper/platform/ops/training.py",
+        "vesper/platform/paths.py",
+        "vesper/platform/tui/alert_dismissals.py",
+        "vesper/platform/tui/backup.py",
+        "vesper/platform/tui/git_port.py",
+        "vesper/platform/tui/notifications.py",
+        "vesper/platform/tui/recovery.py",
+        "vesper/platform/tui/snapshot_cache.py",
+        "vesper/platform/tui/working_memory.py",
+        "vesper/platform/tui/projections/managed_memory.py",
+        "vesper/platform/tui/projections/operations_status.py",
+    ] {
+        assert!(required.contains(&dependency), "missing {dependency}");
+    }
+    let unique = required
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique.len(),
+        required.len(),
+        "runtime closure has duplicates"
+    );
 }
 
 #[test]

@@ -14,6 +14,7 @@ from vesper.platform.tui.contracts import (
     AuthResultPayload,
     Freshness,
     LeaseResultPayload,
+    MemoryContentResultPayload,
     MessageType,
     OperatingMode,
     PongPayload,
@@ -140,6 +141,21 @@ def presentation(gateway: Gateway) -> EventPresentation:
         system=meta(snapshot.system),
         portfolio_rank_source=snapshot.portfolio.rank_source,
         timeline_hidden_event_count=snapshot.timeline.hidden_event_count,
+        model_active_model_id=snapshot.models.active_model_id,
+        model_rollback_model_id=snapshot.models.rollback_model_id,
+        model_approved_family=snapshot.models.approved_family,
+        model_approved_strategy=snapshot.models.approved_strategy,
+        model_approved_feature_set_id=snapshot.models.approved_feature_set_id,
+        model_final_regime=snapshot.models.final_regime,
+        model_final_regime_confidence=snapshot.models.final_regime_confidence,
+        model_regime_state=snapshot.models.regime_state,
+        model_automatic_changes_blocked=snapshot.models.automatic_changes_blocked,
+        model_block_reason=snapshot.models.block_reason,
+        model_gates=snapshot.models.gates,
+        risk_blocked_actions=snapshot.risk.blocked_actions,
+        risk_circuit_breaker=snapshot.risk.circuit_breaker,
+        system_qwen=snapshot.system.qwen,
+        system_health=snapshot.system.health,
     )
 
 
@@ -315,6 +331,106 @@ def test_locked_search_returns_no_results_but_viewer_searches_private_and_shared
         notes.close()
 
 
+def test_memory_content_is_auth_only_exact_bound_and_replay_safe(tmp_path: Path) -> None:
+    from vesper.platform.tui.projections.managed_memory import ManagedMemoryProjection
+    from vesper.platform.tui.working_memory import (
+        MemoryCandidate,
+        MemoryValueScore,
+        WorkingMemoryStore,
+    )
+
+    vault = tmp_path / "vault"
+    score = MemoryValueScore(10, 10, 10, 10, 10, 10)
+    with WorkingMemoryStore(
+        vault,
+        clock=lambda: NOW,
+        id_factory=lambda: "change:memory-content",
+        candidate_validator=lambda _candidate: True,
+    ) as store:
+        store.propose(
+            MemoryCandidate(
+                memory_id="memory:deep-archive",
+                content="Full private V20 memory content.",
+                scope="v20",
+                category="durable-lesson",
+                supported=True,
+                evidence_ids=("evidence:memory",),
+                reason="Verified reusable detail.",
+                score=score,
+            )
+        )
+        store.curate("validated-work")
+
+    gateway = Gateway(
+        tmp_path / "auth",
+        clock=lambda: NOW,
+        memory_projection=ManagedMemoryProjection(vault, clock=lambda: NOW),
+    )
+    locked = send(
+        gateway,
+        "locked",
+        MessageType.MEMORY_CONTENT_REQUEST,
+        1,
+        request_id=1,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc="2026-08-03T00:00:00Z",
+    )
+    assert locked.message_type is MessageType.PROTOCOL_ERROR
+    assert "Full private" not in json.dumps(locked.payload)
+
+    setup(gateway, "viewer")
+    response = send(
+        gateway,
+        "viewer",
+        MessageType.MEMORY_CONTENT_REQUEST,
+        3,
+        request_id=1,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc="2026-08-03T00:00:00Z",
+    )
+    assert decode_payload(response) == MemoryContentResultPayload(
+        request_id=1,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc="2026-08-03T00:00:00Z",
+        status="success",
+        content="Full private V20 memory content.",
+        error=None,
+    )
+
+    replay = send(
+        gateway,
+        "viewer",
+        MessageType.MEMORY_CONTENT_REQUEST,
+        4,
+        request_id=1,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc="2026-08-03T00:00:00Z",
+    )
+    replay_error = decode_payload(replay)
+    assert isinstance(replay_error, ProtocolErrorPayload)
+    assert replay_error.code == "memory-request-replay"
+    assert "Full private" not in json.dumps(replay.payload)
+
+    stale_at = NOW.replace(microsecond=1)
+    stale = send(
+        gateway,
+        "viewer",
+        MessageType.MEMORY_CONTENT_REQUEST,
+        5,
+        request_id=2,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc="2026-08-03T00:00:00.000001Z",
+    )
+    assert decode_payload(stale) == MemoryContentResultPayload(
+        request_id=2,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc=stale_at,
+        status="error",
+        content=None,
+        error="Memory changed. Search again.",
+    )
+
+
 def test_search_index_tracks_published_state_and_missing_service_is_a_safe_visible_error(
     tmp_path: Path,
 ) -> None:
@@ -344,9 +460,7 @@ def test_search_index_tracks_published_state_and_missing_service_is_a_safe_visib
     payload = decode_payload(response)
     assert isinstance(payload, SearchResultsPayload)
     assert payload.indexed_state_version == 12
-    assert [(row.kind, row.record_id) for row in payload.results] == [
-        (SearchKind.STOCK, "AAPL")
-    ]
+    assert [(row.kind, row.record_id) for row in payload.results] == [(SearchKind.STOCK, "AAPL")]
     search.close()
 
     unavailable = Gateway(tmp_path / "missing", clock=lambda: NOW)
@@ -736,6 +850,7 @@ def test_oversized_projection_snapshot_is_rejected_before_queueing(
             approval_id=None,
             order_id=None,
             evidence_ids=(),
+            work_id=None,
         )
         for index in range(2_100)
     )
@@ -835,6 +950,97 @@ def test_authenticated_session_rejects_repeated_auth_without_losing_access(
     )
 
 
+class SessionPresenceSpy:
+    def __init__(self) -> None:
+        self.states: list[bool] = []
+        self.closed = 0
+
+    def set_authenticated(self, authenticated: bool) -> None:
+        self.states.append(authenticated)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class FlakyResetSessionPresence(SessionPresenceSpy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reset_failures = 1
+
+    def set_authenticated(self, authenticated: bool) -> None:
+        self.states.append(authenticated)
+        if not authenticated and self.reset_failures:
+            self.reset_failures -= 1
+            raise OSError("transient-reset-failure")
+
+
+def test_gateway_publishes_multi_window_auth_lock_disconnect_and_close(
+    tmp_path: Path,
+) -> None:
+    presence = SessionPresenceSpy()
+    gateway = Gateway(tmp_path, clock=lambda: NOW, session_presence=presence)
+
+    setup(gateway, "owner")
+    unlock(gateway, "viewer")
+    assert gateway.has_authenticated_client() is True
+    assert presence.states == [True]
+
+    locked = send(gateway, "owner", MessageType.LOCK_REQUEST, 3, action="lock")
+    assert decode_payload(locked).locked is True
+    assert gateway.has_authenticated_client() is True
+    assert presence.states == [True]
+
+    gateway.disconnect("viewer")
+    assert gateway.has_authenticated_client() is False
+    assert presence.states == [True, False]
+
+    gateway.close()
+    gateway.close()
+    assert presence.closed == 1
+
+
+def test_gateway_retries_one_transient_last_window_reset(tmp_path: Path) -> None:
+    presence = FlakyResetSessionPresence()
+    gateway = Gateway(tmp_path, clock=lambda: NOW, session_presence=presence)
+    setup(gateway)
+
+    send(gateway, "first", MessageType.LOCK_REQUEST, 3, action="lock")
+
+    assert presence.states == [True, False, False]
+    assert gateway.has_authenticated_client() is False
+
+
+def test_gateway_failed_auth_never_publishes_authenticated_presence(tmp_path: Path) -> None:
+    presence = SessionPresenceSpy()
+    gateway = Gateway(tmp_path, clock=lambda: NOW, session_presence=presence)
+    setup(gateway, "owner")
+    send(gateway, "owner", MessageType.LOCK_REQUEST, 3, action="lock")
+    greet(gateway, "denied")
+
+    result = send(
+        gateway,
+        "denied",
+        MessageType.AUTH_UNLOCK,
+        2,
+        password="wrong",
+    )
+
+    assert decode_payload(result).success is False
+    assert gateway.has_authenticated_client() is False
+    assert presence.states == [True, False]
+
+
+def test_gateway_close_clears_authenticated_presence_before_backend_close(tmp_path: Path) -> None:
+    presence = SessionPresenceSpy()
+    gateway = Gateway(tmp_path, clock=lambda: NOW, session_presence=presence)
+    setup(gateway)
+
+    gateway.close()
+
+    assert presence.states == [True, False]
+    assert presence.closed == 1
+
+
 def test_cli_print_pipe_name_is_exclusive_and_opens_no_state(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -920,9 +1126,12 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
     from vesper.platform.tui import cli
     from vesper.platform.tui.ports import UnavailablePort
     from vesper.platform.tui.projections import (
+        AttentionAlertProjection,
         EventTimelineProjection,
         LegacyStateProjection,
+        ManagedMemoryProjection,
         NativePlatformProjection,
+        NotificationHealthProjection,
         PlatformRuntimeProjection,
     )
     from vesper.platform.tui.projections.repository import RepositoryProjection
@@ -945,6 +1154,8 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
         "native.data",
         "native.memory",
         "platform.runtime",
+        "operations.attention",
+        "operations.notification-health",
         "repository.system",
         "windows.system",
         "events.timeline",
@@ -953,17 +1164,33 @@ def test_projection_runtime_uses_only_reviewed_read_adapters_and_closes_ledger(
     assert isinstance(sources["native.portfolio"], UnavailablePort)
     assert isinstance(sources["native.orders"], UnavailablePort)
     assert isinstance(sources["native.models"], UnavailablePort)
+    assert sources["native.models"].read().error == (
+        "No controller-owned active, rollback, candidate, and regime registry is configured."
+    )
     assert isinstance(sources["legacy.risk"], LegacyStateProjection)
     assert sources["legacy.risk"]._state_path == Path("data/engine_state.json")
     assert isinstance(sources["native.data"], UnavailablePort)
-    assert isinstance(sources["native.memory"], UnavailablePort)
+    assert isinstance(sources["native.memory"], ManagedMemoryProjection)
+    assert sources["native.memory"]._database.name == ".working-memory.sqlite3"
     assert isinstance(sources["platform.runtime"], PlatformRuntimeProjection)
+    assert isinstance(sources["operations.attention"], AttentionAlertProjection)
+    assert sources["operations.attention"]._path == tmp_path / "attention-alert.json"
+    assert sources["operations.attention"]._dismissals is not None
+    assert isinstance(sources["operations.notification-health"], NotificationHealthProjection)
+    assert sources["operations.notification-health"]._path == tmp_path / "notification-health.json"
     assert isinstance(sources["repository.system"], RepositoryProjection)
     assert isinstance(sources["windows.system"], WindowsSystemProjection)
     assert isinstance(sources["events.timeline"], EventTimelineProjection)
     assert runtime.event_store._ledger.path == tmp_path / "operations.sqlite3"
     assert runtime.note_store._ledger is runtime.event_store._ledger
+    assert runtime.command_registry is not None
+    assert "alert.dismiss" not in runtime.command_registry.enabled_command_types
+    assert "layout.reset" in runtime.command_registry.enabled_command_types
+    assert runtime.command_registry._alert_store is not None
+    assert runtime.command_registry._alert_store._ledger is runtime.ledger
+    assert sources["operations.attention"]._dismissals._ledger is runtime.ledger
     assert gateway.search_service is runtime.search_service
+    assert gateway.memory_projection is sources["native.memory"]
 
     runtime.close()
     with pytest.raises(LedgerClosedError):
@@ -985,6 +1212,7 @@ def test_projection_reads_never_cross_mutating_or_protected_boundaries(
     from vesper.execution import broker as broker_module
     from vesper.platform.tui import cli
     from vesper.platform.tui.views import Freshness
+    from vesper.platform.tui.working_memory import WorkingMemoryStore
     from vesper.scheduler import engine as scheduler_module
 
     access_counts = {
@@ -992,6 +1220,7 @@ def test_projection_reads_never_cross_mutating_or_protected_boundaries(
         "scheduler": 0,
         "training": 0,
         "protected_path": 0,
+        "working_memory_writer": 0,
     }
 
     def forbidden_boundary(name: str):
@@ -1007,6 +1236,11 @@ def test_projection_reads_never_cross_mutating_or_protected_boundaries(
         scheduler_module.MarketScheduler,
         "__init__",
         forbidden_boundary("scheduler"),
+    )
+    monkeypatch.setattr(
+        WorkingMemoryStore,
+        "__init__",
+        forbidden_boundary("working_memory_writer"),
     )
 
     original_popen = subprocess.Popen
@@ -1095,6 +1329,7 @@ def test_projection_reads_never_cross_mutating_or_protected_boundaries(
             "scheduler": 0,
             "training": 0,
             "protected_path": 0,
+            "working_memory_writer": 0,
         }
     finally:
         runtime.close()
@@ -1116,6 +1351,8 @@ def test_projection_runtime_degrades_corrupt_ledger_without_losing_other_sources
     )
 
     assert runtime.event_store is None
+    assert runtime.command_registry is None
+    assert runtime.loop._sources["operations.attention"]._dismissals is None
     assert isinstance(runtime.loop._sources["events.timeline"], UnavailablePort)
     assert isinstance(runtime.loop._sources["native.agents"], NativePlatformProjection)
     setup(gateway)
@@ -1219,6 +1456,7 @@ def test_cli_starts_projection_loop_and_closes_it_before_return(
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(cli, "default_pipe_name", lambda: expected_pipe)
     monkeypatch.setattr(cli, "WindowsPipeServer", FakeServer)
+    monkeypatch.setattr(cli, "NamedEventSessionPresence", SessionPresenceSpy)
     monkeypatch.setattr(
         cli,
         "_build_projection_runtime",
@@ -1228,6 +1466,130 @@ def test_cli_starts_projection_loop_and_closes_it_before_return(
     assert cli.main([]) == 0
     assert stopped.is_set()
     assert closed.is_set()
+
+
+def test_cli_never_closes_runtime_under_a_blocked_recovery_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+
+    expected_pipe = r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
+    entered = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+    disconnects: list[str] = []
+    finished = threading.Event()
+    closed = threading.Event()
+
+    class FakeLoop:
+        def run(self, stop_event: threading.Event) -> None:
+            stop_event.wait(3)
+
+    class FakeRuntime:
+        loop = FakeLoop()
+
+        def recover_commands(self) -> tuple[object, ...]:
+            entered.set()
+            release.wait(3)
+            finished.set()
+            return ()
+
+        def close(self) -> None:
+            closed.set()
+
+    class FakeServer:
+        def __init__(self, name: str) -> None:
+            assert name == expected_pipe
+            self.ready_event = threading.Event()
+            self.ready_event.set()
+            self.active_client_count = 0
+
+        def serve(self, handler, stop_event, *, connection_factory) -> None:
+            del handler, connection_factory
+            assert entered.wait(1)
+            stop_event.set()
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(cli, "default_pipe_name", lambda: expected_pipe)
+    monkeypatch.setattr(cli, "WindowsPipeServer", FakeServer)
+    monkeypatch.setattr(cli, "NamedEventSessionPresence", SessionPresenceSpy)
+    monkeypatch.setattr(cli, "_RECOVERY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        cli,
+        "_build_projection_runtime",
+        lambda state_root, gateway: FakeRuntime(),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="command recovery loop did not stop"):
+            cli.main([])
+        assert not closed.is_set()
+    finally:
+        release.set()
+        assert finished.wait(1)
+
+
+def test_cli_never_closes_runtime_under_a_blocked_projection_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+
+    expected_pipe = r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    closed = threading.Event()
+
+    class BlockingLoop:
+        def run(self, _stop_event: threading.Event) -> None:
+            entered.set()
+            release.wait(2)
+            finished.set()
+
+    class FakeRuntime:
+        loop = BlockingLoop()
+
+        def close(self) -> None:
+            closed.set()
+
+    class FakeServer:
+        def __init__(self, name: str) -> None:
+            assert name == expected_pipe
+            self.ready_event = threading.Event()
+            self.ready_event.set()
+            self.active_client_count = 0
+
+        def serve(self, handler, stop_event, *, connection_factory) -> None:
+            del handler, connection_factory
+            assert entered.wait(1)
+            stop_event.set()
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(cli, "default_pipe_name", lambda: expected_pipe)
+    monkeypatch.setattr(cli, "WindowsPipeServer", FakeServer)
+    monkeypatch.setattr(cli, "NamedEventSessionPresence", SessionPresenceSpy)
+    monkeypatch.setattr(cli, "_PROJECTION_JOIN_SECONDS", 0.05)
+    monkeypatch.setattr(
+        cli,
+        "_build_projection_runtime",
+        lambda state_root, gateway: FakeRuntime(),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="projection loop did not stop"):
+            cli.main([])
+        assert not closed.is_set()
+    finally:
+        release.set()
+        assert finished.wait(1)
 
 
 def test_projection_invariant_failure_stops_server_and_closes_runtime(
@@ -1264,6 +1626,7 @@ def test_projection_invariant_failure_stops_server_and_closes_runtime(
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(cli, "default_pipe_name", lambda: expected_pipe)
     monkeypatch.setattr(cli, "WindowsPipeServer", FakeServer)
+    monkeypatch.setattr(cli, "NamedEventSessionPresence", SessionPresenceSpy)
     monkeypatch.setattr(
         cli,
         "_build_projection_runtime",
@@ -1274,6 +1637,53 @@ def test_projection_invariant_failure_stops_server_and_closes_runtime(
         cli.main([])
     assert isinstance(failure.value.__cause__, AssertionError)
     assert closed.is_set()
+
+
+def test_cli_closes_presence_when_runtime_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vesper.platform.tui import cli
+
+    expected_pipe = r"\\.\pipe\vesper-v20-tui-0123456789abcdef"
+    presence = SessionPresenceSpy()
+
+    class FakeLoop:
+        def run(self, stop_event: threading.Event) -> None:
+            stop_event.set()
+
+    class FakeRuntime:
+        loop = FakeLoop()
+
+        def close(self) -> None:
+            raise RuntimeError("runtime-close-failure")
+
+    class FakeServer:
+        def __init__(self, name: str) -> None:
+            assert name == expected_pipe
+            self.ready_event = threading.Event()
+            self.ready_event.set()
+            self.active_client_count = 0
+
+        def serve(self, handler, stop_event, *, connection_factory) -> None:
+            del handler, stop_event, connection_factory
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(cli, "default_pipe_name", lambda: expected_pipe)
+    monkeypatch.setattr(cli, "WindowsPipeServer", FakeServer)
+    monkeypatch.setattr(cli, "NamedEventSessionPresence", lambda: presence)
+    monkeypatch.setattr(
+        cli,
+        "_build_projection_runtime",
+        lambda state_root, gateway: FakeRuntime(),
+    )
+
+    with pytest.raises(RuntimeError, match="runtime-close-failure"):
+        cli.main([])
+    assert presence.closed == 1
 
 
 def test_coordinator_closes_admission_before_shutdown_sentinel(tmp_path: Path) -> None:
@@ -1383,6 +1793,62 @@ def test_coordinator_stop_waits_until_all_admitted_work_is_drained(
     stopping.join(2)
     assert completed.is_set()
     assert not stopping.is_alive()
+    assert len(errors) <= 1
+
+
+def test_coordinator_stop_does_not_wait_forever_for_hung_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vesper.platform.tui import cli
+
+    entered = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+    disconnects: list[str] = []
+
+    class HungGateway:
+        def handle(self, client_id: str, message: WireEnvelope):
+            del client_id
+            entered.set()
+            release.wait(2)
+            return (message,)
+
+        def disconnect(self, client_id: str) -> None:
+            disconnects.append(client_id)
+
+    monkeypatch.setattr(cli, "_COORDINATOR_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(cli, "_COORDINATOR_JOIN_SECONDS", 0.01)
+    coordinator = cli._GatewayCoordinator(HungGateway())  # type: ignore[arg-type]
+
+    def invoke() -> None:
+        try:
+            coordinator.handle(
+                "client",
+                envelope(MessageType.PING, 1, {"nonce": "hung"}),
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    assert entered.wait(1)
+
+    stopping = threading.Thread(target=coordinator.stop)
+    stopping.start()
+    try:
+        stopping.join(0.2)
+        assert not stopping.is_alive()
+        late_disconnect = threading.Thread(
+            target=lambda: coordinator.disconnect_after_stop("client")
+        )
+        late_disconnect.start()
+        late_disconnect.join(0.2)
+        assert not late_disconnect.is_alive()
+        assert disconnects == []
+    finally:
+        release.set()
+        caller.join(2)
+        stopping.join(2)
     assert len(errors) <= 1
 
 

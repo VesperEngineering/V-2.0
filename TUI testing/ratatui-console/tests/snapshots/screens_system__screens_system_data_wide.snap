@@ -7,15 +7,15 @@ expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::d
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌> DATA SOURCES────────────────────────────────────────────────────────┐┌EVIDENCE──────────────────────────────────────┐
 │[~] STALE source:massive | Age 12.5s | Coverage S&P 500 | Consumers   ││[E] evidence:1 | receipt | Source controller |│
-│ml_model, momentum | Dependencies [?] UNAVAILABLE - Not in the        ││2026-07-15 08:34:56 EDT | SHA-256             │
-│SourceRow contract. | 2026-07-15 08:34:56 EDT | Late sample           ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
+│ml_model, momentum | 2026-07-15 08:34:56 EDT | Late sample            ││2026-07-15 08:34:56 EDT | SHA-256             │
+│Dependencies massive-db, exchange-calendar                            ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
 │[?] UNAVAILABLE source:missing | No reviewed adapter                  ││aaaaaaaaaaaaaaaaaa                            │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
-│                                                                      ││                                              │
+│Dependencies NONE                                                     ││SYMBOLS NVDA | AGENTS agent:qwen | MODELS     │
+│                                                                      ││model:active                                  │
+│                                                                      ││ORDERS order:1 | APPROVALS approval:stale |   │
+│                                                                      ││SOURCES source:massive                        │
+│                                                                      ││RAW LOG log:market [o open] | TRUNCATED YES | │
+│                                                                      ││NEXT cursor:raw-next                          │
 │                                                                      ││                                              │
 │                                                                      ││                                              │
 │                                                                      ││                                              │

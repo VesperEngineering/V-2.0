@@ -11,9 +11,9 @@ use vesper_ratatui_console::command::{
 use vesper_ratatui_console::confirm::begin_confirmation;
 use vesper_ratatui_console::contract::CommandSpecView;
 use vesper_ratatui_console::contract::{
-    CapabilityView, CommandPayload, CommandReceipt, CommandReceiptPayload, CommandRequest,
-    CommandType, ConsoleSnapshot, Envelope, Message, NoteTargetType, SafeId, Sha256Hex,
-    UtcTimestamp,
+    AlertSeverity, CapabilityView, CommandPayload, CommandReceipt, CommandReceiptPayload,
+    CommandRequest, CommandType, ConsoleSnapshot, Envelope, Message, NoteTargetType, SafeId,
+    ScreenName, Sha256Hex, UtcTimestamp,
 };
 use vesper_ratatui_console::controls::{
     AgentRouteDraft, ButtonState, ControlOverlay, LocalControl, button_state,
@@ -21,6 +21,7 @@ use vesper_ratatui_console::controls::{
 };
 use vesper_ratatui_console::input::InputEvent;
 use vesper_ratatui_console::layout::DisplayMode;
+use vesper_ratatui_console::preferences::{ScreenId, ScreenPreferences};
 use vesper_ratatui_console::state::{AccessState, LocalMode, Screen};
 use vesper_ratatui_console::state::{AppState, ClientAction, ReduceOutcome};
 use vesper_ratatui_console::theme::Theme;
@@ -96,6 +97,7 @@ fn approved_agent_send_snapshot() -> ConsoleSnapshot {
     let snapshot = controls_snapshot_with_only_enabled(CommandType::AgentSendMessage);
     let mut value = serde_json::to_value(snapshot).expect("serialize controls snapshot");
     value["agents"]["rows"][0]["agent"] = serde_json::json!("v20-product");
+    value["agents"]["rows"][0]["chat_agent_id"] = serde_json::json!("v20-product");
     serde_json::from_value(value).expect("approved-agent controls snapshot")
 }
 
@@ -339,6 +341,40 @@ fn required_screen_catalog_places_all_approved_command_types() {
 }
 
 #[test]
+fn every_screen_catalog_includes_one_global_alert_dismiss_and_layout_reset() {
+    for screen in [
+        Screen::Impact,
+        Screen::Portfolio,
+        Screen::Orders,
+        Screen::Agents,
+        Screen::ModelsRegime,
+        Screen::Timeline,
+        Screen::RiskApprovals,
+        Screen::DataEvidence,
+        Screen::Memory,
+        Screen::System,
+    ] {
+        let definitions = control_definitions_for_screen(screen).collect::<Vec<_>>();
+        assert_eq!(
+            definitions
+                .iter()
+                .filter(|definition| definition.command_type == CommandType::AlertDismiss)
+                .count(),
+            1,
+            "{screen:?} must expose one global alert action"
+        );
+        assert_eq!(
+            definitions
+                .iter()
+                .filter(|definition| definition.command_type == CommandType::LayoutReset)
+                .count(),
+            1,
+            "{screen:?} must expose one layout reset action"
+        );
+    }
+}
+
+#[test]
 fn viewer_sees_take_control_and_controller_keeps_lock_and_privacy_controls() {
     let viewer = local_controls(AccessState::Viewer, Screen::System);
     assert!(viewer.contains(&LocalControl::TakeControl));
@@ -349,6 +385,67 @@ fn viewer_sees_take_control_and_controller_keeps_lock_and_privacy_controls() {
     assert!(!controller.contains(&LocalControl::TakeControl));
     assert!(controller.contains(&LocalControl::LockTui));
     assert!(controller.contains(&LocalControl::ToggleAccountPrivacy));
+}
+
+#[test]
+fn impact_and_portfolio_offer_local_layout_controls_without_network_actions() {
+    for screen in [Screen::Impact, Screen::Portfolio] {
+        let controls = local_controls(AccessState::Viewer, screen);
+        assert!(controls.contains(&LocalControl::GrowPrimaryPanel));
+        assert!(controls.contains(&LocalControl::ShrinkPrimaryPanel));
+        assert!(controls.contains(&LocalControl::ToggleTableColumns));
+    }
+    let orders = local_controls(AccessState::Controller, Screen::Orders);
+    assert!(!orders.contains(&LocalControl::GrowPrimaryPanel));
+    assert!(!orders.contains(&LocalControl::ShrinkPrimaryPanel));
+    assert!(!orders.contains(&LocalControl::ToggleTableColumns));
+
+    let mut state = AppState::controller();
+    state.snapshot = Some(controls_snapshot_with_enabled_capabilities());
+    state.handle(InputEvent::Char(':'));
+    let grow = state
+        .control_menu()
+        .expect("impact menu")
+        .local_index(LocalControl::GrowPrimaryPanel)
+        .expect("grow button");
+    assert!(state.handle(InputEvent::ActivateControl(grow)).is_empty());
+    assert_eq!(state.screen_state().panel_sizes, [70, 30]);
+    assert_eq!(
+        state.preferences().screens[&ScreenId::Impact].panel_sizes,
+        [70, 30]
+    );
+
+    state.handle(InputEvent::Char('2'));
+    state.handle(InputEvent::Char(':'));
+    let grow = state
+        .control_menu()
+        .expect("portfolio menu")
+        .local_index(LocalControl::GrowPrimaryPanel)
+        .expect("grow button");
+    assert!(state.handle(InputEvent::ActivateControl(grow)).is_empty());
+    assert_eq!(state.screen_state().panel_sizes, [63, 22, 15]);
+    assert_eq!(
+        state.preferences().screens[&ScreenId::Impact].panel_sizes,
+        [70, 30],
+        "screen edits must stay isolated"
+    );
+
+    state.handle(InputEvent::Char(':'));
+    let columns = state
+        .control_menu()
+        .expect("portfolio menu")
+        .local_index(LocalControl::ToggleTableColumns)
+        .expect("columns button");
+    assert!(
+        state
+            .handle(InputEvent::ActivateControl(columns))
+            .is_empty()
+    );
+    assert_eq!(state.screen_state().visible_columns, ["symbol", "current"]);
+    assert_eq!(
+        state.preferences().screens[&ScreenId::Portfolio].visible_columns,
+        ["symbol", "current"]
+    );
 }
 
 #[test]
@@ -405,6 +502,302 @@ fn approval_button_requires_confirmation_before_emitting_one_command() {
             .confirmation
             .as_ref()
             .is_some_and(|proof| proof.first_confirmed)
+    );
+}
+
+#[test]
+fn alert_dismiss_sends_the_exact_reviewed_alert_without_confirmation() {
+    let mut state = AppState::controller();
+    state.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::AlertDismiss,
+    ));
+    state.snapshot.as_mut().expect("snapshot").risk.alerts[0].severity = AlertSeverity::Resolved;
+    state.handle(InputEvent::Char(':'));
+    let dismiss = state
+        .control_menu()
+        .expect("control menu")
+        .command_index(CommandType::AlertDismiss)
+        .expect("dismiss button");
+
+    state.snapshot.as_mut().expect("snapshot").risk.alerts[0].alert_id =
+        safe_id("alert:replacement");
+    let actions = state.handle(InputEvent::ActivateControl(dismiss));
+
+    assert_eq!(actions.len(), 1);
+    let ClientAction::Command(request) = &actions[0] else {
+        panic!("dismiss must emit one command")
+    };
+    assert_eq!(request.command_type, CommandType::AlertDismiss);
+    assert!(request.confirmation.is_none());
+    let CommandPayload::AlertDismiss(payload) = &request.payload else {
+        panic!("dismiss must use AlertDismissPayload")
+    };
+    assert_eq!(payload.alert_id.as_str(), "alert:1");
+    assert_eq!(payload.created_at_utc.as_str(), "2026-08-03T00:00:00Z");
+}
+
+#[test]
+fn stale_selected_alert_never_falls_back_to_another_alert() {
+    let mut state = AppState::controller();
+    state.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::AlertDismiss,
+    ));
+    state.snapshot.as_mut().expect("snapshot").risk.alerts[0].severity = AlertSeverity::Resolved;
+    state.handle(InputEvent::Char('7'));
+    state.handle(InputEvent::OpenBrowseRow { panel: 2, index: 0 });
+    assert_eq!(state.screen_state().selected_id.as_deref(), Some("alert:1"));
+
+    let snapshot = state.snapshot.as_mut().expect("snapshot");
+    snapshot.risk.alerts[0].alert_id = safe_id("alert:replacement");
+    snapshot.shell.alerts = Some(vec![snapshot.risk.alerts[0].clone()]);
+    state.handle(InputEvent::Char(':'));
+    let dismiss = state
+        .control_menu()
+        .expect("control menu")
+        .command_index(CommandType::AlertDismiss)
+        .expect("dismiss button");
+
+    assert!(
+        state
+            .handle(InputEvent::ActivateControl(dismiss))
+            .is_empty(),
+        "a stale selected alert must never redirect dismissal to another alert"
+    );
+}
+
+#[test]
+fn alert_dismiss_is_unavailable_for_every_unresolved_top_alert() {
+    for severity in [
+        AlertSeverity::Info,
+        AlertSeverity::Active,
+        AlertSeverity::Waiting,
+        AlertSeverity::Urgent,
+    ] {
+        let mut state = AppState::controller();
+        state.snapshot = Some(controls_snapshot_with_only_enabled(
+            CommandType::AlertDismiss,
+        ));
+        state.snapshot.as_mut().expect("snapshot").risk.alerts[0].severity = severity;
+        state.handle(InputEvent::Char(':'));
+        let menu = state.control_menu().expect("control menu");
+        let dismiss = menu
+            .command_index(CommandType::AlertDismiss)
+            .expect("dismiss button");
+        let vesper_ratatui_console::controls::ControlMenuEntry::Command(button) =
+            &menu.entries()[dismiss]
+        else {
+            panic!("dismiss entry must be a command")
+        };
+
+        assert_eq!(button.context, None, "severity {severity:?}");
+        assert_eq!(
+            button.state,
+            ButtonState::Disabled {
+                reason: "Only a resolved alert can be dismissed.".to_owned(),
+            },
+            "severity {severity:?}"
+        );
+    }
+}
+
+#[test]
+fn selected_unresolved_alert_cannot_be_dismissed_even_when_another_alert_is_resolved() {
+    let mut state = AppState::controller();
+    state.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::AlertDismiss,
+    ));
+    let snapshot = state.snapshot.as_mut().expect("snapshot");
+    snapshot.risk.alerts[0].severity = AlertSeverity::Waiting;
+    let mut resolved = snapshot.risk.alerts[0].clone();
+    resolved.alert_id = safe_id("alert:resolved");
+    resolved.severity = AlertSeverity::Resolved;
+    snapshot.risk.alerts.push(resolved);
+
+    state.handle(InputEvent::Char('7'));
+    state.handle(InputEvent::OpenBrowseRow { panel: 2, index: 0 });
+    state.handle(InputEvent::Char(':'));
+    let menu = state.control_menu().expect("control menu");
+    let dismiss = menu
+        .command_index(CommandType::AlertDismiss)
+        .expect("dismiss button");
+    let vesper_ratatui_console::controls::ControlMenuEntry::Command(button) =
+        &menu.entries()[dismiss]
+    else {
+        panic!("dismiss entry must be a command")
+    };
+
+    assert_eq!(button.context, None);
+    assert_eq!(
+        button.state,
+        ButtonState::Disabled {
+            reason: "Only a resolved alert can be dismissed.".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn global_alert_dismiss_emits_nothing_when_no_alert_was_reviewed() {
+    let mut state = AppState::controller();
+    state.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::AlertDismiss,
+    ));
+    let snapshot = state.snapshot.as_mut().expect("snapshot");
+    snapshot.shell.alerts = None;
+    snapshot.risk.alerts.clear();
+    state.handle(InputEvent::Char('9'));
+    state.handle(InputEvent::Char(':'));
+    let dismiss = state
+        .control_menu()
+        .expect("system control menu")
+        .command_index(CommandType::AlertDismiss)
+        .expect("global dismiss button");
+
+    assert!(
+        state
+            .handle(InputEvent::ActivateControl(dismiss))
+            .is_empty()
+    );
+}
+
+#[test]
+fn completed_layout_reset_restores_only_the_reviewed_screen_layout() {
+    let mut state = AppState::controller();
+    state.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::LayoutReset,
+    ));
+    state.set_theme(Theme::Charcoal);
+    state.set_display_mode(DisplayMode::LargeText);
+    state.set_screen_preferences(
+        ScreenId::Impact,
+        ScreenPreferences {
+            visible_columns: vec!["symbol".to_owned()],
+            panel_sizes: vec![75, 25],
+            performance_period: None,
+        },
+    );
+    state.set_screen_preferences(
+        ScreenId::Portfolio,
+        ScreenPreferences {
+            visible_columns: vec!["symbol".to_owned(), "current".to_owned()],
+            panel_sizes: vec![60, 20, 20],
+            performance_period: None,
+        },
+    );
+    state.handle(InputEvent::Char(':'));
+    let reset = state
+        .control_menu()
+        .expect("control menu")
+        .command_index(CommandType::LayoutReset)
+        .expect("reset layout button");
+
+    let actions = state.handle(InputEvent::ActivateControl(reset));
+    let ClientAction::Command(command) = &actions[0] else {
+        panic!("layout reset command expected")
+    };
+    let CommandPayload::LayoutReset(payload) = &command.payload else {
+        panic!("layout reset payload expected")
+    };
+    assert_eq!(payload.screen.as_ref(), Some(&ScreenName::Impact));
+    assert_eq!(
+        state.preferences().screens[&ScreenId::Impact].panel_sizes,
+        [75, 25]
+    );
+
+    assert_eq!(
+        state.reduce(receipt_envelope(
+            1,
+            receipt(
+                command.command_id.as_str(),
+                "completed",
+                "layout-reset-approved",
+                "Layout reset approved."
+            )
+        )),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert!(!state.preferences().screens.contains_key(&ScreenId::Impact));
+    assert!(
+        state
+            .preferences()
+            .screens
+            .contains_key(&ScreenId::Portfolio)
+    );
+    assert_eq!(state.screen_state().panel_sizes, [65, 35]);
+    assert_eq!(
+        state.screen_state().visible_columns,
+        [
+            "symbol", "current", "proposed", "approved", "agent", "task", "stage", "priority"
+        ]
+    );
+    assert_eq!(state.theme(), Theme::Charcoal);
+    assert_eq!(state.display_mode(), DisplayMode::LargeText);
+}
+
+#[test]
+fn portfolio_layout_reset_uses_the_current_screen_and_restores_its_defaults() {
+    let mut state = AppState::controller();
+    state.snapshot = Some(controls_snapshot_with_only_enabled(
+        CommandType::LayoutReset,
+    ));
+    state.set_screen_preferences(
+        ScreenId::Impact,
+        ScreenPreferences {
+            visible_columns: vec![
+                "symbol".to_owned(),
+                "current".to_owned(),
+                "agent".to_owned(),
+                "task".to_owned(),
+            ],
+            panel_sizes: vec![70, 30],
+            performance_period: None,
+        },
+    );
+    state.set_screen_preferences(
+        ScreenId::Portfolio,
+        ScreenPreferences {
+            visible_columns: vec!["symbol".to_owned(), "current".to_owned()],
+            panel_sizes: vec![63, 22, 15],
+            performance_period: None,
+        },
+    );
+    state.handle(InputEvent::Char('2'));
+    state.handle(InputEvent::Char(':'));
+    let reset = state
+        .control_menu()
+        .expect("portfolio control menu")
+        .command_index(CommandType::LayoutReset)
+        .expect("portfolio reset layout button");
+
+    let actions = state.handle(InputEvent::ActivateControl(reset));
+    let ClientAction::Command(command) = &actions[0] else {
+        panic!("layout reset command expected")
+    };
+    let CommandPayload::LayoutReset(payload) = &command.payload else {
+        panic!("layout reset payload expected")
+    };
+    assert_eq!(payload.screen.as_ref(), Some(&ScreenName::Portfolio));
+
+    assert_eq!(
+        state.reduce(receipt_envelope(
+            1,
+            receipt(
+                command.command_id.as_str(),
+                "completed",
+                "portfolio-layout-reset-approved",
+                "Portfolio layout reset approved."
+            )
+        )),
+        Ok(ReduceOutcome::Changed)
+    );
+    assert_eq!(state.screen_state().panel_sizes, [58, 22, 20]);
+    assert_eq!(
+        state.screen_state().visible_columns,
+        ["symbol", "current", "proposed", "approved"]
+    );
+    assert_eq!(
+        state.preferences().screens[&ScreenId::Impact].panel_sizes,
+        [70, 30],
+        "reset must remain scoped to the reviewed screen"
     );
 }
 
@@ -1366,7 +1759,18 @@ fn normalize_command_ids(mut text: String) -> String {
         text.replace_range(command_start..command_end, "cmd:PID:TICKS:COUNT");
         start = command_start + "cmd:PID:TICKS:COUNT".len();
     }
-    text
+    text.lines()
+        .map(|line| {
+            let line = line.trim_end();
+            if line.contains("Receipt cmd:")
+                && let Some(content) = line.strip_suffix('│')
+            {
+                return format!("{}│", content.trim_end());
+            }
+            line.to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn confirmation_overlay(snapshot: &ConsoleSnapshot, command_type: CommandType) -> ControlOverlay {

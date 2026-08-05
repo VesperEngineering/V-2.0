@@ -932,6 +932,31 @@ impl SearchIndex {
         }
         for row in &snapshot.risk.approvals {
             let reason = row.reason.as_deref().unwrap_or("Reason unavailable");
+            let mut extra = row
+                .evidence_ids
+                .iter()
+                .chain(&row.affected_symbols)
+                .map(|value| value.as_str().to_owned())
+                .collect::<Vec<_>>();
+            for change in &row.weight_changes {
+                extra.extend([
+                    change.symbol.as_str().to_owned(),
+                    format!("{:.6}", change.current_weight),
+                    format!("{:.6}", change.proposed_weight),
+                ]);
+            }
+            extra.extend(row.risks.iter().map(|value| value.as_str().to_owned()));
+            extra.extend(
+                row.expected_consequences
+                    .iter()
+                    .map(|value| value.as_str().to_owned()),
+            );
+            if let Some(value) = &row.basis_sha256 {
+                extra.push(value.as_str().to_owned());
+            }
+            if let Some(value) = &row.stale_reason {
+                extra.push(value.as_str().to_owned());
+            }
             index.push(
                 SearchKind::Approval,
                 DetailKind::Approval,
@@ -941,7 +966,7 @@ impl SearchIndex {
                 &format!("{:?} | {reason}", row.state),
                 Some(row.requested_at_utc.as_str()),
                 snapshot.risk.source.as_str(),
-                row.evidence_ids.iter().map(|value| value.as_str()),
+                extra.iter().map(String::as_str),
                 &mut seen,
             );
         }
@@ -1125,9 +1150,45 @@ impl SearchIndex {
         let mut extra = row
             .affected_areas
             .iter()
-            .map(String::as_str)
+            .map(|value| value.as_str().to_owned())
             .collect::<Vec<_>>();
-        extra.extend([row.agent.as_str(), row.title.as_str(), model]);
+        extra.extend([
+            row.agent.as_str().to_owned(),
+            row.title.as_str().to_owned(),
+            model.to_owned(),
+        ]);
+        if let Some(value) = &row.session_id {
+            extra.push(value.as_str().to_owned());
+        }
+        extra.extend(row.plan_steps.iter().map(|value| value.as_str().to_owned()));
+        for activity in &row.activity {
+            extra.extend([
+                activity.activity_id.as_str().to_owned(),
+                format!("{:?}", activity.kind),
+                activity.summary.as_str().to_owned(),
+                activity.occurred_at_utc.as_str().to_owned(),
+            ]);
+            extra.extend(
+                activity
+                    .evidence_ids
+                    .iter()
+                    .map(|value| value.as_str().to_owned()),
+            );
+        }
+        extra.extend(
+            row.evidence_ids
+                .iter()
+                .map(|value| value.as_str().to_owned()),
+        );
+        if let Some(value) = row.context_percent {
+            extra.push(format!("{value:.4}"));
+        }
+        if let Some(value) = &row.chat_agent_id {
+            extra.push(value.as_str().to_owned());
+        }
+        if let Some(value) = &row.detail_next_cursor {
+            extra.push(value.as_str().to_owned());
+        }
         self.push(
             SearchKind::Agent,
             DetailKind::Agent,
@@ -1137,7 +1198,7 @@ impl SearchIndex {
             &text,
             timestamp,
             source,
-            extra,
+            extra.iter().map(String::as_str),
             seen,
         );
     }
@@ -1177,9 +1238,29 @@ impl SearchIndex {
         let mut extra = row
             .evidence_ids
             .iter()
-            .map(|value| value.as_str())
+            .map(|value| value.as_str().to_owned())
             .collect::<Vec<_>>();
-        extra.push(row.family.as_str());
+        extra.extend([
+            row.family.as_str().to_owned(),
+            format!("{:?}", row.strategy),
+            format!("{:?}", row.status),
+            row.created_at_utc.as_str().to_owned(),
+        ]);
+        if let Some(value) = &row.feature_set_id {
+            extra.push(value.as_str().to_owned());
+        }
+        if let Some(value) = &row.data_identity {
+            extra.push(value.as_str().to_owned());
+        }
+        if let Some(value) = &row.evaluation_contract {
+            extra.push(value.as_str().to_owned());
+        }
+        if let Some(value) = &row.status_reason {
+            extra.push(value.as_str().to_owned());
+        }
+        if let Some(value) = &row.status_at_utc {
+            extra.push(value.as_str().to_owned());
+        }
         self.push(
             SearchKind::Model,
             DetailKind::ModelCandidate,
@@ -1189,7 +1270,7 @@ impl SearchIndex {
             &text,
             Some(row.created_at_utc.as_str()),
             source,
-            extra,
+            extra.iter().map(String::as_str),
             seen,
         );
     }
@@ -1236,6 +1317,7 @@ impl SearchIndex {
                 row.model_id.as_ref(),
                 row.approval_id.as_ref(),
                 row.order_id.as_ref(),
+                row.work_id.as_ref(),
             ]
             .into_iter()
             .flatten()
@@ -1256,6 +1338,37 @@ impl SearchIndex {
     }
 
     fn push_evidence(&mut self, row: &EvidenceRow, seen: &mut BTreeSet<(u8, DetailKind, String)>) {
+        let mut extra = vec![
+            row.evidence_type.as_str().to_owned(),
+            row.sha256.as_str().to_owned(),
+            row.created_at_utc.as_str().to_owned(),
+        ];
+        for values in [
+            &row.symbols,
+            &row.agent_ids,
+            &row.model_ids,
+            &row.order_ids,
+            &row.approval_ids,
+            &row.source_ids,
+        ] {
+            extra.extend(values.iter().map(|value| value.as_str().to_owned()));
+        }
+        if let Some(value) = &row.raw_log_id {
+            extra.push(value.as_str().to_owned());
+        }
+        extra.extend(
+            row.raw_log_excerpt
+                .iter()
+                .map(|value| value.as_str().to_owned()),
+        );
+        extra.push(if row.raw_log_truncated {
+            "truncated".to_owned()
+        } else {
+            "complete".to_owned()
+        });
+        if let Some(value) = &row.raw_log_next_cursor {
+            extra.push(value.as_str().to_owned());
+        }
         self.push(
             SearchKind::Evidence,
             DetailKind::Evidence,
@@ -1265,7 +1378,7 @@ impl SearchIndex {
             row.evidence_type.as_str(),
             Some(row.created_at_utc.as_str()),
             row.source.as_str(),
-            [row.evidence_type.as_str()],
+            extra.iter().map(String::as_str),
             seen,
         );
     }
@@ -1276,6 +1389,19 @@ impl SearchIndex {
         source: &str,
         seen: &mut BTreeSet<(u8, DetailKind, String)>,
     ) {
+        let mut extra = row
+            .evidence_ids
+            .iter()
+            .chain(&row.used_by_agents)
+            .map(|value| value.as_str().to_owned())
+            .collect::<Vec<_>>();
+        extra.extend([
+            format!("{:?}", row.status),
+            row.updated_at_utc.as_str().to_owned(),
+        ]);
+        if let Some(value) = &row.change_reason {
+            extra.push(value.as_str().to_owned());
+        }
         self.push(
             SearchKind::Memory,
             DetailKind::Memory,
@@ -1285,7 +1411,7 @@ impl SearchIndex {
             &format!("{:?}", row.status),
             Some(row.updated_at_utc.as_str()),
             source,
-            row.evidence_ids.iter().map(|value| value.as_str()),
+            extra.iter().map(String::as_str),
             seen,
         );
     }
@@ -1300,9 +1426,19 @@ impl SearchIndex {
         let mut extra = row
             .consumers
             .iter()
-            .map(|value| value.as_str())
+            .chain(&row.dependencies)
+            .map(|value| value.as_str().to_owned())
             .collect::<Vec<_>>();
-        extra.push(coverage);
+        extra.extend([coverage.to_owned(), format!("{:?}", row.freshness)]);
+        if let Some(value) = &row.as_of_utc {
+            extra.push(value.as_str().to_owned());
+        }
+        if let Some(value) = row.age_seconds {
+            extra.push(format!("{value:.4}"));
+        }
+        if let Some(value) = row.error.as_deref() {
+            extra.push(value.to_owned());
+        }
         self.push(
             SearchKind::Source,
             DetailKind::Source,
@@ -1312,7 +1448,7 @@ impl SearchIndex {
             &format!("{:?} | {coverage}", row.freshness),
             row.as_of_utc.as_ref().map(|value| value.as_str()),
             source,
-            extra,
+            extra.iter().map(String::as_str),
             seen,
         );
     }
@@ -1333,11 +1469,36 @@ impl SearchIndex {
         let mut extra = row
             .worktrees
             .iter()
-            .map(|value| value.as_str())
+            .map(|value| value.as_str().to_owned())
             .collect::<Vec<_>>();
-        extra.extend([branch, revision]);
+        extra.extend([
+            branch.to_owned(),
+            revision.to_owned(),
+            format!("{:?}", row.freshness),
+        ]);
         if let Some(error) = row.error.as_deref() {
-            extra.push(error);
+            extra.push(error.to_owned());
+        }
+        if let Some(value) = &row.as_of_utc {
+            extra.push(value.as_str().to_owned());
+        }
+        if let Some(value) = row.clean {
+            extra.push(if value { "clean" } else { "dirty" }.to_owned());
+        }
+        if let Some(value) = row.unpushed_commit_count {
+            extra.push(value.to_string());
+        }
+        for check in &row.checks {
+            extra.extend([
+                check.check_id.as_str().to_owned(),
+                format!("{:?}", check.state),
+            ]);
+            if let Some(value) = &check.reason {
+                extra.push(value.as_str().to_owned());
+            }
+            if let Some(value) = &check.observed_at_utc {
+                extra.push(value.as_str().to_owned());
+            }
         }
         self.push(
             SearchKind::Source,
@@ -1348,7 +1509,7 @@ impl SearchIndex {
             &format!("{:?} | {branch} | {revision}", row.freshness),
             row.as_of_utc.as_ref().map(|value| value.as_str()),
             row.source.as_str(),
-            extra,
+            extra.iter().map(String::as_str),
             seen,
         );
     }

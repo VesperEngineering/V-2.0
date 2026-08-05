@@ -621,7 +621,8 @@ fn chat_snapshot(agent_id: &str) -> ConsoleSnapshot {
     let mut value: serde_json::Value =
         serde_json::from_str(include_str!("../../contracts/v1/controls_snapshot.json"))
             .expect("valid shared controls snapshot");
-    value["agents"]["rows"][0]["agent"] = json!(agent_id);
+    value["agents"]["rows"][0]["agent"] = json!("displayed-controller-role");
+    value["agents"]["rows"][0]["chat_agent_id"] = json!(agent_id);
     let mut snapshot: ConsoleSnapshot = serde_json::from_value(value).expect("valid chat snapshot");
     snapshot.shell.capabilities = snapshot
         .command_specs

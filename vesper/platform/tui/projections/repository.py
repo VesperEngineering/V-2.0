@@ -19,7 +19,7 @@ from vesper.platform.tui.process_capture import (
     BoundedProcessStreamCloseError,
     run_bounded_process,
 )
-from vesper.platform.tui.views import Freshness, RepositoryRow
+from vesper.platform.tui.views import Freshness, RepositoryCheckRow, RepositoryRow
 
 
 _MAX_OUTPUT_BYTES = 1024 * 1024
@@ -323,6 +323,14 @@ class RepositoryProjection:
                 "revision": revision,
                 "clean": not bool(status),
                 "worktrees": worktrees,
+                "checks": (
+                    RepositoryCheckRow(
+                        check_id="check:repository",
+                        state="unavailable",
+                        reason="No controller-owned repository check source is configured.",
+                        observed_at_utc=None,
+                    ),
+                ),
             }
             if upstream_returncode != 0:
                 if not _missing_upstream(upstream_error):
@@ -340,6 +348,10 @@ class RepositoryProjection:
                     metrics_error=_METRICS_REASON,
                     repositories=(row,),
                     repositories_error=None,
+                    qwen=None,
+                    qwen_error="Repository projection does not provide Qwen status.",
+                    health=None,
+                    health_error="Repository projection does not provide system health.",
                 )
                 return SourceSample(
                     value=facts,
@@ -364,6 +376,10 @@ class RepositoryProjection:
                 metrics_error=_METRICS_REASON,
                 repositories=(row,),
                 repositories_error=None,
+                qwen=None,
+                qwen_error="Repository projection does not provide Qwen status.",
+                health=None,
+                health_error="Repository projection does not provide system health.",
             )
             return SourceSample(
                 value=facts,

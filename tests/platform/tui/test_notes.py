@@ -199,6 +199,7 @@ def test_event_and_note_effects_share_one_rollback_boundary(tmp_path) -> None:
         approval_id=None,
         order_id=None,
         evidence_ids=(),
+        work_id=None,
         source="native-platform",
     )
 

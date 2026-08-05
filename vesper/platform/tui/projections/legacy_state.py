@@ -25,7 +25,7 @@ from vesper.platform.tui.ports import (
     SourceSample,
     UnavailablePort,
 )
-from vesper.platform.tui.views import Freshness
+from vesper.platform.tui.views import CircuitBreakerView, Freshness
 
 
 _SOURCE = "legacy saved engine state"
@@ -106,7 +106,7 @@ class LegacyStateProjection:
             observed_at = self._timestamp(payload)
             if observed_at > now:
                 raise _ProjectionError("Legacy saved engine state timestamp is in the future.")
-            facts = self._risk_facts(payload)
+            facts = self._risk_facts(payload, observed_at)
         except _ProjectionError as exc:
             return self._unavailable(str(exc))
 
@@ -293,7 +293,7 @@ class LegacyStateProjection:
             raise _ProjectionError("Legacy saved engine state timestamp must be UTC.")
         return parsed.astimezone(timezone.utc)
 
-    def _risk_facts(self, payload: dict[str, Any]) -> RiskFacts:
+    def _risk_facts(self, payload: dict[str, Any], observed_at: datetime) -> RiskFacts:
         try:
             if set(payload) != _SCHEMA_KEYS:
                 raise ValueError("unexpected fields")
@@ -340,6 +340,14 @@ class LegacyStateProjection:
                 breaker_tripped=breaker,
                 positions=tuple(positions),
                 broker_reconciled=False,
+                blocked_actions=None,
+                blocked_actions_error="Legacy risk state does not include blocked-action detail.",
+                circuit_breaker=CircuitBreakerView(
+                    state="tripped" if breaker else "armed",
+                    reason="Legacy breaker is tripped." if breaker else None,
+                    observed_at_utc=observed_at,
+                ),
+                circuit_breaker_error=None,
             )
         except (KeyError, TypeError, ValueError, InvalidOperation, ValidationError, OverflowError) as exc:
             raise _ProjectionError("Legacy saved engine state schema is invalid.") from exc

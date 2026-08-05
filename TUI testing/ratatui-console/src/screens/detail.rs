@@ -6,12 +6,12 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 use crate::contract::{
-    AgentCard, AgentStage, AlertSeverity, AlertView, ApprovalRow, ApprovalState, CandidateRow,
-    CandidateStatus, ConsoleSnapshot, DataView, EvidenceRow, FillRow, Freshness, MemoryRow,
-    MemoryStatus, MemoryView, MetricRow, ModelOpinionRow, ModelsView, OrderReconciliation,
-    OrderRow, OrderSide, OrderStatus, OrdersView, RepositoryRow, RiskLimitRow, RiskLimitStatus,
-    RiskView, ServiceRow, ServiceState, Sha256Hex, SourceRow, StrategyName, SystemView,
-    TimelineRow, UtcTimestamp,
+    AgentActivityKind, AgentCard, AgentStage, AlertSeverity, AlertView, ApprovalRow, ApprovalState,
+    CandidateRow, CandidateStatus, ConsoleSnapshot, DataView, EvidenceRow, FillRow, Freshness,
+    MemoryRow, MemoryStatus, MemoryView, MetricRow, ModelOpinionRow, ModelsView,
+    OrderReconciliation, OrderRow, OrderSide, OrderStatus, OrdersView, RepositoryCheckState,
+    RepositoryRow, RiskLimitRow, RiskLimitStatus, RiskReviewState, RiskView, ServiceRow,
+    ServiceState, Sha256Hex, SourceRow, StrategyName, SystemView, TimelineRow, UtcTimestamp,
 };
 use crate::screens::{DetailKind, ScreenState};
 use crate::state::Screen;
@@ -218,7 +218,7 @@ fn orders_body(
             .iter()
             .find(|row| row.work_id.as_str() == selected_id)
     {
-        return Some(agent_body(agent));
+        return Some(agent_body(agent, &view.history));
     }
     if kind_matches(selected_kind, DetailKind::Event) {
         return view
@@ -305,39 +305,131 @@ fn fill_body(order: &OrderRow, fill: &FillRow) -> DetailBody {
     )
 }
 
-fn agent_body(row: &AgentCard) -> DetailBody {
-    DetailBody::new(
-        "RECONCILIATION AGENT DETAIL",
-        vec![
-            format!("WORK ID: {}", safe_text(row.work_id.as_str())),
-            format!("AGENT: {}", safe_text(row.agent.as_str())),
-            format!("TASK: {}", safe_text(row.title.as_str())),
+fn agent_body(row: &AgentCard, history: &[TimelineRow]) -> DetailBody {
+    let mut lines = vec![
+        format!("WORK ID: {}", safe_text(row.work_id.as_str())),
+        format!("AGENT: {}", safe_text(row.agent.as_str())),
+        format!("TASK: {}", safe_text(row.title.as_str())),
+        format!(
+            "STAGE: {} | PRIORITY: {} | URGENT: {}",
+            agent_stage_label(row.stage),
+            row.priority.get(),
+            yes_no(row.urgent)
+        ),
+        format!(
+            "ELAPSED: {}",
+            row.elapsed_seconds
+                .map_or_else(|| "UNAVAILABLE".to_owned(), |value| format!("{value:.1}s"))
+        ),
+        format!(
+            "MODEL: {}",
+            row.model
+                .as_deref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), safe_text)
+        ),
+        format!(
+            "AFFECTED AREAS: {}",
+            bounded_list(
+                row.affected_areas.iter().map(String::as_str),
+                row.affected_areas.len()
+            )
+        ),
+        format!(
+            "SESSION ID: {}",
+            row.session_id.as_ref().map_or_else(
+                || "UNAVAILABLE".to_owned(),
+                |value| safe_text(value.as_str())
+            )
+        ),
+        format!(
+            "CONTEXT: {}",
+            row.context_percent
+                .map_or_else(|| "UNAVAILABLE".to_owned(), |value| format!("{value:.1}%"))
+        ),
+        format!(
+            "DETAIL NEXT CURSOR: {}",
+            row.detail_next_cursor
+                .as_ref()
+                .map_or_else(|| "NONE".to_owned(), |value| safe_text(value.as_str()))
+        ),
+        format!(
+            "CHAT AGENT: {}",
+            row.chat_agent_id.as_ref().map_or_else(
+                || "UNAVAILABLE".to_owned(),
+                |value| safe_text(value.as_str())
+            )
+        ),
+        format!("PLAN STEPS ({})", row.plan_steps.len()),
+    ];
+    if row.plan_steps.is_empty() {
+        lines.push("UNAVAILABLE".to_owned());
+    } else {
+        lines.extend(
+            row.plan_steps
+                .iter()
+                .take(MAX_LIST_ITEMS)
+                .enumerate()
+                .map(|(index, step)| format!("{}. {}", index + 1, safe_text(step.as_str()))),
+        );
+        if row.plan_steps.len() > MAX_LIST_ITEMS {
+            lines.push(format!(
+                "PLAN STEPS OMITTED: {}",
+                row.plan_steps.len() - MAX_LIST_ITEMS
+            ));
+        }
+    }
+    lines.push(format!("ACTIVITY ({})", row.activity.len()));
+    if row.activity.is_empty() {
+        lines.push("UNAVAILABLE".to_owned());
+    } else {
+        lines.extend(row.activity.iter().take(MAX_LIST_ITEMS).map(|activity| {
             format!(
-                "STAGE: {} | PRIORITY: {} | URGENT: {}",
-                agent_stage_label(row.stage),
-                row.priority.get(),
-                yes_no(row.urgent)
-            ),
-            format!(
-                "ELAPSED: {}",
-                row.elapsed_seconds
-                    .map_or_else(|| "UNAVAILABLE".to_owned(), |value| format!("{value:.1}s"))
-            ),
-            format!(
-                "MODEL: {}",
-                row.model
-                    .as_deref()
-                    .map_or_else(|| "UNAVAILABLE".to_owned(), safe_text)
-            ),
-            format!(
-                "AFFECTED AREAS: {}",
+                "[{}] {} | {} | EVIDENCE {}",
+                activity_kind_label(activity.kind),
+                safe_text(activity.summary.as_str()),
+                format_eastern_time(&activity.occurred_at_utc),
                 bounded_list(
-                    row.affected_areas.iter().map(String::as_str),
-                    row.affected_areas.len()
+                    activity.evidence_ids.iter().map(|value| value.as_str()),
+                    activity.evidence_ids.len()
                 )
-            ),
-        ],
-    )
+            )
+        }));
+        if row.activity.len() > MAX_LIST_ITEMS {
+            lines.push(format!(
+                "ACTIVITY OMITTED: {}",
+                row.activity.len() - MAX_LIST_ITEMS
+            ));
+        }
+    }
+    lines.push(format!(
+        "EVIDENCE: {}",
+        bounded_list(
+            row.evidence_ids.iter().map(|value| value.as_str()),
+            row.evidence_ids.len()
+        )
+    ));
+    let linked = history
+        .iter()
+        .filter(|event| event.work_id.as_ref() == Some(&row.work_id))
+        .collect::<Vec<_>>();
+    lines.push(format!("WORK-LINKED HISTORY ({})", linked.len()));
+    if linked.is_empty() {
+        lines.push("UNAVAILABLE".to_owned());
+    } else {
+        lines.extend(linked.iter().take(MAX_LIST_ITEMS).map(|event| {
+            format!(
+                "{} | {} | {} | EVIDENCE {}",
+                safe_text(event.event_id.as_str()),
+                safe_text(event.summary.as_str()),
+                format_eastern_time(&event.occurred_at_utc),
+                bounded_list(
+                    event.evidence_ids.iter().map(|value| value.as_str()),
+                    event.evidence_ids.len()
+                )
+            )
+        }));
+    }
+    DetailBody::new("RECONCILIATION AGENT DETAIL", lines)
 }
 
 fn models_body(
@@ -408,6 +500,38 @@ fn candidate_body(row: &CandidateRow) -> DetailBody {
             ),
             format!("CREATED: {}", format_eastern_time(&row.created_at_utc)),
             format!(
+                "FEATURE SET: {}",
+                row.feature_set_id.as_ref().map_or_else(
+                    || "UNAVAILABLE".to_owned(),
+                    |value| safe_text(value.as_str())
+                )
+            ),
+            format!(
+                "DATA IDENTITY: {}",
+                row.data_identity
+                    .as_ref()
+                    .map_or_else(|| "UNAVAILABLE".to_owned(), sha256_text)
+            ),
+            format!(
+                "EVALUATION CONTRACT: {}",
+                row.evaluation_contract
+                    .as_ref()
+                    .map_or_else(|| "UNAVAILABLE".to_owned(), sha256_text)
+            ),
+            format!(
+                "STATUS REASON: {}",
+                row.status_reason.as_ref().map_or_else(
+                    || "UNAVAILABLE".to_owned(),
+                    |value| safe_text(value.as_str())
+                )
+            ),
+            format!(
+                "STATUS AT: {}",
+                row.status_at_utc
+                    .as_ref()
+                    .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time)
+            ),
+            format!(
                 "EVIDENCE: {}",
                 bounded_list(
                     row.evidence_ids.iter().map(|value| value.as_str()),
@@ -471,25 +595,14 @@ fn risk_limit_body(row: &RiskLimitRow) -> DetailBody {
                     .map_or("UNAVAILABLE", |value| value.as_str())
             ),
             format!("STATUS: {}", risk_limit_status_label(row.status)),
-        ],
-    )
-}
-
-fn approval_body(row: &ApprovalRow) -> DetailBody {
-    DetailBody::new(
-        "APPROVAL DETAIL",
-        vec![
-            format!("APPROVAL ID: {}", safe_text(row.approval_id.as_str())),
-            format!("RUN ID: {}", safe_text(row.run_id.as_str())),
-            format!("CHECKPOINT ID: {}", safe_text(row.checkpoint_id.as_str())),
-            format!("STATE: {}", approval_state_label(row.state)),
             format!(
-                "REASON: {}",
-                row.reason
-                    .as_deref()
-                    .map_or_else(|| "UNAVAILABLE".to_owned(), safe_text)
+                "PROPOSAL REASON: {}",
+                row.proposal_reason.as_ref().map_or_else(
+                    || "UNAVAILABLE".to_owned(),
+                    |value| safe_text(value.as_str())
+                )
             ),
-            format!("REQUESTED: {}", format_eastern_time(&row.requested_at_utc)),
+            format!("REVIEW: {}", risk_review_state_label(row.review_state)),
             format!(
                 "EVIDENCE: {}",
                 bounded_list(
@@ -499,6 +612,83 @@ fn approval_body(row: &ApprovalRow) -> DetailBody {
             ),
         ],
     )
+}
+
+fn approval_body(row: &ApprovalRow) -> DetailBody {
+    let mut lines = vec![
+        format!("APPROVAL ID: {}", safe_text(row.approval_id.as_str())),
+        format!("RUN ID: {}", safe_text(row.run_id.as_str())),
+        format!("CHECKPOINT ID: {}", safe_text(row.checkpoint_id.as_str())),
+        format!("STATE: {}", approval_state_label(row.state)),
+        format!(
+            "REASON: {}",
+            row.reason
+                .as_deref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), safe_text)
+        ),
+        format!("REQUESTED: {}", format_eastern_time(&row.requested_at_utc)),
+        format!(
+            "EVIDENCE: {}",
+            bounded_list(
+                row.evidence_ids.iter().map(|value| value.as_str()),
+                row.evidence_ids.len()
+            )
+        ),
+        format!(
+            "AFFECTED SYMBOLS: {}",
+            bounded_list(
+                row.affected_symbols.iter().map(|value| value.as_str()),
+                row.affected_symbols.len()
+            )
+        ),
+        format!("WEIGHT CHANGES ({})", row.weight_changes.len()),
+    ];
+    if row.weight_changes.is_empty() {
+        lines.push("NONE REPORTED".to_owned());
+    } else {
+        lines.extend(
+            row.weight_changes
+                .iter()
+                .take(MAX_LIST_ITEMS)
+                .map(|change| {
+                    format!(
+                        "{}: {:.1}% -> {:.1}%",
+                        safe_text(change.symbol.as_str()),
+                        change.current_weight * 100.0,
+                        change.proposed_weight * 100.0
+                    )
+                }),
+        );
+    }
+    lines.extend([
+        format!(
+            "RISKS: {}",
+            bounded_list(
+                row.risks.iter().map(|value| value.as_str()),
+                row.risks.len()
+            )
+        ),
+        format!(
+            "EXPECTED CONSEQUENCES: {}",
+            bounded_list(
+                row.expected_consequences.iter().map(|value| value.as_str()),
+                row.expected_consequences.len()
+            )
+        ),
+        format!(
+            "BASIS SHA256: {}",
+            row.basis_sha256
+                .as_ref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), sha256_text)
+        ),
+        format!(
+            "STALE REASON: {}",
+            row.stale_reason
+                .as_ref()
+                .map_or_else(|| "NONE".to_owned(), |value| safe_text(value.as_str()))
+        ),
+    ]);
+    DetailBody::new("APPROVAL DETAIL", lines)
 }
 
 fn alert_body(row: &AlertView) -> DetailBody {
@@ -586,21 +776,72 @@ fn source_body(row: &SourceRow) -> DetailBody {
                     row.consumers.len()
                 )
             ),
+            format!(
+                "DEPENDENCIES: {}",
+                bounded_list(
+                    row.dependencies.iter().map(|value| value.as_str()),
+                    row.dependencies.len()
+                )
+            ),
         ],
     )
 }
 
 fn evidence_body(title: &'static str, row: &EvidenceRow) -> DetailBody {
-    DetailBody::new(
-        title,
-        vec![
-            format!("EVIDENCE ID: {}", safe_text(row.evidence_id.as_str())),
-            format!("TYPE: {}", safe_text(row.evidence_type.as_str())),
-            format!("SOURCE: {}", safe_text(row.source.as_str())),
-            format!("CREATED: {}", format_eastern_time(&row.created_at_utc)),
-            format!("SHA256: {}", sha256_text(&row.sha256)),
-        ],
-    )
+    let mut lines = vec![
+        format!("EVIDENCE ID: {}", safe_text(row.evidence_id.as_str())),
+        format!("TYPE: {}", safe_text(row.evidence_type.as_str())),
+        format!("SOURCE: {}", safe_text(row.source.as_str())),
+        format!("CREATED: {}", format_eastern_time(&row.created_at_utc)),
+        format!("SHA256: {}", sha256_text(&row.sha256)),
+        format!("SYMBOLS: {}", id_list(&row.symbols)),
+        format!("AGENTS: {}", id_list(&row.agent_ids)),
+        format!("MODELS: {}", id_list(&row.model_ids)),
+        format!("ORDERS: {}", id_list(&row.order_ids)),
+        format!("APPROVALS: {}", id_list(&row.approval_ids)),
+        format!("SOURCES: {}", id_list(&row.source_ids)),
+        format!(
+            "RAW LOG ID: {}",
+            row.raw_log_id.as_ref().map_or_else(
+                || "UNAVAILABLE".to_owned(),
+                |value| safe_text(value.as_str())
+            )
+        ),
+        format!("RAW LOG EXCERPT ({})", row.raw_log_excerpt.len()),
+    ];
+    if row.raw_log_excerpt.is_empty() {
+        lines.push("UNAVAILABLE".to_owned());
+    } else {
+        lines.extend(
+            row.raw_log_excerpt
+                .iter()
+                .take(MAX_LIST_ITEMS)
+                .enumerate()
+                .map(|(index, value)| {
+                    format!(
+                        "{}. {}",
+                        index + 1,
+                        safe_text_with_limit(value.as_str(), MAX_FIELD_CHARS)
+                    )
+                }),
+        );
+        if row.raw_log_excerpt.len() > MAX_LIST_ITEMS {
+            lines.push(format!(
+                "RAW LOG LINES OMITTED: {}",
+                row.raw_log_excerpt.len() - MAX_LIST_ITEMS
+            ));
+        }
+    }
+    lines.extend([
+        format!("TRUNCATED: {}", yes_no(row.raw_log_truncated)),
+        format!(
+            "NEXT CURSOR: {}",
+            row.raw_log_next_cursor
+                .as_ref()
+                .map_or_else(|| "NONE".to_owned(), |value| safe_text(value.as_str()))
+        ),
+    ]);
+    DetailBody::new(title, lines)
 }
 
 fn memory_body(
@@ -642,6 +883,14 @@ fn memory_row_body(row: &MemoryRow) -> DetailBody {
                     row.evidence_ids.len()
                 )
             ),
+            format!("USED BY AGENTS: {}", id_list(&row.used_by_agents)),
+            format!(
+                "CHANGE REASON: {}",
+                row.change_reason.as_ref().map_or_else(
+                    || "UNAVAILABLE".to_owned(),
+                    |value| safe_text(value.as_str())
+                )
+            ),
         ],
     )
 }
@@ -653,6 +902,7 @@ fn timeline_body(title: &'static str, row: &TimelineRow) -> DetailBody {
         ("MODEL", row.model_id.as_ref()),
         ("APPROVAL", row.approval_id.as_ref()),
         ("ORDER", row.order_id.as_ref()),
+        ("WORK", row.work_id.as_ref()),
     ]
     .into_iter()
     .filter_map(|(label, value)| value.map(|value| format!("{label}: {}", value.as_str())))
@@ -769,53 +1019,75 @@ fn metric_body(title: &'static str, row: &MetricRow) -> DetailBody {
 }
 
 fn repository_body(row: &RepositoryRow) -> DetailBody {
-    DetailBody::new(
-        "REPOSITORY DETAIL",
-        vec![
-            format!("REPOSITORY ID: {}", safe_text(row.repository_id.as_str())),
-            format!("FRESHNESS: {}", freshness_label(row.freshness)),
+    let mut lines = vec![
+        format!("REPOSITORY ID: {}", safe_text(row.repository_id.as_str())),
+        format!("FRESHNESS: {}", freshness_label(row.freshness)),
+        format!(
+            "AS OF: {}",
+            row.as_of_utc
+                .as_ref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time)
+        ),
+        format!("SOURCE: {}", safe_text(row.source.as_str())),
+        format!(
+            "ERROR: {}",
+            row.error
+                .as_deref()
+                .map_or_else(|| "NONE".to_owned(), safe_text)
+        ),
+        format!(
+            "BRANCH: {}",
+            row.branch.as_ref().map_or_else(
+                || "UNAVAILABLE".to_owned(),
+                |value| safe_text(value.as_str())
+            )
+        ),
+        format!(
+            "REVISION: {}",
+            row.revision.as_ref().map_or_else(
+                || "UNAVAILABLE".to_owned(),
+                |value| safe_text(value.as_str())
+            )
+        ),
+        format!(
+            "CLEAN: {} | UNPUSHED COMMITS: {}",
+            row.clean.map_or("UNAVAILABLE", yes_no),
+            row.unpushed_commit_count
+                .map_or_else(|| "UNAVAILABLE".to_owned(), |value| value.to_string())
+        ),
+        format!(
+            "WORKTREES: {}",
+            bounded_list(
+                row.worktrees.iter().map(|value| value.as_str()),
+                row.worktrees.len()
+            )
+        ),
+        format!("REPOSITORY CHECKS ({})", row.checks.len()),
+    ];
+    if row.checks.is_empty() {
+        lines.push("UNAVAILABLE".to_owned());
+    } else {
+        lines.extend(row.checks.iter().take(MAX_LIST_ITEMS).map(|check| {
             format!(
-                "AS OF: {}",
-                row.as_of_utc
+                "{} | {} | {} | REASON {}",
+                safe_text(check.check_id.as_str()),
+                repository_check_state_label(check.state),
+                check
+                    .observed_at_utc
                     .as_ref()
-                    .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time)
-            ),
-            format!("SOURCE: {}", safe_text(row.source.as_str())),
-            format!(
-                "ERROR: {}",
-                row.error
-                    .as_deref()
-                    .map_or_else(|| "NONE".to_owned(), safe_text)
-            ),
-            format!(
-                "BRANCH: {}",
-                row.branch.as_ref().map_or_else(
-                    || "UNAVAILABLE".to_owned(),
-                    |value| safe_text(value.as_str())
-                )
-            ),
-            format!(
-                "REVISION: {}",
-                row.revision.as_ref().map_or_else(
-                    || "UNAVAILABLE".to_owned(),
-                    |value| safe_text(value.as_str())
-                )
-            ),
-            format!(
-                "CLEAN: {} | UNPUSHED COMMITS: {}",
-                row.clean.map_or("UNAVAILABLE", yes_no),
-                row.unpushed_commit_count
-                    .map_or_else(|| "UNAVAILABLE".to_owned(), |value| value.to_string())
-            ),
-            format!(
-                "WORKTREES: {}",
-                bounded_list(
-                    row.worktrees.iter().map(|value| value.as_str()),
-                    row.worktrees.len()
-                )
-            ),
-        ],
-    )
+                    .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time),
+                check
+                    .reason
+                    .as_ref()
+                    .map_or_else(|| "NONE".to_owned(), |value| safe_text(value.as_str()))
+            )
+        }));
+    }
+    DetailBody::new("REPOSITORY DETAIL", lines)
+}
+
+fn id_list(values: &[crate::contract::SafeId]) -> String {
+    bounded_list(values.iter().map(|value| value.as_str()), values.len())
 }
 
 fn bounded_list<'a>(values: impl Iterator<Item = &'a str>, total: usize) -> String {
@@ -931,6 +1203,17 @@ fn agent_stage_label(value: AgentStage) -> &'static str {
     }
 }
 
+fn activity_kind_label(value: AgentActivityKind) -> &'static str {
+    match value {
+        AgentActivityKind::Stage => "STAGE",
+        AgentActivityKind::Tool => "TOOL",
+        AgentActivityKind::File => "FILE",
+        AgentActivityKind::Decision => "DECISION",
+        AgentActivityKind::Error => "ERROR",
+        AgentActivityKind::Result => "RESULT",
+    }
+}
+
 fn strategy_label(value: StrategyName) -> &'static str {
     match value {
         StrategyName::MlModel => "ml_model",
@@ -956,6 +1239,16 @@ fn risk_limit_status_label(value: RiskLimitStatus) -> &'static str {
         RiskLimitStatus::Violated => "VIOLATED",
         RiskLimitStatus::Pending => "PENDING",
         RiskLimitStatus::Unavailable => "UNAVAILABLE",
+    }
+}
+
+fn risk_review_state_label(value: RiskReviewState) -> &'static str {
+    match value {
+        RiskReviewState::NotRequired => "NOT REQUIRED",
+        RiskReviewState::Pending => "PENDING",
+        RiskReviewState::Approved => "APPROVED",
+        RiskReviewState::Rejected => "REJECTED",
+        RiskReviewState::Unavailable => "UNAVAILABLE",
     }
 }
 
@@ -994,6 +1287,15 @@ fn service_state_label(value: ServiceState) -> &'static str {
         ServiceState::Stopped => "STOPPED",
         ServiceState::Failed => "FAILED",
         ServiceState::Unavailable => "UNAVAILABLE",
+    }
+}
+
+fn repository_check_state_label(value: RepositoryCheckState) -> &'static str {
+    match value {
+        RepositoryCheckState::Pass => "PASS",
+        RepositoryCheckState::Fail => "FAIL",
+        RepositoryCheckState::Running => "RUNNING",
+        RepositoryCheckState::Unavailable => "UNAVAILABLE",
     }
 }
 

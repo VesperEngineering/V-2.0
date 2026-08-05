@@ -1,6 +1,7 @@
 # V20 Ratatui Operations Console Design
 
-Status: approved; implementation not started
+Status: approved; foundation implemented; activation and verification status is
+recorded in `results/FINAL_VERIFICATION.md`
 Date: 2026-08-03
 Location: `C:\Users\bgonn\Desktop\v20\TUI testing`
 
@@ -145,9 +146,10 @@ hostile process under that same logon requires a separate OS identity or
 service and is out of scope.
 
 Opening the TUI may start a control-only gateway process, but it must not start
-agents, trading, research, or the V20 runtime. If the runtime is stopped, the
-gateway reports it as stopped. The runtime starts only after an authenticated
-and confirmed Start request.
+agents, trading, research, or the V20 runtime. Without a reviewed runtime-status
+adapter the gateway reports `UNKNOWN` / `UNAVAILABLE`; it never guesses
+`STOPPED`. The runtime starts only after an authenticated and confirmed Start
+request through an available controller adapter.
 
 ### 4.3 Protocol
 
@@ -194,7 +196,7 @@ of 1..2,000 characters. Confirmation levels are `none`, `confirm`,
 | Command | Exact payload model and fields | Capability ID | Reason | Confirmation |
 | --- | --- | --- | --- | --- |
 | `note.add` | `NoteAddPayload(target_type: stock\|order\|approval\|agent-event, target_id: SafeId, body: str[1..8000], visibility: private\|shared)` | `note.add` | forbidden | none |
-| `alert.dismiss` | `AlertDismissPayload(alert_id: SafeId)` | `alert.dismiss` | forbidden | none |
+| `alert.dismiss` | `AlertDismissPayload(alert_id: SafeId, created_at_utc: UtcDateTime)` | `alert.dismiss` | forbidden | none |
 | `layout.reset` | `LayoutResetPayload(screen: ScreenName optional)` | `layout.reset` | forbidden | none |
 | `approval.approve` | `ApprovalPayload(run_id: SafeId, checkpoint_id: SafeId)` | `approval.approve` | optional | confirm |
 | `approval.hold` | `ApprovalPayload(run_id: SafeId, checkpoint_id: SafeId)` | `approval.hold` | required | confirm |
@@ -225,15 +227,40 @@ of 1..2,000 characters. Confirmation levels are `none`, `confirm`,
 | `backup.restore` | `BackupRestorePayload(archive: str[1..32767], preview_hash: Sha256Hex, safety_backup_receipt_id: SafeId)` | `backup.restore` | required | double-confirm |
 | `source-control.push` | `SourceControlPushPayload(expected_revision: GitRevision)` | `source-control.push` | required | confirm |
 
+`alert.dismiss` is occurrence-bound. The Rust client copies both the selected
+alert ID and its `created_at_utc` into the reviewed request. At admission, the
+controller requires that pair to still match the current alert. If the alert
+resolved and reopened under the same ID, the old request is rejected and the
+new occurrence stays visible. The durable binding, dismissal effect, recovery,
+and terminal receipt all retain that exact pair. Only a green resolved alert
+can be dismissed. An urgent alert remains visible even if an old exact
+dismissal record exists.
+
+Notification history cleanup uses a durable queue of at most 64 opaque alert
+IDs inside the current alert record. Incident switches persist the new urgent
+truth and the old cleanup ID together before cleanup is attempted. Successful
+idempotent removals are deleted from the queue one at a time. On overflow, the
+oldest cleanup ID is dropped, a sticky generic overflow flag is stored, and a
+generic notification-health failure is recorded; the new urgent alert remains
+primary and no incident detail is stored.
+
+`approval.rework` stays disabled until immutable approval lineage identifies one
+responsible approved agent and the decision-plus-enqueue recovery rule is
+defined. The controller must not guess. `agent.stop` with no
+`workflow_run_id` also stays disabled until queued cancellation has a separate,
+explicit meaning; active work requires an exact persisted work-to-run binding.
+
 `backup.restore` is admitted only when all staged preconditions are current in
 the same control pair: runtime status is exactly `STOPPED`; archive structure,
 allowlist, DPAPI decrypt, entry sizes, and manifest hashes validate; the preview
 lists every add/replace/remove target and its SHA-256; `preview_hash` matches the
 canonical preview; an automatic safety backup completed successfully and its
 receipt ID matches the request; the archive and target state have not changed;
-double-confirmation is bound to the same preview hash. Any failure replaces zero
-target paths. After replacement, verification must pass or rollback from the
-safety backup and return a failed receipt.
+double-confirmation is bound to the same preview hash. Any precondition failure
+replaces zero target paths. After replacement starts, verification must pass or
+the controller rolls back every target from the safety backup and returns a
+failed receipt. If rollback cannot be verified, protected writes stay locked and
+the console requires manual recovery.
 
 ### 4.4 Refresh model
 
@@ -576,6 +603,9 @@ Memory curation timing:
 
 The screen shows core memory, archive search, recent additions and removals,
 reasons, evidence, which agents used an item, and change history.
+Archive search reads the complete bounded archived content through the
+controller's read-only ledger path; it is not limited to the 512-character
+snapshot summary.
 
 ### 7.10 System
 
@@ -665,8 +695,10 @@ shows BUSY or IDLE, active agent, queued count, and context usage.
 Use the V20 context budget rather than an artificial small prompt limit. Reserve
 enough space for tool results and the model response.
 
-Auto-compression begins near 80 percent of the safe input budget. A manual
-Compress Now control is also available. Compression is per agent.
+Auto-compression begins near 80 percent of the safe input budget only after a
+controller-owned runtime observes the real prompt budget. Manual Compress Now
+first shows the exact approved agent and allows an override before sending.
+Compression is per agent.
 
 Always preserve in active context:
 

@@ -4,13 +4,13 @@ expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::d
 ---
 ┌> RISK LIMITS────────────────────────────────────────────────────┐┌APPROVALS──────────────────────────────────────────┐
 │[~] PENDING limit:concentration | Current 0.10 | Proposed 0.12   ││[~] STALE approval:stale | 2026-01-15 07:34:56 EST │
-│[!] VIOLATED limit:drawdown | Current 0.08 | Proposed UNAVAILABLE││| Approval?reason | Evidence evidence:1            │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
+│PROPOSAL Raise only after review. | REVIEW PENDING               ││| Approval?reason | Evidence evidence:1            │
+│EVIDENCE evidence:risk-limit                                     ││SYMBOLS NVDA, AAPL                                 │
+│[!] VIOLATED limit:drawdown | Current 0.08 | Proposed UNAVAILABLE││NVDA 10.0% -> 12.0%                                │
+│PROPOSAL UNAVAILABLE | REVIEW NOT REQUIRED                       ││RISKS Concentration increases.                     │
+│EVIDENCE NONE                                                    ││CONSEQUENCES NVDA order will be submitted.         │
+│                                                                 ││BASIS aaaaaaaaaaaa                                 │
+│                                                                 ││STALE REASON Market evidence expired.              │
 │                                                                 ││                                                   │
 │                                                                 ││                                                   │
 │                                                                 ││                                                   │
@@ -19,14 +19,14 @@ expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::d
 │                                                                 ││                                                   │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌ALERTS───────────────────────────────────────────────────────────┐┌RISK METRICS───────────────────────────────────────┐
-│[OK] RESOLVED alert:resolved | Mismatch repaired | Created       ││Blocked actions + Circuit breaker: [?] UNAVAILABLE │
-│2026-01-15 07:00:00 EST | Resolved 2026-01-15 07:34:56 EST       ││(RiskView gap)                                     │
+│[OK] RESOLVED alert:resolved | Mismatch repaired | Created       ││CIRCUIT BREAKER: TRIPPED | 2026-01-15 07:34:56 EST │
+│2026-01-15 07:00:00 EST | Resolved 2026-01-15 07:34:56 EST       ││REASON Position read-back mismatch.                │
+│                                                                 ││BLOCKED ACTIONS                                    │
+│                                                                 ││BLOCKED action:rebalance | Submit rebalance orders │
+│                                                                 ││| SYMBOLS NVDA | 2026-01-15 07:34:56 EST           │
+│                                                                 ││REASON Circuit breaker is tripped.                 │
 │                                                                 ││[~] STALE metric:drawdown | 8.00 percent |         │
 │                                                                 ││2026-01-15 07:34:56 EST | Risk refresh delayed     │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
 │                                                                 ││                                                   │
 │                                                                 ││                                                   │
 │                                                                 ││                                                   │

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
 
@@ -8,10 +8,12 @@ use crate::chat::{AgentId, ChatApplyOutcome, ChatEvent, ChatStore};
 use crate::command::{CommandDraft, CommandTracker, PrepareOutcome, TrackedCommandSummary};
 use crate::confirm::{Selection, begin_confirmation, submit_confirmation};
 use crate::contract::{
-    AccessState as WireAccessState, AgentStage, CapabilityState, ChatEventPayload,
-    ChatHistoryRequestPayload, CommandReceipt, CommandRequest, CommandType, ConfirmationLevel,
-    ConsoleSnapshot, Envelope, Freshness, LeaseStatus, MemoryStatus, Message, PasswordString,
-    ReasonRule, SearchRequestPayload,
+    AccessState as WireAccessState, AgentStage, AlertView, CapabilityState, ChatEventPayload,
+    ChatHistoryRequestPayload, CommandPayload, CommandReceipt, CommandRequest, CommandType,
+    ConfirmationLevel, ConsoleSnapshot, Envelope, EventTarget, Freshness, HeaderView, LeaseStatus,
+    MemoryContentRequestPayload, MemoryContentStatus, MemoryStatus, Message, PasswordString,
+    ReasonRule, ReceiptStatus, SafeId, ScreenName, SearchRequestId, SearchRequestPayload,
+    UtcTimestamp, WindowOmission,
 };
 use crate::controls::{
     AgentEnqueueForm, AgentRouteDraft, ButtonState, ControlButton, ControlContext, ControlMenu,
@@ -19,9 +21,14 @@ use crate::controls::{
 };
 use crate::detail::detail_area;
 use crate::input::InputEvent;
-use crate::layout::{DisplayMode, chat_shell_layout, shell_layout};
+use crate::layout::{
+    DisplayMode, IMPACT_COMPACT_COLUMNS, IMPACT_DEFAULT_PANELS, PORTFOLIO_COMPACT_COLUMNS,
+    PORTFOLIO_DEFAULT_PANELS, chat_shell_layout, impact_panel_sizes, impact_visible_columns,
+    portfolio_panel_sizes, portfolio_visible_columns, resize_primary_panel, shell_layout,
+};
 use crate::preferences::{LoadedPreferences, ScreenId, ScreenPreferences, UiPreferences};
 use crate::reducer::{EventEnvelope, ReduceOutcome as SnapshotReduceOutcome, SnapshotReducer};
+use crate::render_plan::{RenderPlan, ShellRegion};
 use crate::screens::{DetailKind, PerformancePeriod, ScreenState};
 use crate::search::{
     ContextNoteDraft, NoteVisibility, SEARCH_DEBOUNCE, SearchResponseDisposition, SearchResult,
@@ -42,6 +49,36 @@ pub enum Screen {
     DataEvidence,
     Memory,
     System,
+}
+
+fn screen_name(screen: Screen) -> ScreenName {
+    match screen {
+        Screen::Impact => ScreenName::Impact,
+        Screen::Portfolio => ScreenName::Portfolio,
+        Screen::Orders => ScreenName::Orders,
+        Screen::Agents => ScreenName::Agents,
+        Screen::ModelsRegime => ScreenName::ModelsRegime,
+        Screen::Timeline => ScreenName::Timeline,
+        Screen::RiskApprovals => ScreenName::RiskApprovals,
+        Screen::DataEvidence => ScreenName::DataEvidence,
+        Screen::Memory => ScreenName::Memory,
+        Screen::System => ScreenName::System,
+    }
+}
+
+fn screen_id(screen: ScreenName) -> ScreenId {
+    match screen {
+        ScreenName::Impact => ScreenId::Impact,
+        ScreenName::Portfolio => ScreenId::Portfolio,
+        ScreenName::Orders => ScreenId::Orders,
+        ScreenName::Agents => ScreenId::Agents,
+        ScreenName::ModelsRegime => ScreenId::ModelsRegime,
+        ScreenName::Timeline => ScreenId::Timeline,
+        ScreenName::RiskApprovals => ScreenId::RiskApprovals,
+        ScreenName::DataEvidence => ScreenId::DataEvidence,
+        ScreenName::Memory => ScreenId::Memory,
+        ScreenName::System => ScreenId::System,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +154,7 @@ pub enum ClientAction {
     RequestLock,
     RequestSnapshot,
     Search(SearchRequestPayload),
+    MemoryContent(MemoryContentRequestPayload),
     ChatHistoryRequest(ChatHistoryRequestPayload),
     Command(CommandRequest),
     SubmitInput(String),
@@ -135,6 +173,49 @@ pub enum ReduceOutcome {
 pub struct ProtocolError {
     pub code: String,
     pub safe_message: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum MemoryContentPhase {
+    Loading,
+    Ready(String),
+    Unavailable(String),
+}
+
+impl fmt::Debug for MemoryContentPhase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Loading => formatter.write_str("Loading"),
+            Self::Ready(_) => formatter.write_str("Ready(<authenticated memory content>)"),
+            Self::Unavailable(_) => formatter.write_str("Unavailable(<safe reason>)"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryContentView {
+    request_id: SearchRequestId,
+    memory_id: SafeId,
+    reviewed_updated_at_utc: UtcTimestamp,
+    phase: MemoryContentPhase,
+}
+
+impl MemoryContentView {
+    pub fn request_id(&self) -> u64 {
+        self.request_id.get()
+    }
+
+    pub fn memory_id(&self) -> &SafeId {
+        &self.memory_id
+    }
+
+    pub fn reviewed_updated_at_utc(&self) -> &UtcTimestamp {
+        &self.reviewed_updated_at_utc
+    }
+
+    pub fn phase(&self) -> &MemoryContentPhase {
+        &self.phase
+    }
 }
 
 #[derive(Default)]
@@ -212,6 +293,8 @@ struct ViewKey {
     note_visibility: NoteVisibility,
     pending_note: Option<ContextNoteDraft>,
     show_search_detail: bool,
+    memory_content_view: Option<(u64, MemoryContentRenderPhase)>,
+    last_memory_content_request_id: u64,
     search_return_screen: Option<Screen>,
     control_epoch: u64,
     selected_chat_agent: Option<AgentId>,
@@ -220,6 +303,13 @@ struct ViewKey {
     chat_feedback: Option<String>,
     chat_scroll: BTreeMap<AgentId, ChatScrollState>,
     pending_chat_history: BTreeSet<AgentId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryContentRenderPhase {
+    Loading,
+    Ready,
+    Unavailable,
 }
 
 struct ReceiptSequenceEvidence(CommandReceipt);
@@ -246,6 +336,18 @@ impl Default for ChatScrollState {
 }
 
 const STALE_CACHE_LABEL: &str = "STALE CACHE";
+type HeaderRenderFingerprint = (AccessState, Option<(HeaderView, Option<Vec<AlertView>>)>);
+type EventBodyRenderFingerprint = (LocalMode, SearchState, bool, u64);
+type FooterRenderFingerprint = (LocalMode, Screen, bool, bool, bool, bool);
+type CurrentScreenPresentationFingerprint = Option<(
+    Freshness,
+    Option<UtcTimestamp>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+    Vec<WindowOmission>,
+)>;
 const STALE_CACHE_CAPABILITY_REASON: &str = "Cached state cannot authorize actions.";
 
 fn has_stale_cache_label(snapshot: &ConsoleSnapshot) -> bool {
@@ -289,6 +391,7 @@ pub struct AppState {
     lease_pending: bool,
     phase: SessionPhase,
     dirty: bool,
+    render_plan: Option<RenderPlan>,
     preferences: UiPreferences,
     preferences_unavailable: bool,
     preferences_save_pending: bool,
@@ -300,6 +403,8 @@ pub struct AppState {
     note_visibility: NoteVisibility,
     pending_note: Option<ContextNoteDraft>,
     show_search_detail: bool,
+    memory_content_view: Option<MemoryContentView>,
+    last_memory_content_request_id: u64,
     search_return_screen: Option<Screen>,
     detail_viewport: Option<Rect>,
     control_overlay: Option<ControlOverlay>,
@@ -358,6 +463,7 @@ impl AppState {
             lease_pending: false,
             phase,
             dirty: true,
+            render_plan: Some(RenderPlan::Full),
             preferences: UiPreferences::default(),
             preferences_unavailable: false,
             preferences_save_pending: false,
@@ -369,6 +475,8 @@ impl AppState {
             note_visibility: NoteVisibility::Private,
             pending_note: None,
             show_search_detail: false,
+            memory_content_view: None,
+            last_memory_content_request_id: 0,
             search_return_screen: None,
             detail_viewport: None,
             control_overlay: None,
@@ -436,6 +544,7 @@ impl AppState {
         };
         let viewport = if self.snapshot.is_some()
             && self.search_detail().is_none()
+            && self.memory_content_view().is_none()
             && matches!(
                 self.mode,
                 LocalMode::Browse | LocalMode::Open | LocalMode::Menu
@@ -452,7 +561,7 @@ impl AppState {
                     .scroll_offset
                     .min(self.detail_scroll_maximum());
             }
-            self.dirty = true;
+            self.request_full_render();
         }
     }
 
@@ -461,6 +570,32 @@ impl AppState {
         state.theme = self.theme();
         state.display_mode = self.display_mode();
         state.mask_account_details = self.preferences.mask_account_details;
+        let preferences = self
+            .preferences
+            .screens
+            .get(&screen_id(screen_name(self.screen)));
+        let visible_columns = preferences.map_or(&[][..], |value| value.visible_columns.as_slice());
+        let panel_sizes = preferences.map_or(&[][..], |value| value.panel_sizes.as_slice());
+        match self.screen {
+            Screen::Impact => {
+                state.visible_columns = impact_visible_columns(visible_columns)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                state.panel_sizes = impact_panel_sizes(panel_sizes);
+            }
+            Screen::Portfolio => {
+                state.visible_columns = portfolio_visible_columns(visible_columns)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                state.panel_sizes = portfolio_panel_sizes(panel_sizes);
+            }
+            _ => {
+                state.visible_columns.clear();
+                state.panel_sizes.clear();
+            }
+        }
         state
     }
 
@@ -476,6 +611,14 @@ impl AppState {
         let detail_kind = self.screen_state.selected_kind?;
         self.search_state
             .result_for(self.screen, detail_kind, entity_id)
+    }
+
+    pub fn memory_content_view(&self) -> Option<&MemoryContentView> {
+        self.memory_content_view.as_ref()
+    }
+
+    pub fn can_open_memory_content(&self) -> bool {
+        self.has_memory_content_target()
     }
 
     pub fn filter_input(&self) -> &str {
@@ -549,7 +692,7 @@ impl AppState {
                 .or_default()
                 .performance_period = Some(period);
             self.preferences_save_pending = true;
-            self.dirty = true;
+            self.request_full_render();
         }
     }
 
@@ -563,6 +706,58 @@ impl AppState {
 
     pub fn control_overlay(&self) -> Option<&ControlOverlay> {
         self.control_overlay.as_ref()
+    }
+
+    pub(crate) fn resolve_startup_alert(&mut self, alert_id: &SafeId) -> bool {
+        if !self.access.is_unlocked() {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return false;
+        };
+        if is_stale_cache_projection(snapshot) {
+            return false;
+        }
+
+        let selected = snapshot
+            .risk
+            .alerts
+            .iter()
+            .find(|alert| alert.alert_id == *alert_id)
+            .map(|alert| alert.alert_id.as_str().to_owned());
+        if let Some(selected_id) = selected {
+            self.select_screen(Screen::RiskApprovals);
+            self.control_overlay = None;
+            self.screen_state.narrow_panel = 2;
+            self.screen_state.selected_id = Some(selected_id);
+            self.screen_state.selected_kind = Some(DetailKind::Alert);
+            self.open_selected();
+            self.request_full_render();
+            return true;
+        }
+
+        let risk_window_omitted = snapshot
+            .window_omissions
+            .iter()
+            .any(|omission| omission.target == EventTarget::RiskAlerts);
+        let reason = if matches!(
+            snapshot.risk.freshness,
+            Freshness::Loading | Freshness::Unavailable
+        ) {
+            "Current Risk alert data is unavailable."
+        } else if risk_window_omitted {
+            "The alert is outside the current dashboard window."
+        } else {
+            "The alert is not present in the latest dashboard snapshot."
+        };
+        self.control_overlay = Some(ControlOverlay::DisabledReason {
+            label: "Notification target unavailable".to_owned(),
+            reason: reason.to_owned(),
+        });
+        self.mode = LocalMode::Menu;
+        self.control_epoch = self.control_epoch.saturating_add(1);
+        self.request_full_render();
+        true
     }
 
     pub fn control_menu(&self) -> Option<&ControlMenu> {
@@ -597,14 +792,14 @@ impl AppState {
             .unwrap_or_default();
         self.preferences_unavailable = loaded.unavailable_reason.is_some();
         self.preferences_save_pending = false;
-        self.dirty = true;
+        self.request_full_render();
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
         if self.preferences.theme != theme {
             self.preferences.theme = theme;
             self.preferences_save_pending = true;
-            self.dirty = true;
+            self.request_full_render();
         }
     }
 
@@ -612,14 +807,14 @@ impl AppState {
         if self.preferences.display_mode != display_mode {
             self.preferences.display_mode = display_mode;
             self.preferences_save_pending = true;
-            self.dirty = true;
+            self.request_full_render();
         }
     }
 
     pub fn toggle_account_details_mask(&mut self) {
         self.preferences.mask_account_details = !self.preferences.mask_account_details;
         self.preferences_save_pending = true;
-        self.dirty = true;
+        self.request_full_render();
     }
 
     pub fn set_screen_preferences(&mut self, screen: ScreenId, mut preferences: ScreenPreferences) {
@@ -637,7 +832,7 @@ impl AppState {
         if self.preferences.screens.get(&screen) != Some(&preferences) {
             self.preferences.screens.insert(screen, preferences);
             self.preferences_save_pending = true;
-            self.dirty = true;
+            self.request_full_render();
         }
     }
 
@@ -650,15 +845,44 @@ impl AppState {
         let unavailable = !succeeded;
         if self.preferences_unavailable != unavailable {
             self.preferences_unavailable = unavailable;
-            self.dirty = true;
+            self.request_full_render();
         }
     }
 
     pub fn reduce(&mut self, envelope: Envelope) -> Result<ReduceOutcome, ProtocolError> {
+        let event_targets = match &envelope.message {
+            Message::Event(payload) => Some(payload.targets.clone()),
+            _ => None,
+        };
         let before = self.view_key();
+        let header_before = self.header_render_fingerprint();
+        let alerts_before = self.alerts_render_fingerprint();
+        let event_body_before = self.event_body_render_fingerprint();
+        let footer_before = self.footer_render_fingerprint();
+        let current_screen_presentation_before = self.current_screen_presentation_fingerprint();
         let result = self.reduce_inner(envelope);
         if self.view_key() != before {
-            self.dirty = true;
+            if let (Some(targets), Ok(ReduceOutcome::Changed)) = (event_targets, &result) {
+                let mut plan = RenderPlan::for_event_targets(targets);
+                if self.header_render_fingerprint() != header_before {
+                    plan = plan.with_region(ShellRegion::Header);
+                }
+                if self.alerts_render_fingerprint() != alerts_before {
+                    plan = plan.with_region(ShellRegion::Alerts);
+                }
+                if self.event_body_render_fingerprint() != event_body_before
+                    || self.current_screen_presentation_fingerprint()
+                        != current_screen_presentation_before
+                {
+                    plan = plan.with_region(ShellRegion::Body);
+                }
+                if self.footer_render_fingerprint() != footer_before {
+                    plan = plan.with_region(ShellRegion::Footer);
+                }
+                self.request_render(plan);
+            } else {
+                self.request_full_render();
+            }
         }
         result
     }
@@ -731,12 +955,14 @@ impl AppState {
             return match &envelope.message {
                 Message::Snapshot(_)
                 | Message::SearchResults(_)
+                | Message::MemoryContentResult(_)
                 | Message::Event(_)
                 | Message::Pong(_) => {
                     self.cancel_unsent_controls_for_resync();
                     self.awaiting_snapshot = true;
                     self.snapshot = None;
                     self.search_state.clear_results();
+                    self.memory_content_view = None;
                     Ok(ReduceOutcome::RequestSnapshot)
                 }
                 _ => Err(self.fail_closed(
@@ -751,7 +977,7 @@ impl AppState {
             && let Message::CommandReceipt(payload) = &envelope.message
         {
             let receipt = payload.receipt.clone();
-            if self.command_tracker.apply_receipt(receipt.clone()).is_err() {
+            if self.apply_command_receipt(receipt.clone()).is_err() {
                 return Err(self.fail_closed(
                     "command-receipt",
                     "Command receipt does not match an in-flight command.",
@@ -796,6 +1022,7 @@ impl AppState {
                     self.search_state.complete_without_results(request_id);
                     Ok(ReduceOutcome::Ignored)
                 }
+                Message::MemoryContentResult(_) => Ok(ReduceOutcome::Ignored),
                 Message::Pong(_) => Ok(ReduceOutcome::Ignored),
                 Message::LockResult(_) => {
                     self.enter_manual_lock();
@@ -951,6 +1178,7 @@ impl AppState {
                 self.invalidate_stale_control_review();
                 if outcome == SnapshotReduceOutcome::Changed {
                     self.invalidate_search_results();
+                    self.memory_content_view = None;
                 }
                 self.show_search_detail = false;
                 self.awaiting_snapshot = false;
@@ -978,6 +1206,7 @@ impl AppState {
                         self.invalidate_stale_control_review();
                         self.invalidate_search_results();
                         self.show_search_detail = false;
+                        self.memory_content_view = None;
                         self.awaiting_snapshot = false;
                         Ok(ReduceOutcome::Changed)
                     }
@@ -986,6 +1215,7 @@ impl AppState {
                         self.cancel_unsent_controls_for_resync();
                         self.snapshot = None;
                         self.search_state.clear_results();
+                        self.memory_content_view = None;
                         self.awaiting_snapshot = true;
                         Ok(ReduceOutcome::RequestSnapshot)
                     }
@@ -1076,6 +1306,60 @@ impl AppState {
                     Ok(ReduceOutcome::Ignored)
                 }
             }
+            Message::MemoryContentResult(payload) => {
+                if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
+                    return Err(
+                        self.fail_closed("state", "Memory content arrived before authentication.")
+                    );
+                }
+                let request_id = payload.request_id.get();
+                if request_id > self.last_memory_content_request_id {
+                    return Err(self.fail_closed(
+                        "memory-content",
+                        "Memory content request ID was not issued.",
+                    ));
+                }
+                self.observe_presentation_sequence(envelope.sequence)?;
+                if request_id < self.last_memory_content_request_id {
+                    return Ok(ReduceOutcome::Ignored);
+                }
+                let Some(view) = self.memory_content_view.as_mut() else {
+                    return Ok(ReduceOutcome::Ignored);
+                };
+                if view.request_id != payload.request_id
+                    || view.memory_id != payload.memory_id
+                    || view.reviewed_updated_at_utc != payload.reviewed_updated_at_utc
+                {
+                    return Err(self.fail_closed(
+                        "memory-content",
+                        "Memory content response binding is invalid.",
+                    ));
+                }
+                if view.phase != MemoryContentPhase::Loading {
+                    return Err(self.fail_closed(
+                        "memory-content",
+                        "Memory content response was already reduced.",
+                    ));
+                }
+                view.phase = match payload.status {
+                    MemoryContentStatus::Success => MemoryContentPhase::Ready(
+                        payload
+                            .content
+                            .expect("contract requires success content")
+                            .as_str()
+                            .to_owned(),
+                    ),
+                    MemoryContentStatus::Error => MemoryContentPhase::Unavailable(
+                        payload
+                            .error
+                            .expect("contract requires failure reason")
+                            .as_str()
+                            .to_owned(),
+                    ),
+                };
+                self.screen_state.scroll_offset = 0;
+                Ok(ReduceOutcome::Changed)
+            }
             Message::ChatEvent(payload) => {
                 if self.phase != SessionPhase::Authenticated || !self.access.is_unlocked() {
                     return Err(
@@ -1092,7 +1376,7 @@ impl AppState {
                 };
                 match outcome {
                     Ok(ChatApplyOutcome::Changed) => {
-                        self.dirty = true;
+                        self.request_full_render();
                         Ok(ReduceOutcome::Changed)
                     }
                     Ok(ChatApplyOutcome::Ignored) => Ok(ReduceOutcome::Ignored),
@@ -1139,7 +1423,7 @@ impl AppState {
                     self.chat_store
                         .finish_history(agent_id, payload.next_cursor().cloned());
                 }
-                self.dirty = true;
+                self.request_full_render();
                 Ok(ReduceOutcome::Changed)
             }
             Message::CommandReceipt(payload) => {
@@ -1150,7 +1434,7 @@ impl AppState {
                 }
                 self.observe_presentation_sequence(envelope.sequence)?;
                 let receipt = payload.receipt;
-                if self.command_tracker.apply_receipt(receipt.clone()).is_err() {
+                if self.apply_command_receipt(receipt.clone()).is_err() {
                     return Err(self.fail_closed(
                         "command-receipt",
                         "Command receipt does not match an in-flight command.",
@@ -1168,6 +1452,7 @@ impl AppState {
             | Message::LockRequest(_)
             | Message::SnapshotRequest(_)
             | Message::SearchRequest(_)
+            | Message::MemoryContentRequest(_)
             | Message::ChatHistoryRequest(_)
             | Message::Command(_)
             | Message::Ping(_) => {
@@ -1177,12 +1462,46 @@ impl AppState {
     }
 
     pub fn handle(&mut self, event: InputEvent) -> Vec<ClientAction> {
+        if let InputEvent::Tick(elapsed) = event {
+            return self.handle_tick(elapsed);
+        }
         let before = self.view_key();
         let actions = self.handle_inner(event);
         if self.view_key() != before {
-            self.dirty = true;
+            self.request_full_render();
         }
         actions
+    }
+
+    fn handle_tick(&mut self, elapsed: Duration) -> Vec<ClientAction> {
+        if self.phase == SessionPhase::ProtocolLockout {
+            return Vec::new();
+        }
+        self.local_now = self
+            .local_now
+            .checked_add(elapsed)
+            .or_else(|| self.local_now.checked_add(SEARCH_DEBOUNCE))
+            .unwrap_or(self.local_now);
+        if self.access.is_unlocked()
+            && self.mode == LocalMode::Search
+            && let Some(request) = self.search_state.take_due_request(self.local_now)
+        {
+            let request_id = request.request_id;
+            let actions = match request.to_wire() {
+                Ok(payload) => vec![ClientAction::Search(payload)],
+                Err(error) => {
+                    self.search_state.apply_gateway_results(
+                        request_id,
+                        Vec::new(),
+                        Some(error.to_string()),
+                    );
+                    Vec::new()
+                }
+            };
+            self.request_full_render();
+            return actions;
+        }
+        Vec::new()
     }
 
     fn handle_inner(&mut self, event: InputEvent) -> Vec<ClientAction> {
@@ -1195,31 +1514,6 @@ impl AppState {
                 InputEvent::Reconnect => vec![ClientAction::Reconnect],
                 _ => Vec::new(),
             };
-        }
-        if let InputEvent::Tick(elapsed) = event {
-            self.local_now = self
-                .local_now
-                .checked_add(elapsed)
-                .or_else(|| self.local_now.checked_add(SEARCH_DEBOUNCE))
-                .unwrap_or(self.local_now);
-            if self.access.is_unlocked()
-                && self.mode == LocalMode::Search
-                && let Some(request) = self.search_state.take_due_request(self.local_now)
-            {
-                let request_id = request.request_id;
-                return match request.to_wire() {
-                    Ok(payload) => vec![ClientAction::Search(payload)],
-                    Err(error) => {
-                        self.search_state.apply_gateway_results(
-                            request_id,
-                            Vec::new(),
-                            Some(error.to_string()),
-                        );
-                        Vec::new()
-                    }
-                };
-            }
-            return Vec::new();
         }
         if !self.access.is_unlocked() {
             return if matches!(self.phase, SessionPhase::AwaitingAuth { .. }) {
@@ -1254,18 +1548,158 @@ impl AppState {
         self.route_unlocked_input(event)
     }
 
+    fn header_render_fingerprint(&self) -> HeaderRenderFingerprint {
+        (
+            self.access,
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| (snapshot.shell.header.clone(), snapshot.shell.alerts.clone())),
+        )
+    }
+
+    fn alerts_render_fingerprint(&self) -> Option<Option<Vec<AlertView>>> {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.shell.alerts.clone())
+    }
+
+    fn event_body_render_fingerprint(&self) -> EventBodyRenderFingerprint {
+        (
+            self.mode,
+            self.search_state.clone(),
+            self.show_search_detail,
+            self.control_epoch,
+        )
+    }
+
+    fn footer_render_fingerprint(&self) -> FooterRenderFingerprint {
+        (
+            self.mode,
+            self.screen,
+            self.preferences_unavailable,
+            self.snapshot.is_some(),
+            self.search_detail().is_some(),
+            self.can_open_selected_chat(),
+        )
+    }
+
+    fn current_screen_presentation_fingerprint(&self) -> CurrentScreenPresentationFingerprint {
+        let snapshot = self.snapshot.as_ref()?;
+        let (freshness, as_of_utc, source, error) = match self.screen {
+            Screen::Impact => (
+                snapshot.impact.freshness,
+                &snapshot.impact.as_of_utc,
+                snapshot.impact.source.as_str(),
+                &snapshot.impact.error,
+            ),
+            Screen::Portfolio => (
+                snapshot.portfolio.freshness,
+                &snapshot.portfolio.as_of_utc,
+                snapshot.portfolio.source.as_str(),
+                &snapshot.portfolio.error,
+            ),
+            Screen::Orders => (
+                snapshot.orders.freshness,
+                &snapshot.orders.as_of_utc,
+                snapshot.orders.source.as_str(),
+                &snapshot.orders.error,
+            ),
+            Screen::Agents => (
+                snapshot.agents.freshness,
+                &snapshot.agents.as_of_utc,
+                snapshot.agents.source.as_str(),
+                &snapshot.agents.error,
+            ),
+            Screen::ModelsRegime => (
+                snapshot.models.freshness,
+                &snapshot.models.as_of_utc,
+                snapshot.models.source.as_str(),
+                &snapshot.models.error,
+            ),
+            Screen::Timeline => (
+                snapshot.timeline.freshness,
+                &snapshot.timeline.as_of_utc,
+                snapshot.timeline.source.as_str(),
+                &snapshot.timeline.error,
+            ),
+            Screen::RiskApprovals => (
+                snapshot.risk.freshness,
+                &snapshot.risk.as_of_utc,
+                snapshot.risk.source.as_str(),
+                &snapshot.risk.error,
+            ),
+            Screen::DataEvidence => (
+                snapshot.data.freshness,
+                &snapshot.data.as_of_utc,
+                snapshot.data.source.as_str(),
+                &snapshot.data.error,
+            ),
+            Screen::Memory => (
+                snapshot.memory.freshness,
+                &snapshot.memory.as_of_utc,
+                snapshot.memory.source.as_str(),
+                &snapshot.memory.error,
+            ),
+            Screen::System => (
+                snapshot.system.freshness,
+                &snapshot.system.as_of_utc,
+                snapshot.system.source.as_str(),
+                &snapshot.system.error,
+            ),
+        };
+        let rank_source = (self.screen == Screen::Portfolio)
+            .then(|| {
+                snapshot
+                    .portfolio
+                    .rank_source
+                    .as_ref()
+                    .map(|value| value.as_str().to_owned())
+            })
+            .flatten();
+        let hidden_event_count =
+            (self.screen == Screen::Timeline).then_some(snapshot.timeline.hidden_event_count);
+        Some((
+            freshness,
+            as_of_utc.clone(),
+            source.to_owned(),
+            error.clone(),
+            rank_source,
+            hidden_event_count,
+            snapshot.window_omissions.clone(),
+        ))
+    }
+
+    fn request_render(&mut self, plan: RenderPlan) {
+        self.dirty = true;
+        self.render_plan = Some(match self.render_plan.take() {
+            Some(pending) => pending.merge(plan),
+            None => plan,
+        });
+    }
+
+    fn request_full_render(&mut self) {
+        self.request_render(RenderPlan::Full);
+    }
+
     pub fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
+        self.take_render_plan().is_some()
+    }
+
+    pub fn take_render_plan(&mut self) -> Option<RenderPlan> {
+        if !std::mem::take(&mut self.dirty) {
+            return None;
+        }
+        Some(self.render_plan.take().unwrap_or(RenderPlan::Full))
     }
 
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.request_full_render();
     }
 
     pub fn fail_connection(&mut self) {
         self.command_tracker.on_connection_lost();
         self.enter_protocol_lockout();
-        self.dirty = true;
+        self.request_full_render();
     }
 
     pub(crate) fn begin_connection(&mut self) {
@@ -1289,6 +1723,8 @@ impl AppState {
         self.note_command = None;
         self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
+        self.memory_content_view = None;
+        self.last_memory_content_request_id = 0;
         self.search_return_screen = None;
         self.selected_chat_agent = None;
         self.chat_selector_index = 0;
@@ -1298,7 +1734,7 @@ impl AppState {
         self.pending_chat_pages.clear();
         self.chat_store.cancel_history_loads();
         self.control_epoch = self.control_epoch.saturating_add(1);
-        self.dirty = true;
+        self.request_full_render();
     }
 
     pub(crate) fn take_reconnect_replay(&mut self) -> Option<CommandRequest> {
@@ -1343,6 +1779,15 @@ impl AppState {
             note_visibility: self.note_visibility,
             pending_note: self.pending_note.clone(),
             show_search_detail: self.show_search_detail,
+            memory_content_view: self.memory_content_view.as_ref().map(|view| {
+                let phase = match view.phase {
+                    MemoryContentPhase::Loading => MemoryContentRenderPhase::Loading,
+                    MemoryContentPhase::Ready(_) => MemoryContentRenderPhase::Ready,
+                    MemoryContentPhase::Unavailable(_) => MemoryContentRenderPhase::Unavailable,
+                };
+                (view.request_id.get(), phase)
+            }),
+            last_memory_content_request_id: self.last_memory_content_request_id,
             search_return_screen: self.search_return_screen,
             control_epoch: self.control_epoch,
             selected_chat_agent: self.selected_chat_agent,
@@ -1416,7 +1861,10 @@ impl AppState {
 
     fn route_unlocked_input(&mut self, event: InputEvent) -> Vec<ClientAction> {
         if event == InputEvent::Escape {
-            if self.mode == LocalMode::AgentInput {
+            if self.memory_content_view.take().is_some() {
+                self.screen_state.scroll_offset = 0;
+                return Vec::new();
+            } else if self.mode == LocalMode::AgentInput {
                 self.mode = LocalMode::AgentChat;
                 self.chat_feedback = None;
             } else if self.mode == LocalMode::AgentChat {
@@ -1449,6 +1897,26 @@ impl AppState {
                 self.screen_state.detail_open = false;
             }
             self.screen_state.scroll_offset = 0;
+            return Vec::new();
+        }
+
+        if self.memory_content_view.is_some() {
+            match event {
+                InputEvent::Up => self.move_vertical(false),
+                InputEvent::Down => self.move_vertical(true),
+                InputEvent::PageUp => {
+                    for _ in 0..10 {
+                        self.move_vertical(false);
+                    }
+                }
+                InputEvent::PageDown => {
+                    for _ in 0..10 {
+                        self.move_vertical(true);
+                    }
+                }
+                InputEvent::Char('q') => return vec![ClientAction::CloseTui],
+                _ => {}
+            }
             return Vec::new();
         }
 
@@ -1499,6 +1967,13 @@ impl AppState {
             if self.mode == LocalMode::AgentChat {
                 return Vec::new();
             }
+        }
+
+        if self.mode == LocalMode::Search
+            && event == InputEvent::Char('o')
+            && self.has_memory_content_target()
+        {
+            return self.request_memory_content().into_iter().collect();
         }
 
         if self.mode.captures_text() {
@@ -1605,6 +2080,12 @@ impl AppState {
             return Vec::new();
         };
         match key {
+            '[' if matches!(self.screen, Screen::Impact | Screen::Portfolio) => {
+                self.cycle_narrow_panel(false, 3);
+            }
+            ']' if matches!(self.screen, Screen::Impact | Screen::Portfolio) => {
+                self.cycle_narrow_panel(true, 3);
+            }
             '1' => self.select_screen(Screen::Impact),
             '2' => self.select_screen(Screen::Portfolio),
             '3' => self.select_screen(Screen::Orders),
@@ -1616,6 +2097,10 @@ impl AppState {
             '9' => self.select_screen(Screen::Memory),
             '0' => self.select_screen(Screen::System),
             'p' if self.screen == Screen::System => self.toggle_account_details_mask(),
+            'o' if self.memory_content_view.is_some() => {}
+            'o' if self.has_memory_content_target() => {
+                return self.request_memory_content().into_iter().collect();
+            }
             'o' => self.open_selected(),
             'n' if self.mode == LocalMode::Open && self.current_note_target().is_some() => {
                 self.open_control_menu();
@@ -1686,7 +2171,8 @@ impl AppState {
             .rows
             .iter()
             .find(|row| row.work_id.as_str() == work_id)?
-            .agent
+            .chat_agent_id
+            .as_ref()?
             .as_str();
         AgentId::parse(agent)
     }
@@ -2044,8 +2530,77 @@ impl AppState {
                 self.open_selected();
                 Vec::new()
             }
+            LocalControl::GrowPrimaryPanel => {
+                self.close_control_overlay();
+                self.resize_current_primary_panel(true);
+                Vec::new()
+            }
+            LocalControl::ShrinkPrimaryPanel => {
+                self.close_control_overlay();
+                self.resize_current_primary_panel(false);
+                Vec::new()
+            }
+            LocalControl::ToggleTableColumns => {
+                self.close_control_overlay();
+                self.toggle_current_table_columns();
+                Vec::new()
+            }
             LocalControl::TakeControl | LocalControl::LockTui => Vec::new(),
         }
+    }
+
+    fn resize_current_primary_panel(&mut self, grow: bool) {
+        let (id, defaults) = match self.screen {
+            Screen::Impact => (ScreenId::Impact, IMPACT_DEFAULT_PANELS.as_slice()),
+            Screen::Portfolio => (ScreenId::Portfolio, PORTFOLIO_DEFAULT_PANELS.as_slice()),
+            _ => return,
+        };
+        let mut preferences = self
+            .preferences
+            .screens
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        preferences.panel_sizes = resize_primary_panel(&preferences.panel_sizes, defaults, grow);
+        self.set_screen_preferences(id, preferences);
+    }
+
+    fn toggle_current_table_columns(&mut self) {
+        let (id, compact, current) = match self.screen {
+            Screen::Impact => (
+                ScreenId::Impact,
+                IMPACT_COMPACT_COLUMNS.as_slice(),
+                impact_visible_columns(
+                    self.preferences
+                        .screens
+                        .get(&ScreenId::Impact)
+                        .map_or(&[][..], |value| value.visible_columns.as_slice()),
+                ),
+            ),
+            Screen::Portfolio => (
+                ScreenId::Portfolio,
+                PORTFOLIO_COMPACT_COLUMNS.as_slice(),
+                portfolio_visible_columns(
+                    self.preferences
+                        .screens
+                        .get(&ScreenId::Portfolio)
+                        .map_or(&[][..], |value| value.visible_columns.as_slice()),
+                ),
+            ),
+            _ => return,
+        };
+        let mut preferences = self
+            .preferences
+            .screens
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        preferences.visible_columns = if current == compact {
+            Vec::new()
+        } else {
+            compact.iter().map(|column| (*column).to_owned()).collect()
+        };
+        self.set_screen_preferences(id, preferences);
     }
 
     fn begin_command(&mut self, button: crate::controls::ControlButton) -> Vec<ClientAction> {
@@ -2371,6 +2926,33 @@ impl AppState {
 
     fn command_draft(&self, button: &ControlButton) -> Result<CommandDraft, String> {
         match button.command_type {
+            CommandType::AlertDismiss => {
+                let Some(ControlContext::Alert {
+                    alert_id,
+                    created_at_utc,
+                }) = button.context.as_ref()
+                else {
+                    return Err("No exact alert is available to dismiss.".to_owned());
+                };
+                Ok(CommandDraft::new(
+                    button.command_type,
+                    serde_json::json!({
+                        "alert_id": alert_id,
+                        "created_at_utc": created_at_utc,
+                    }),
+                    None,
+                    format!("alert.dismiss:{alert_id}:{}", created_at_utc.as_str()),
+                ))
+            }
+            CommandType::LayoutReset => {
+                let screen = screen_name(self.screen);
+                Ok(CommandDraft::new(
+                    button.command_type,
+                    serde_json::json!({"screen": screen}),
+                    None,
+                    format!("layout.reset:{screen:?}"),
+                ))
+            }
             CommandType::ApprovalApprove => {
                 let Some(ControlContext::Approval {
                     run_id,
@@ -2392,6 +2974,53 @@ impl AppState {
             }
             _ => Err("This control needs a reviewed input form before it can run.".to_owned()),
         }
+    }
+
+    fn apply_command_receipt(&mut self, receipt: CommandReceipt) -> Result<(), ()> {
+        let reset = (receipt.status == ReceiptStatus::Completed)
+            .then(|| self.command_tracker.request(receipt.command_id.as_str()))
+            .flatten()
+            .and_then(|request| match &request.payload {
+                CommandPayload::LayoutReset(payload) => Some(payload.screen),
+                _ => None,
+            });
+        self.command_tracker
+            .apply_receipt(receipt)
+            .map_err(|_| ())?;
+        if let Some(screen) = reset {
+            self.reset_layout(screen);
+        }
+        Ok(())
+    }
+
+    fn reset_layout(&mut self, screen: Option<ScreenName>) {
+        if let Some(screen) = screen {
+            let id = screen_id(screen);
+            let performance_period = self
+                .preferences
+                .screens
+                .get(&id)
+                .and_then(|preferences| preferences.performance_period);
+            if let Some(performance_period) = performance_period {
+                self.preferences.screens.insert(
+                    id,
+                    ScreenPreferences {
+                        performance_period: Some(performance_period),
+                        ..ScreenPreferences::default()
+                    },
+                );
+            } else {
+                self.preferences.screens.remove(&id);
+            }
+        } else {
+            self.preferences.screens.retain(|_, preferences| {
+                preferences.visible_columns.clear();
+                preferences.panel_sizes.clear();
+                preferences.performance_period.is_some()
+            });
+        }
+        self.preferences_save_pending = true;
+        self.request_full_render();
     }
 
     fn submit_note(&mut self) -> Vec<ClientAction> {
@@ -2559,7 +3188,9 @@ impl AppState {
     }
 
     fn move_vertical(&mut self, forward: bool) {
-        if self.mode == LocalMode::Open && self.screen_state.detail_open {
+        if self.memory_content_view.is_some()
+            || (self.mode == LocalMode::Open && self.screen_state.detail_open)
+        {
             let maximum = self.detail_scroll_maximum();
             self.screen_state.scroll_offset = if forward {
                 self.screen_state
@@ -2950,12 +3581,17 @@ impl AppState {
     }
 
     fn detail_scroll_maximum(&self) -> usize {
-        let Some(snapshot) = self.snapshot.as_ref() else {
-            return 0;
-        };
         let mut area = self
             .detail_viewport
             .unwrap_or_else(|| Rect::new(0, 0, 80, 3));
+        if let Some(view) = self.memory_content_view() {
+            let line_count =
+                crate::ui::memory_content_line_count(view, area.width.saturating_sub(2).max(1));
+            return line_count.saturating_sub(usize::from(area.height.saturating_sub(2).max(1)));
+        }
+        let Some(snapshot) = self.snapshot.as_ref() else {
+            return 0;
+        };
         let state = self.screen_state();
         if let Some(result) = self.search_detail() {
             let line_count = crate::ui::search_detail_line_count(
@@ -3083,6 +3719,84 @@ impl AppState {
         self.screen_state.narrow_panel = 0;
         self.show_search_detail = true;
         self.search_return_screen = Some(return_screen);
+    }
+
+    fn has_memory_content_target(&self) -> bool {
+        self.selected_memory_search_result().is_some()
+            || (self.mode != LocalMode::Search
+                && self.search_detail().is_none()
+                && self.screen == Screen::Memory
+                && self.screen_state.narrow_panel % 3 < 2)
+    }
+
+    fn selected_memory_search_result(&self) -> Option<&SearchResult> {
+        if let Some(result) = self.search_detail()
+            && result.kind == crate::search::SearchKind::Memory
+        {
+            return Some(result);
+        }
+        if self.mode == LocalMode::Search {
+            return self
+                .search_state
+                .results()
+                .get(self.search_state.selected_index())
+                .filter(|result| result.kind == crate::search::SearchKind::Memory);
+        }
+        None
+    }
+
+    fn selected_memory_content_binding(&self) -> Option<(SafeId, UtcTimestamp)> {
+        if let Some(result) = self.selected_memory_search_result() {
+            return Some((
+                SafeId::parse(result.entity_id.clone()).ok()?,
+                UtcTimestamp::parse(result.timestamp_utc.clone()?).ok()?,
+            ));
+        }
+        if self.mode == LocalMode::Search || self.search_detail().is_some() {
+            return None;
+        }
+        if self.screen != Screen::Memory || self.screen_state.narrow_panel % 3 >= 2 {
+            return None;
+        }
+        let status = if self.screen_state.narrow_panel.is_multiple_of(3) {
+            MemoryStatus::Core
+        } else {
+            MemoryStatus::Archived
+        };
+        let rows = &self.snapshot.as_ref()?.memory.rows;
+        let row = self
+            .screen_state
+            .selected_id
+            .as_deref()
+            .and_then(|selected| {
+                rows.iter()
+                    .find(|row| row.status == status && row.memory_id.as_str() == selected)
+            })
+            .or_else(|| {
+                rows.iter()
+                    .filter(|row| row.status == status)
+                    .nth(self.screen_state.scroll_offset)
+            })?;
+        Some((row.memory_id.clone(), row.updated_at_utc.clone()))
+    }
+
+    fn request_memory_content(&mut self) -> Option<ClientAction> {
+        let (memory_id, reviewed_updated_at_utc) = self.selected_memory_content_binding()?;
+        let next_id = self.last_memory_content_request_id.checked_add(1)?;
+        let request_id = SearchRequestId::from_sequence(next_id).ok()?;
+        self.last_memory_content_request_id = next_id;
+        self.screen_state.scroll_offset = 0;
+        self.memory_content_view = Some(MemoryContentView {
+            request_id,
+            memory_id: memory_id.clone(),
+            reviewed_updated_at_utc: reviewed_updated_at_utc.clone(),
+            phase: MemoryContentPhase::Loading,
+        });
+        Some(ClientAction::MemoryContent(MemoryContentRequestPayload {
+            request_id,
+            memory_id,
+            reviewed_updated_at_utc,
+        }))
     }
 
     fn invalidate_search_results(&mut self) {
@@ -3267,6 +3981,8 @@ impl AppState {
         self.note_command = None;
         self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
+        self.memory_content_view = None;
+        self.last_memory_content_request_id = 0;
         self.search_return_screen = None;
         self.pending_chat_history.clear();
         self.pending_chat_pages.clear();
@@ -3289,6 +4005,7 @@ impl AppState {
         self.note_command = None;
         self.command_tracker.cancel_prepared_commands();
         self.show_search_detail = false;
+        self.memory_content_view = None;
         self.search_return_screen = None;
         self.awaiting_snapshot = false;
         self.lock_pending = false;

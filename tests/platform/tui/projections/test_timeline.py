@@ -23,6 +23,7 @@ def _event(index: int) -> EventInput:
         approval_id=None,
         order_id=None,
         evidence_ids=(),
+        work_id=None,
         source="native-platform",
     )
 

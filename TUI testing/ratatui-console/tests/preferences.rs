@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use vesper_ratatui_console::app::{PreferencePersistence, persist_pending_preferences_to};
+use vesper_ratatui_console::contract::ConsoleSnapshot;
+use vesper_ratatui_console::controls::LocalControl;
+use vesper_ratatui_console::input::InputEvent;
 use vesper_ratatui_console::layout::DisplayMode;
 use vesper_ratatui_console::preferences::{
     LoadedPreferences, PREFERENCES_VERSION, ScreenId, ScreenPreferences, UiPreferences,
@@ -260,8 +263,94 @@ fn changed_state_persists_through_the_production_helper_and_reloads() {
         restored.screen_state().performance_period,
         PerformancePeriod::SinceStart
     );
+    restored.handle(vesper_ratatui_console::input::InputEvent::Char('2'));
+    assert_eq!(restored.screen_state().panel_sizes, [58, 22, 20]);
+    assert_eq!(
+        restored.screen_state().visible_columns,
+        ["symbol", "current", "proposed", "approved"],
+        "unsupported persisted columns must not be passed through"
+    );
 
     std::fs::remove_dir_all(directory).expect("remove owned test directory");
+}
+
+#[test]
+fn local_layout_button_changes_persist_and_reload_for_the_same_screen() {
+    let directory = unique_test_directory("local-layout-persistence");
+    let path = directory.join("preferences.json");
+    let snapshot: ConsoleSnapshot = serde_json::from_slice(include_bytes!(
+        "../../contracts/v1/console_snapshot_empty_command_specs.json"
+    ))
+    .expect("valid shared console snapshot");
+    let mut state = AppState::controller();
+    state.snapshot = Some(snapshot);
+    state.handle(InputEvent::Char(':'));
+    let grow = state
+        .control_menu()
+        .expect("impact control menu")
+        .local_index(LocalControl::GrowPrimaryPanel)
+        .expect("grow button");
+    assert!(state.handle(InputEvent::ActivateControl(grow)).is_empty());
+    assert_eq!(
+        persist_pending_preferences_to(&mut state, &path),
+        PreferencePersistence::Saved
+    );
+
+    let mut restored = AppState::controller();
+    restored.apply_loaded_preferences(load_preferences_from(&path));
+    assert_eq!(restored.screen_state().panel_sizes, [70, 30]);
+    assert_eq!(
+        restored.screen_state().visible_columns,
+        [
+            "symbol", "current", "proposed", "approved", "agent", "task", "stage", "priority"
+        ]
+    );
+
+    std::fs::remove_dir_all(directory).expect("remove owned test directory");
+}
+
+#[test]
+fn unsupported_loaded_layout_values_fall_back_to_approved_screen_defaults() {
+    let mut preferences = UiPreferences::default();
+    preferences.screens.insert(
+        ScreenId::Impact,
+        ScreenPreferences {
+            visible_columns: vec![
+                "symbol".to_owned(),
+                "symbol".to_owned(),
+                "unknown".to_owned(),
+            ],
+            panel_sizes: vec![90, 10],
+            performance_period: None,
+        },
+    );
+    preferences.screens.insert(
+        ScreenId::Portfolio,
+        ScreenPreferences {
+            visible_columns: vec!["current".to_owned()],
+            panel_sizes: vec![60, 40],
+            performance_period: None,
+        },
+    );
+    let mut state = AppState::controller();
+    state.apply_loaded_preferences(LoadedPreferences {
+        preferences,
+        unavailable_reason: None,
+    });
+
+    assert_eq!(state.screen_state().panel_sizes, [65, 35]);
+    assert_eq!(
+        state.screen_state().visible_columns,
+        [
+            "symbol", "current", "proposed", "approved", "agent", "task", "stage", "priority"
+        ]
+    );
+    state.handle(vesper_ratatui_console::input::InputEvent::Char('2'));
+    assert_eq!(state.screen_state().panel_sizes, [58, 22, 20]);
+    assert_eq!(
+        state.screen_state().visible_columns,
+        ["symbol", "current", "proposed", "approved"]
+    );
 }
 
 #[test]

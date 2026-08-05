@@ -53,7 +53,9 @@ fn valid_payload(command: &str) -> Value {
         "note.add" => {
             json!({"target_type":"stock","target_id":"AAPL","body":"Review concentration.","visibility":"private"})
         }
-        "alert.dismiss" => json!({"alert_id":"alert:1"}),
+        "alert.dismiss" => {
+            json!({"alert_id":"alert:1","created_at_utc":"2026-08-03T00:00:00Z"})
+        }
         "layout.reset" => json!({"screen":"impact"}),
         "approval.approve" | "approval.hold" | "approval.reject" => {
             json!({"run_id":"run:1","checkpoint_id":"checkpoint:1"})

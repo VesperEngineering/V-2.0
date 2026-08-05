@@ -30,7 +30,7 @@ expression: "normalized_render(120, 36, & state)"
 └────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────┘
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Dismiss Alert         [x] Reset Layout          [ ] Lock TUI                           │
-│                                                                                                                      │
+│ [ ] Grow Primary Panel    [ ] Shrink Primary Panel  [ ] Toggle Table Columns                                         │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

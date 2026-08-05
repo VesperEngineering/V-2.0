@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from enum import StrEnum
 from threading import RLock
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 from pydantic import Field, ValidationError
 
@@ -98,6 +98,13 @@ class SearchPage(StrictModel):
     indexed_state_version: WireUInt
     results: Annotated[tuple[SearchResult, ...], Field(max_length=100)]
     error: NonEmptyStr | None = None
+
+
+class MemoryArchiveSearchPort(Protocol):
+    @property
+    def source(self) -> str: ...
+
+    def search_archive(self, query: str, limit: int = 100) -> tuple[MemoryRow, ...]: ...
 
 
 class _IndexRecord(StrictModel):
@@ -301,6 +308,7 @@ class GlobalSearchService:
         event_store: EventStore | None,
         note_store: NoteStore | None,
         *,
+        memory_archive: MemoryArchiveSearchPort | None = None,
         persistent_error: str | None = None,
     ) -> None:
         if type(snapshot) is not ConsoleSnapshot:
@@ -308,6 +316,7 @@ class GlobalSearchService:
         self._current = SearchService(snapshot)
         self._event_store = event_store
         self._note_store = note_store
+        self._memory_archive = memory_archive
         self._persistent_error = persistent_error
         self._indexed_state_version = snapshot.shell.state_version
         self._index_error: str | None = None
@@ -370,6 +379,10 @@ class GlobalSearchService:
                 providers.append(())
             if self._allows_note(filters):
                 providers.append(self._note_results(errors, query, filters))
+            else:
+                providers.append(())
+            if self._allows(filters, SearchKind.MEMORY, SearchScreen.MEMORY):
+                providers.append(self._memory_archive_results(errors, query, filters))
             else:
                 providers.append(())
 
@@ -447,6 +460,24 @@ class GlobalSearchService:
             errors.append("Persisted search history is unavailable.")
             return ()
         return tuple(_note_result(note) for note in notes)
+
+    def _memory_archive_results(
+        self,
+        errors: list[str],
+        query: str,
+        filters: SearchFilters,
+    ) -> tuple[SearchResult, ...]:
+        provider = self._memory_archive
+        if provider is None:
+            return ()
+        if filters.source is not None and filters.source.casefold() != provider.source.casefold():
+            return ()
+        try:
+            rows = provider.search_archive(query, 100)
+        except Exception:
+            errors.append("Managed memory archive search is unavailable.")
+            return ()
+        return tuple(_memory_result(row, provider.source) for row in rows)
 
     @staticmethod
     def _allows(
@@ -531,11 +562,7 @@ def _note_target_types(
 ) -> tuple[NoteTargetType, ...] | None:
     if not screens:
         return None
-    return tuple(
-        target_type
-        for target_type, screen in _NOTE_SCREENS.items()
-        if screen in screens
-    )
+    return tuple(target_type for target_type, screen in _NOTE_SCREENS.items() if screen in screens)
 
 
 def _global_rank(query: str, result: SearchResult) -> int:
@@ -663,6 +690,17 @@ def _stock_record(row: PortfolioRow, source: str, as_of: datetime | None) -> _In
 
 
 def _agent_record(row: AgentCard, source: str, as_of: datetime | None) -> _IndexRecord:
+    activity_terms = (
+        value
+        for activity in row.activity
+        for value in (
+            activity.activity_id,
+            activity.kind,
+            activity.summary,
+            activity.occurred_at_utc,
+            *activity.evidence_ids,
+        )
+    )
     return _record(
         kind=SearchKind.AGENT,
         record_type=SearchRecordType.AGENT_CARD,
@@ -679,6 +717,13 @@ def _agent_record(row: AgentCard, source: str, as_of: datetime | None) -> _Index
             row.stage,
             row.model,
             *row.affected_areas,
+            row.session_id,
+            *row.plan_steps,
+            *activity_terms,
+            *row.evidence_ids,
+            row.context_percent,
+            row.chat_agent_id,
+            row.detail_next_cursor,
         ),
     )
 
@@ -713,6 +758,11 @@ def _candidate_record(row: CandidateRow, source: str) -> _IndexRecord:
             row.strategy,
             row.status,
             *row.evidence_ids,
+            row.feature_set_id,
+            row.data_identity,
+            row.evaluation_contract,
+            row.status_reason,
+            row.status_at_utc,
         ),
     )
 
@@ -787,7 +837,21 @@ def _evidence_record(row: EvidenceRow) -> _IndexRecord:
         occurred_at_utc=row.created_at_utc,
         source=row.source,
         screen=SearchScreen.DATA,
-        terms=(row.evidence_id, row.evidence_type, row.source, row.sha256),
+        terms=(
+            row.evidence_id,
+            row.evidence_type,
+            row.source,
+            row.sha256,
+            *row.symbols,
+            *row.agent_ids,
+            *row.model_ids,
+            *row.order_ids,
+            *row.approval_ids,
+            *row.source_ids,
+            row.raw_log_id,
+            *row.raw_log_excerpt,
+            row.raw_log_next_cursor,
+        ),
     )
 
 
@@ -801,7 +865,27 @@ def _memory_record(row: MemoryRow, source: str) -> _IndexRecord:
         occurred_at_utc=row.updated_at_utc,
         source=source,
         screen=SearchScreen.MEMORY,
-        terms=(row.memory_id, row.status, row.summary, *row.evidence_ids),
+        terms=(
+            row.memory_id,
+            row.status,
+            row.summary,
+            *row.evidence_ids,
+            *row.used_by_agents,
+            row.change_reason,
+        ),
+    )
+
+
+def _memory_result(row: MemoryRow, source: str) -> SearchResult:
+    return SearchResult(
+        kind=SearchKind.MEMORY,
+        record_type=SearchRecordType.MEMORY_ROW,
+        record_id=row.memory_id,
+        label=row.summary,
+        summary=row.status,
+        occurred_at_utc=row.updated_at_utc,
+        source=source,
+        screen=SearchScreen.MEMORY,
     )
 
 
@@ -821,6 +905,7 @@ def _source_record(row: SourceRow, source: str) -> _IndexRecord:
             row.coverage,
             row.error,
             *row.consumers,
+            *row.dependencies,
         ),
     )
 
@@ -842,6 +927,11 @@ def _repository_record(row: RepositoryRow) -> _IndexRecord:
             row.freshness,
             row.error,
             *row.worktrees,
+            *(
+                value
+                for check in row.checks
+                for value in (check.check_id, check.state, check.reason, check.observed_at_utc)
+            ),
         ),
     )
 

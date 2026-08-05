@@ -15,7 +15,7 @@ from vesper.platform.tui.ports import (
     TimelineFacts,
     UnavailablePort,
 )
-from vesper.platform.tui.views import Freshness
+from vesper.platform.tui.views import CircuitBreakerView, Freshness
 
 
 NOW = datetime(2026, 8, 3, 16, 0, tzinfo=timezone.utc)
@@ -168,6 +168,10 @@ def test_fact_bundles_distinguish_unavailable_from_observed_empty() -> None:
             metrics_error=None,
             repositories=None,
             repositories_error="No repository source.",
+            qwen=None,
+            qwen_error="No Qwen source.",
+            health=None,
+            health_error="No system health source.",
         )
 
 
@@ -180,6 +184,14 @@ def test_legacy_risk_facts_can_never_claim_broker_reconciliation() -> None:
         breaker_tripped=False,
         positions=(),
         broker_reconciled=False,
+        blocked_actions=None,
+        blocked_actions_error="No blocked-action source.",
+        circuit_breaker=CircuitBreakerView(
+            state="armed",
+            reason=None,
+            observed_at_utc=NOW,
+        ),
+        circuit_breaker_error=None,
     )
     assert valid.broker_reconciled is False
     with pytest.raises(ValidationError):

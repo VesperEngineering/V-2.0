@@ -42,7 +42,7 @@ fn render_sources(
                 } else {
                     0
                 })
-                .map(|row| source_line(row, state))
+                .flat_map(|row| source_lines(row, state))
                 .collect::<Vec<_>>();
             if lines.is_empty() {
                 vec![Line::from("No data sources reported.")]
@@ -61,21 +61,33 @@ fn render_sources(
     );
 }
 
-fn source_line(row: &SourceRow, state: &ScreenState) -> Line<'static> {
+fn source_lines(row: &SourceRow, state: &ScreenState) -> Vec<Line<'static>> {
     let (badge, style) = freshness_status(row.freshness, state);
+    let dependencies = if row.dependencies.is_empty() {
+        "NONE".to_owned()
+    } else {
+        row.dependencies
+            .iter()
+            .map(|value| sanitize(value.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     if matches!(row.freshness, Freshness::Loading | Freshness::Unavailable) {
-        return Line::from(vec![
-            Span::raw(marker(state, row.source_id.as_str(), DetailKind::Source)),
-            Span::styled(badge, style),
-            Span::raw(format!(
-                " {} | {}",
-                row.source_id.as_str(),
-                row.error
-                    .as_deref()
-                    .map(sanitize)
-                    .unwrap_or_else(|| "Waiting for controller source.".to_owned())
-            )),
-        ]);
+        return vec![
+            Line::from(vec![
+                Span::raw(marker(state, row.source_id.as_str(), DetailKind::Source)),
+                Span::styled(badge, style),
+                Span::raw(format!(
+                    " {} | {}",
+                    row.source_id.as_str(),
+                    row.error
+                        .as_deref()
+                        .map(sanitize)
+                        .unwrap_or_else(|| "Waiting for controller source.".to_owned())
+                )),
+            ]),
+            Line::from(format!("Dependencies {dependencies}")),
+        ];
     }
     let age = row.age_seconds.map_or_else(
         || "Age UNAVAILABLE".to_owned(),
@@ -104,14 +116,17 @@ fn source_line(row: &SourceRow, state: &ScreenState) -> Line<'static> {
         .as_deref()
         .map(|value| format!(" | {}", sanitize(value)))
         .unwrap_or_default();
-    Line::from(vec![
-        Span::raw(marker(state, row.source_id.as_str(), DetailKind::Source)),
-        Span::styled(badge, style),
-        Span::raw(format!(
-            " {} | {age} | Coverage {coverage} | Consumers {consumers} | Dependencies [?] UNAVAILABLE - Not in the SourceRow contract. | {observed}{reason}",
-            row.source_id.as_str()
-        )),
-    ])
+    vec![
+        Line::from(vec![
+            Span::raw(marker(state, row.source_id.as_str(), DetailKind::Source)),
+            Span::styled(badge, style),
+            Span::raw(format!(
+                " {} | {age} | Coverage {coverage} | Consumers {consumers} | {observed}{reason}",
+                row.source_id.as_str()
+            )),
+        ]),
+        Line::from(format!("Dependencies {dependencies}")),
+    ]
 }
 
 fn render_evidence(
@@ -124,26 +139,46 @@ fn render_evidence(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            let lines = view
-                .evidence
-                .iter()
-                .skip(if focused {
-                    evidence_offset(view, state)
-                } else {
-                    0
-                })
-                .map(|row| {
-                    Line::from(format!(
-                        "{}[E] {} | {} | Source {} | {} | SHA-256 {}",
-                        marker(state, row.evidence_id.as_str(), DetailKind::Evidence),
-                        row.evidence_id.as_str(),
-                        sanitize(row.evidence_type.as_str()),
-                        sanitize(row.source.as_str()),
-                        format_eastern_time(&row.created_at_utc),
-                        sha256_text(&row.sha256)
-                    ))
-                })
-                .collect::<Vec<_>>();
+            let mut lines = Vec::new();
+            for row in view.evidence.iter().skip(if focused {
+                evidence_offset(view, state)
+            } else {
+                0
+            }) {
+                lines.push(Line::from(format!(
+                    "{}[E] {} | {} | Source {} | {} | SHA-256 {}",
+                    marker(state, row.evidence_id.as_str(), DetailKind::Evidence),
+                    row.evidence_id.as_str(),
+                    sanitize(row.evidence_type.as_str()),
+                    sanitize(row.source.as_str()),
+                    format_eastern_time(&row.created_at_utc),
+                    sha256_text(&row.sha256)
+                )));
+                lines.push(Line::from(format!(
+                    "SYMBOLS {} | AGENTS {} | MODELS {}",
+                    ids(&row.symbols),
+                    ids(&row.agent_ids),
+                    ids(&row.model_ids)
+                )));
+                lines.push(Line::from(format!(
+                    "ORDERS {} | APPROVALS {} | SOURCES {}",
+                    ids(&row.order_ids),
+                    ids(&row.approval_ids),
+                    ids(&row.source_ids)
+                )));
+                let raw_log = row.raw_log_id.as_ref().map_or_else(
+                    || "UNAVAILABLE".to_owned(),
+                    |value| format!("{} [o open]", value.as_str()),
+                );
+                let next = row
+                    .raw_log_next_cursor
+                    .as_ref()
+                    .map_or_else(|| "NONE".to_owned(), |value| sanitize(value.as_str()));
+                lines.push(Line::from(format!(
+                    "RAW LOG {raw_log} | TRUNCATED {} | NEXT {next}",
+                    if row.raw_log_truncated { "YES" } else { "NO" }
+                )));
+            }
             if lines.is_empty() {
                 vec![Line::from("No evidence reported.")]
             } else {
@@ -274,6 +309,18 @@ fn sha256_text(value: &crate::contract::Sha256Hex) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "UNAVAILABLE".to_owned())
+}
+
+fn ids(values: &[crate::contract::SafeId]) -> String {
+    if values.is_empty() {
+        "NONE".to_owned()
+    } else {
+        values
+            .iter()
+            .map(|value| value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn sanitize(value: &str) -> String {

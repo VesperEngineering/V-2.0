@@ -1,11 +1,11 @@
+import multiprocessing
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from vesper.platform.agent_tools import AgentToolGateway, AgentToolRequest, ToolPermissionError
 from vesper.platform.context_budget import ContextBudgetExceeded, ContextBudgetGuard
-from datetime import datetime, timezone
-
 from vesper.platform.contracts import (
     AgentRole,
     PermissionSet,
@@ -15,8 +15,15 @@ from vesper.platform.contracts import (
 )
 from vesper.platform.ollama import OllamaClient, OllamaProtocolError, QwenSpecialistAdapter
 from vesper.platform.persistence import PlatformPaths
-from vesper.platform.qwen_runtime import QwenTurnRunner
+from vesper.platform.qwen_runtime import InferenceBusyError, QwenTurnRunner, inference_lease
 from vesper.platform.service import LocalPlatformService
+
+
+def _hold_inference_lease(state_root, ready, release) -> None:
+    with inference_lease(Path(state_root)):
+        ready.set()
+        if not release.wait(timeout=30):
+            raise RuntimeError("parent did not release the test inference lease")
 
 
 def test_context_budget_reserves_full_output_window():
@@ -26,6 +33,36 @@ def test_context_budget_reserves_full_output_window():
         guard.validate(prompt_tokens=49_153, tool_calls=0)
     with pytest.raises(ContextBudgetExceeded):
         guard.validate(prompt_tokens=1, tool_calls=9)
+
+
+def test_inference_lease_blocks_another_process_then_releases(tmp_path):
+    state_root = tmp_path / "state"
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_inference_lease,
+        args=(str(state_root), ready, release),
+    )
+    holder.start()
+    try:
+        assert ready.wait(timeout=10), "child did not acquire the inference lease"
+        with pytest.raises(InferenceBusyError, match="already active"):
+            with inference_lease(state_root):
+                pass
+
+        release.set()
+        holder.join(timeout=10)
+        assert holder.exitcode == 0
+
+        with inference_lease(state_root):
+            pass
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=5)
 
 
 def test_ollama_client_pins_model_context_and_loopback_endpoint():

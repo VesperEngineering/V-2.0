@@ -11,22 +11,27 @@ use crossterm::event::{
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
-use ratatui::DefaultTerminal;
+use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::{DefaultTerminal, Terminal};
 
 use crate::contract::{
     AuthSetupPayload, AuthUnlockPayload, ClientHelloPayload, CommandMessagePayload, Envelope,
-    LeaseRequestPayload, LockAction, LockRequestPayload, Message, NonEmptyString,
+    LeaseRequestPayload, LockAction, LockRequestPayload, Message, NonEmptyString, SafeId,
     SnapshotRequestPayload, TakeControlAction, UtcTimestamp,
 };
 use crate::input::InputEvent;
 use crate::launcher::{GatewayLauncher, LaunchError};
-use crate::layout::{chat_shell_layout, shell_layout};
+use crate::layout::{chat_shell_layout, is_narrow_width, shell_layout};
 use crate::preferences::{load_preferences, preferences_path, save_preferences_to};
+use crate::render_plan::RenderPlan;
+use crate::renderer::{RenderReceipt, Renderer};
+use crate::startup::StartupIntent;
 use crate::state::{AccessState, AppState, ClientAction, LocalMode, ProtocolError, ReduceOutcome};
 use crate::transport::{PipeTransport, TransportError};
 use crate::ui::{
+    MARKET_PANEL_HINT_SEPARATOR, NEXT_MARKET_PANEL_HINT, PREVIOUS_MARKET_PANEL_HINT,
     chat_selector_start, control_grid_index, control_overlay_area, split_control_area,
 };
 
@@ -55,6 +60,15 @@ const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
     "vesper/platform/memory.py",
     "vesper/platform/ollama.py",
     "vesper/platform/opencode.py",
+    "vesper/platform/ops/__init__.py",
+    "vesper/platform/ops/activation.py",
+    "vesper/platform/ops/alerts.py",
+    "vesper/platform/ops/notification_health.py",
+    "vesper/platform/ops/policy.py",
+    "vesper/platform/ops/services.py",
+    "vesper/platform/ops/supervisor.py",
+    "vesper/platform/ops/training.py",
+    "vesper/platform/paths.py",
     "vesper/platform/persistence.py",
     "vesper/platform/profiles.py",
     "vesper/platform/quant_agents.py",
@@ -68,7 +82,9 @@ const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
     "vesper/platform/workflow.py",
     "vesper/platform/worktree.py",
     "vesper/platform/tui/__init__.py",
+    "vesper/platform/tui/alert_dismissals.py",
     "vesper/platform/tui/auth.py",
+    "vesper/platform/tui/backup.py",
     "vesper/platform/tui/cli.py",
     "vesper/platform/tui/command_contracts.py",
     "vesper/platform/tui/command_policy.py",
@@ -80,8 +96,10 @@ const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
     "vesper/platform/tui/contracts.py",
     "vesper/platform/tui/event_store.py",
     "vesper/platform/tui/gateway.py",
+    "vesper/platform/tui/git_port.py",
     "vesper/platform/tui/live_readiness.py",
     "vesper/platform/tui/notes.py",
+    "vesper/platform/tui/notifications.py",
     "vesper/platform/tui/operator_decisions.py",
     "vesper/platform/tui/outbox.py",
     "vesper/platform/tui/pipe_security.py",
@@ -89,14 +107,20 @@ const REQUIRED_GATEWAY_RUNTIME_FILES: &[&str] = &[
     "vesper/platform/tui/ports.py",
     "vesper/platform/tui/process_capture.py",
     "vesper/platform/tui/protocol.py",
+    "vesper/platform/tui/recovery.py",
     "vesper/platform/tui/search.py",
+    "vesper/platform/tui/session_presence.py",
     "vesper/platform/tui/snapshot.py",
+    "vesper/platform/tui/snapshot_cache.py",
     "vesper/platform/tui/sqlite_ledger.py",
     "vesper/platform/tui/stream.py",
     "vesper/platform/tui/views.py",
+    "vesper/platform/tui/working_memory.py",
     "vesper/platform/tui/projections/__init__.py",
     "vesper/platform/tui/projections/legacy_state.py",
+    "vesper/platform/tui/projections/managed_memory.py",
     "vesper/platform/tui/projections/native_platform.py",
+    "vesper/platform/tui/projections/operations_status.py",
     "vesper/platform/tui/projections/platform_runtime.py",
     "vesper/platform/tui/projections/repository.py",
     "vesper/platform/tui/projections/timeline.py",
@@ -211,6 +235,31 @@ pub fn mouse_to_input(mouse: MouseEvent, area: Rect, state: &AppState) -> Option
             return Some(InputEvent::Char(':'));
         }
         let left_half = mouse.column < layout.footer.x.saturating_add(layout.footer.width / 2);
+        if state.mode == crate::state::LocalMode::Browse
+            && state.snapshot.is_some()
+            && is_narrow_width(layout.footer.width)
+            && matches!(
+                state.screen,
+                crate::state::Screen::Impact | crate::state::Screen::Portfolio
+            )
+            && mouse.row == layout.footer.y.saturating_add(1)
+        {
+            let previous_start = layout.footer.x.saturating_add(1);
+            let previous_end = previous_start.saturating_add(
+                u16::try_from(PREVIOUS_MARKET_PANEL_HINT.len()).unwrap_or(u16::MAX),
+            );
+            let next_start = previous_end.saturating_add(
+                u16::try_from(MARKET_PANEL_HINT_SEPARATOR.len()).unwrap_or(u16::MAX),
+            );
+            let next_end = next_start
+                .saturating_add(u16::try_from(NEXT_MARKET_PANEL_HINT.len()).unwrap_or(u16::MAX));
+            if mouse.column >= previous_start && mouse.column < previous_end {
+                return Some(InputEvent::Char('['));
+            }
+            if mouse.column >= next_start && mouse.column < next_end {
+                return Some(InputEvent::Char(']'));
+            }
+        }
         match state.mode {
             crate::state::LocalMode::AgentSelector | crate::state::LocalMode::AgentInput => {
                 return Some(if left_half {
@@ -403,13 +452,13 @@ fn impact_click_to_input(
     }
     let area = content_area(area, snapshot.impact.freshness);
     let screen_state = state.screen_state();
-    let holdings = if area.width < 100 {
+    let holdings = if is_narrow_width(area.width) {
         if !screen_state.narrow_panel.is_multiple_of(3) {
             return None;
         }
         area
     } else {
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).split(area)[0]
+        crate::layout::impact_panels(area, &screen_state.panel_sizes)[0]
     };
     if !contains(holdings, column, row) {
         return None;
@@ -765,24 +814,14 @@ fn portfolio_click_to_input(
         return None;
     }
     let area = content_area(area, snapshot.portfolio.freshness);
-    let weights = Layout::vertical(if area.width < 100 {
-        [
-            Constraint::Percentage(52),
-            Constraint::Percentage(26),
-            Constraint::Percentage(22),
-        ]
-    } else {
-        [
-            Constraint::Percentage(58),
-            Constraint::Percentage(22),
-            Constraint::Percentage(20),
-        ]
-    })
-    .split(area)[0];
+    let screen_state = state.screen_state();
+    if is_narrow_width(area.width) && !screen_state.narrow_panel.is_multiple_of(3) {
+        return None;
+    }
+    let weights = crate::layout::portfolio_panels(area, &screen_state.panel_sizes)[0];
     if !contains(weights, column, row) {
         return None;
     }
-    let screen_state = state.screen_state();
     let row_height = crate::screens::table_row_height(&screen_state);
     let first_row = weights.y.saturating_add(1).saturating_add(row_height);
     if row < first_row || column <= weights.x || column >= weights.right().saturating_sub(1) {
@@ -1043,14 +1082,38 @@ fn persist_pending_preferences(state: &mut AppState) -> PreferencePersistence {
     persist_pending_preferences_to(state, &path)
 }
 
-#[derive(Debug)]
 pub struct App {
     state: AppState,
+    pending_startup_alert: Option<SafeId>,
+}
+
+impl fmt::Debug for App {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("App")
+            .field("state", &self.state)
+            .field(
+                "pending_startup_alert",
+                &self.pending_startup_alert.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl App {
     pub fn new(state: AppState) -> Self {
-        Self { state }
+        Self::new_with_startup_intent(state, StartupIntent::Dashboard)
+    }
+
+    pub fn new_with_startup_intent(state: AppState, intent: StartupIntent) -> Self {
+        let pending_startup_alert = match intent {
+            StartupIntent::Dashboard => None,
+            StartupIntent::Alert(alert_id) => Some(alert_id),
+        };
+        Self {
+            state,
+            pending_startup_alert,
+        }
     }
 
     pub fn state(&self) -> &AppState {
@@ -1059,6 +1122,10 @@ impl App {
 
     pub fn take_redraw(&mut self) -> bool {
         self.state.take_dirty()
+    }
+
+    pub fn take_render_plan(&mut self) -> Option<RenderPlan> {
+        self.state.take_render_plan()
     }
 
     pub fn force_redraw(&mut self) {
@@ -1082,7 +1149,15 @@ impl App {
     }
 
     pub fn reduce(&mut self, envelope: Envelope) -> Result<ReduceOutcome, ProtocolError> {
-        self.state.reduce(envelope)
+        let is_snapshot = matches!(&envelope.message, Message::Snapshot(_));
+        let outcome = self.state.reduce(envelope)?;
+        if is_snapshot
+            && let Some(alert_id) = self.pending_startup_alert.take()
+            && !self.state.resolve_startup_alert(&alert_id)
+        {
+            self.pending_startup_alert = Some(alert_id);
+        }
+        Ok(outcome)
     }
 }
 
@@ -1305,6 +1380,7 @@ impl FoundationClient {
             }),
             ClientAction::RequestSnapshot => Message::SnapshotRequest(SnapshotRequestPayload {}),
             ClientAction::Search(payload) => Message::SearchRequest(payload),
+            ClientAction::MemoryContent(payload) => Message::MemoryContentRequest(payload),
             ClientAction::ChatHistoryRequest(payload) => Message::ChatHistoryRequest(payload),
             ClientAction::Command(request) => Message::Command(CommandMessagePayload { request }),
             ClientAction::Reconnect => return Ok(SessionStep::Reconnect),
@@ -1541,10 +1617,14 @@ impl ConnectionControl for TerminalConnectionControl<'_> {
 }
 
 pub async fn run() -> io::Result<()> {
+    run_with_startup_intent(StartupIntent::Dashboard).await
+}
+
+pub async fn run_with_startup_intent(intent: StartupIntent) -> io::Result<()> {
     let mut terminal = ratatui::init();
     let _restore = RestoreGuard::new(ratatui::restore);
     let repo_root = repository_root()?;
-    run_terminal_loop(&mut terminal, &repo_root).await
+    run_terminal_loop_with_startup_intent(&mut terminal, &repo_root, intent).await
 }
 
 fn repository_root() -> io::Result<PathBuf> {
@@ -1610,10 +1690,19 @@ fn has_exact_declaration(document: &str, section: &str, declaration: &str) -> bo
 }
 
 pub async fn run_terminal_loop(terminal: &mut DefaultTerminal, repo_root: &Path) -> io::Result<()> {
+    run_terminal_loop_with_startup_intent(terminal, repo_root, StartupIntent::Dashboard).await
+}
+
+async fn run_terminal_loop_with_startup_intent(
+    terminal: &mut DefaultTerminal,
+    repo_root: &Path,
+    intent: StartupIntent,
+) -> io::Result<()> {
     let mut connector = LauncherConnector;
     let mut state = AppState::locked();
     state.apply_loaded_preferences(load_preferences());
-    let mut client = FoundationClient::from_app(App::new(state));
+    let mut client = FoundationClient::from_app(App::new_with_startup_intent(state, intent));
+    let mut renderer = Renderer::new();
     loop {
         let transport = {
             let mut control = TerminalConnectionControl::new(terminal);
@@ -1625,7 +1714,7 @@ pub async fn run_terminal_loop(terminal: &mut DefaultTerminal, repo_root: &Path)
             transport
         };
         client.begin_connection();
-        match run_connected_loop(terminal, transport, &mut client).await? {
+        match run_connected_loop(terminal, transport, &mut client, &mut renderer).await? {
             SessionStep::Exit => return Ok(()),
             SessionStep::Reconnect => {
                 let mut control = TerminalConnectionControl::new(terminal);
@@ -1643,22 +1732,23 @@ async fn run_connected_loop<S: FoundationSession>(
     terminal: &mut DefaultTerminal,
     mut session: S,
     client: &mut FoundationClient,
+    renderer: &mut Renderer,
 ) -> io::Result<SessionStep> {
     let mut mouse = TerminalMouseCapture::new();
     if client.start(&mut session).await.is_err() {
-        prepare_reconnect(terminal, client, &mut mouse)?;
+        prepare_reconnect(terminal, client, &mut mouse, renderer)?;
         return Ok(SessionStep::Reconnect);
     }
     let mut input_poll = tokio::time::interval(POLL_INTERVAL);
     input_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        refresh_terminal(terminal, client, &mut mouse)?;
+        refresh_terminal(terminal, client, &mut mouse, renderer)?;
 
         let step = tokio::select! {
             biased;
             _ = input_poll.tick() => {
-                drain_terminal_events(terminal, client, &mut mouse, &mut session).await?
+                drain_terminal_events(terminal, client, &mut mouse, &mut session, renderer).await?
             }
             inbound = session.recv() => {
                 match inbound {
@@ -1673,7 +1763,7 @@ async fn run_connected_loop<S: FoundationSession>(
         };
         if step != SessionStep::Continue {
             if step == SessionStep::Reconnect {
-                prepare_reconnect(terminal, client, &mut mouse)?;
+                prepare_reconnect(terminal, client, &mut mouse, renderer)?;
             }
             return Ok(step);
         }
@@ -1685,6 +1775,7 @@ async fn drain_terminal_events<S: FoundationSession>(
     client: &mut FoundationClient,
     mouse: &mut TerminalMouseCapture,
     session: &mut S,
+    renderer: &mut Renderer,
 ) -> io::Result<SessionStep> {
     let mut inputs = Vec::with_capacity(MAX_EVENTS_PER_TICK);
     let mut resized = false;
@@ -1714,7 +1805,7 @@ async fn drain_terminal_events<S: FoundationSession>(
         client.app.force_redraw();
     }
     effect.merge(client.app.on_idle());
-    refresh_terminal(terminal, client, mouse)?;
+    refresh_terminal(terminal, client, mouse, renderer)?;
     Ok(client
         .dispatch(effect, session)
         .await
@@ -1763,24 +1854,45 @@ fn prepare_reconnect(
     terminal: &mut DefaultTerminal,
     client: &mut FoundationClient,
     mouse: &mut TerminalMouseCapture,
+    renderer: &mut Renderer,
 ) -> io::Result<()> {
     if client.app.state().access != AccessState::ProtocolLockout {
         client.fail_connection();
     }
-    refresh_terminal(terminal, client, mouse)
+    refresh_terminal(terminal, client, mouse, renderer)
 }
 
 fn refresh_terminal(
     terminal: &mut DefaultTerminal,
     client: &mut FoundationClient,
     mouse: &mut TerminalMouseCapture,
+    renderer: &mut Renderer,
 ) -> io::Result<()> {
     let _ = persist_pending_preferences(&mut client.app.state);
     mouse.sync(client.app.state().access)?;
     let area: Rect = terminal.size()?.into();
     client.app.state.set_terminal_area(area);
-    if client.app.take_redraw() {
-        terminal.draw(|frame| crate::ui::render(frame, client.app.state()))?;
+    if let Some(plan) = client.app.take_render_plan() {
+        draw_with_one_recovery(terminal, &mut client.app.state, renderer, plan)?;
     }
     Ok(())
+}
+
+/// Draw once, then make one bounded full-frame recovery attempt.
+#[doc(hidden)]
+pub fn draw_with_one_recovery<B: Backend>(
+    terminal: &mut Terminal<B>,
+    state: &mut AppState,
+    renderer: &mut Renderer,
+    requested: RenderPlan,
+) -> Result<RenderReceipt, B::Error> {
+    match renderer.draw(terminal, state, requested) {
+        Ok(receipt) => Ok(receipt),
+        Err(_) => {
+            state.mark_dirty();
+            let recovery = state.take_render_plan().unwrap_or(RenderPlan::Full);
+            debug_assert!(matches!(recovery, RenderPlan::Full));
+            renderer.draw(terminal, state, recovery)
+        }
+    }
 }

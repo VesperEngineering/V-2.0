@@ -36,29 +36,29 @@ AGENTS
 
 MODELS & REGIME
 ┌CANDIDATES - PANEL 2/3────────────────────────────────────────────────────┐
-│  candidate:evaluating | FAMILY approved-family | STRATEGY ml_model |     │
-│2026-08-02 20:00:00 EDT                                                   │
-│STATUS EVALUATING | RETENTION POLICY UNAVAILABLE | EVIDENCE               │
-│evidence:evaluating                                                       │
+│  candidate:evaluating | FAMILY approved-family | STRATEGY ml_model       │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:evaluating                    │
+│STATUS EVALUATING | RETENTION POLICY UNAVAILABLE                          │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
 │                                                                          │
-│  candidate:failed | FAMILY approved-family | STRATEGY ml_model |         │
-│2026-08-02 20:00:00 EDT                                                   │
-│STATUS FAILED | RETENTION POLICY 30 DAYS | EVIDENCE evidence:failed       │
+│  candidate:failed | FAMILY approved-family | STRATEGY ml_model           │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:failed                        │
+│STATUS FAILED | RETENTION POLICY 30 DAYS                                  │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
 │                                                                          │
-│  candidate:passed | FAMILY approved-family | STRATEGY ml_model |         │
-│2026-08-02 20:00:00 EDT                                                   │
-│STATUS PASSED | RETENTION POLICY 90 DAYS | EVIDENCE evidence:passed       │
+│  candidate:passed | FAMILY approved-family | STRATEGY ml_model           │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:passed                        │
+│STATUS PASSED | RETENTION POLICY 90 DAYS                                  │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
 │                                                                          │
-│  candidate:active | FAMILY approved-family | STRATEGY ml_model |         │
-│2026-08-02 20:00:00 EDT                                                   │
-│STATUS ACTIVE | RETENTION POLICY PERMANENT | EVIDENCE evidence:active     │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
+│  candidate:active | FAMILY approved-family | STRATEGY ml_model           │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:active                        │
+│STATUS ACTIVE | RETENTION POLICY PERMANENT                                │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
 │                                                                          │
 │                                                                          │
 │                                                                          │

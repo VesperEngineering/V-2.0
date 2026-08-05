@@ -65,7 +65,10 @@ VALID_PAYLOADS = {
         "body": "Review concentration.",
         "visibility": "private",
     },
-    "alert.dismiss": {"alert_id": "alert:1"},
+    "alert.dismiss": {
+        "alert_id": "alert:1",
+        "created_at_utc": "2026-08-04T18:00:00Z",
+    },
     "layout.reset": {"screen": "impact"},
     "approval.approve": {"run_id": "run:1", "checkpoint_id": "checkpoint:1"},
     "approval.hold": {"run_id": "run:1", "checkpoint_id": "checkpoint:1"},
@@ -141,18 +144,19 @@ def request_data(command_type: str, payload: object | None = None) -> dict[str, 
 
 def test_catalog_has_exact_order_models_and_decisions() -> None:
     assert tuple(PAYLOAD_MODELS) == tuple(row[0] for row in CATALOG)
-    assert tuple(
-        (
-            spec.command_type,
-            spec.payload_model,
-            spec.reason_rule,
-            spec.confirmation_level,
+    assert (
+        tuple(
+            (
+                spec.command_type,
+                spec.payload_model,
+                spec.reason_rule,
+                spec.confirmation_level,
+            )
+            for spec in COMMAND_SPECS
         )
-        for spec in COMMAND_SPECS
-    ) == CATALOG
-    assert tuple(spec.capability_id for spec in COMMAND_SPECS) == tuple(
-        row[0] for row in CATALOG
+        == CATALOG
     )
+    assert tuple(spec.capability_id for spec in COMMAND_SPECS) == tuple(row[0] for row in CATALOG)
 
 
 @pytest.mark.parametrize("command_type", tuple(VALID_PAYLOADS))
@@ -160,6 +164,13 @@ def test_each_command_binds_only_its_exact_payload_model(command_type: str) -> N
     request = CommandRequest.model_validate(request_data(command_type))
     assert type(request.payload) is PAYLOAD_MODELS[command_type]
     assert "operator_id" not in type(request).model_fields
+
+
+def test_alert_dismiss_requires_the_reviewed_occurrence_timestamp() -> None:
+    payload = {"alert_id": "alert:1"}
+
+    with pytest.raises(ValidationError):
+        CommandRequest.model_validate(request_data("alert.dismiss", payload))
 
 
 @pytest.mark.parametrize("command_type", tuple(VALID_PAYLOADS))
@@ -334,6 +345,8 @@ def test_wire_catalog_adds_command_request_and_receipt_in_order() -> None:
         "snapshot",
         "search-request",
         "search-results",
+        "memory-content-request",
+        "memory-content-result",
         "chat-history-request",
         "chat-event",
         "chat-history-result",

@@ -28,6 +28,8 @@ STABLE_SOURCE_IDS = frozenset(
         "windows.system",
         "events.timeline",
         "platform.runtime",
+        "operations.attention",
+        "operations.notification-health",
     }
 )
 _FAST_SOURCE_ID = "windows.system"

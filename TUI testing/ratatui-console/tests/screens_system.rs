@@ -32,7 +32,8 @@ fn wide_views_render_contract_facts_with_words_not_color_only() {
         "[~] STALE",
         "[OK] RESOLVED",
         "metric:drawdown",
-        "Blocked actions + Circuit breaker: [?] UNAVAILABLE",
+        "CIRCUIT BREAKER: TRIPPED",
+        "BLOCKED action:rebalance",
     ] {
         assert!(risk.contains(expected), "missing {expected:?}\n{risk}");
     }
@@ -49,7 +50,7 @@ fn wide_views_render_contract_facts_with_words_not_color_only() {
         "Coverage S&P 500",
         "Consumers",
         "ml_model, momentum",
-        "Dependencies [?] UNAVAILABLE",
+        "Dependencies massive-db, exchange-calendar",
         "evidence:1",
     ] {
         assert!(data.contains(expected), "missing {expected:?}\n{data}");
@@ -68,7 +69,8 @@ fn wide_views_render_contract_facts_with_words_not_color_only() {
         "Older",
         "reviewed note.",
         "Memory archived?with review",
-        "Reasons/agent use: [?] UNAVAILABLE",
+        "AGENT MEMORY USE REPORTED",
+        "See USED BY on each memory row.",
     ] {
         assert!(memory.contains(expected), "missing {expected:?}\n{memory}");
     }
@@ -150,7 +152,9 @@ fn memory_selection_marks_the_typed_row_and_keeps_other_panels_at_the_top() {
             "status":"core",
             "summary":"Second core note.",
             "evidence_ids":[],
-            "updated_at_utc":"2026-07-16T12:34:56Z"
+            "updated_at_utc":"2026-07-16T12:34:56Z",
+            "used_by_agents":[],
+            "change_reason":null
         }))
         .expect("valid memory row"),
     );
@@ -230,6 +234,101 @@ fn system_account_mask_is_local_render_state_and_defaults_to_visible() {
         unavailable_masked.contains("Account: [?] UNAVAILABLE"),
         "{unavailable_masked}"
     );
+}
+
+#[test]
+fn deep_risk_data_memory_and_system_facts_are_visible() {
+    let snapshot = fixture();
+    let state = ScreenState::default();
+
+    let risk = render_text(180, 52, |frame| {
+        render_risk(frame, frame.area(), &snapshot.risk, &state)
+    });
+    for expected in [
+        "PROPOSAL Raise only after review.",
+        "REVIEW PENDING",
+        "EVIDENCE evidence:risk-limit",
+        "SYMBOLS NVDA, AAPL",
+        "NVDA 10.0% -> 12.0%",
+        "RISKS Concentration increases.",
+        "CONSEQUENCES NVDA order will be submitted.",
+        "BASIS aaaaaaaaaaaa",
+        "STALE REASON Market evidence expired.",
+        "BLOCKED action:rebalance",
+        "CIRCUIT BREAKER: TRIPPED",
+    ] {
+        assert!(risk.contains(expected), "missing {expected:?}\n{risk}");
+    }
+
+    let data = render_text(180, 38, |frame| {
+        render_data(frame, frame.area(), &snapshot.data, &state)
+    });
+    for expected in [
+        "Dependencies massive-db, exchange-calendar",
+        "SYMBOLS NVDA",
+        "AGENTS agent:qwen",
+        "MODELS model:active",
+        "ORDERS order:1",
+        "APPROVALS approval:stale",
+        "SOURCES source:massive",
+        "RAW LOG log:market [o open]",
+    ] {
+        assert!(data.contains(expected), "missing {expected:?}\n{data}");
+    }
+    assert!(
+        !data.contains("line one from bounded raw log"),
+        "raw log leaked outside o\n{data}"
+    );
+
+    let memory = render_text(180, 34, |frame| {
+        render_memory(frame, frame.area(), &snapshot.memory, &state)
+    });
+    for expected in [
+        "USED BY agent:qwen, agent:risk",
+        "CHANGE REASON Promoted after reviewed evidence.",
+        "USED BY NONE",
+        "CHANGE REASON Archived for a stronger V20 rule.",
+    ] {
+        assert!(memory.contains(expected), "missing {expected:?}\n{memory}");
+    }
+
+    let system = render_text(180, 54, |frame| {
+        render_system(frame, frame.area(), &snapshot.system, &state)
+    });
+    for expected in [
+        "QWEN: BUSY",
+        "qwen:64k",
+        "CURRENT AGENT agent:qwen",
+        "QUEUE 2",
+        "CONTEXT 62.5%",
+        "LAST INFERENCE 145.0ms",
+        "check:tests | PASS",
+        "BACKUP: HEALTHY",
+        "RECOVERY: BLOCKED",
+        "NOTIFICATIONS: DEGRADED",
+        "BROKER ACTIONS BLOCKED: YES",
+        "check:restore | FAIL",
+    ] {
+        assert!(system.contains(expected), "missing {expected:?}\n{system}");
+    }
+}
+
+#[test]
+fn qwen_status_remains_visible_without_service_rows() {
+    let mut snapshot = fixture();
+    snapshot.system.services.clear();
+    let text = render_text(120, 32, |frame| {
+        render_system(
+            frame,
+            frame.area(),
+            &snapshot.system,
+            &ScreenState::default(),
+        )
+    });
+
+    assert!(text.contains("QWEN: BUSY"), "{text}");
+    assert!(text.contains("qwen:64k"), "{text}");
+    assert!(text.contains("No services reported."), "{text}");
 }
 
 #[test]
@@ -343,6 +442,23 @@ fn narrow_panel_focus_uses_screen_state_and_hides_other_panels() {
     });
     assert!(at_shell_breakpoint.contains("EVIDENCE - PANEL 2/2"));
     assert!(!at_shell_breakpoint.contains("DATA SOURCES"));
+}
+
+#[test]
+fn narrow_memory_always_shows_the_agent_usage_source_state() {
+    let snapshot = fixture();
+
+    for panel in 0..3 {
+        let text = render_memory_narrow(&snapshot.memory, panel);
+        assert!(
+            text.contains("AGENT MEMORY USE REPORTED"),
+            "panel {panel}\n{text}"
+        );
+        assert!(
+            text.contains("See USED BY on each memory row."),
+            "panel {panel}\n{text}"
+        );
+    }
 }
 
 #[test]
@@ -584,34 +700,37 @@ fn fixture() -> ConsoleSnapshot {
     value["risk"] = json!({
         "freshness": "fresh", "as_of_utc": "2026-01-15T12:34:56Z", "source": "controller-risk", "error": null,
         "limits": [
-            {"limit_id":"limit:concentration","current_value":"0.10","proposed_value":"0.12","status":"pending"},
-            {"limit_id":"limit:drawdown","current_value":"0.08","proposed_value":null,"status":"violated"}
+            {"limit_id":"limit:concentration","current_value":"0.10","proposed_value":"0.12","status":"pending","proposal_reason":"Raise only after review.","review_state":"pending","evidence_ids":["evidence:risk-limit"]},
+            {"limit_id":"limit:drawdown","current_value":"0.08","proposed_value":null,"status":"violated","proposal_reason":null,"review_state":"not-required","evidence_ids":[]}
         ],
         "approvals": [
-            {"approval_id":"approval:stale","run_id":"run:stale","checkpoint_id":"checkpoint:stale","state":"stale","reason":"Approval\u{202e}reason","evidence_ids":["evidence:1"],"requested_at_utc":"2026-01-15T12:34:56Z"}
+            {"approval_id":"approval:stale","run_id":"run:stale","checkpoint_id":"checkpoint:stale","state":"stale","reason":"Approval\u{202e}reason","evidence_ids":["evidence:1"],"requested_at_utc":"2026-01-15T12:34:56Z","affected_symbols":["NVDA","AAPL"],"weight_changes":[{"symbol":"NVDA","current_weight":0.10,"proposed_weight":0.12}],"risks":["Concentration increases."],"expected_consequences":["NVDA order will be submitted."],"basis_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","stale_reason":"Market evidence expired."}
         ],
         "alerts": [
             {"alert_id":"alert:resolved","severity":"resolved","summary":"Mismatch repaired","created_at_utc":"2026-01-15T12:00:00Z","resolved_at_utc":"2026-01-15T12:34:56Z"}
         ],
         "metrics": [
             {"metric_id":"metric:drawdown","value":8.0,"unit":"percent","freshness":"stale","observed_at_utc":"2026-01-15T12:34:56Z","error":"Risk refresh delayed"}
-        ]
+        ],
+        "blocked_actions":[{"action_id":"action:rebalance","action":"Submit rebalance orders","reason":"Circuit breaker is tripped.","affected_symbols":["NVDA"],"created_at_utc":"2026-01-15T12:34:56Z"}],
+        "circuit_breaker":{"state":"tripped","reason":"Position read-back mismatch.","observed_at_utc":"2026-01-15T12:34:56Z"}
     });
     value["data"] = json!({
         "freshness":"stale","as_of_utc":"2026-07-15T12:34:56Z","source":"controller-data","error":"Refresh delayed\nretrying",
         "sources":[
-            {"source_id":"source:massive","freshness":"stale","as_of_utc":"2026-07-15T12:34:56Z","age_seconds":12.5,"coverage":"S&P 500","error":"Late sample","consumers":["ml_model","momentum"]},
-            {"source_id":"source:missing","freshness":"unavailable","as_of_utc":null,"age_seconds":null,"coverage":null,"error":"No reviewed adapter","consumers":[]}
+            {"source_id":"source:massive","freshness":"stale","as_of_utc":"2026-07-15T12:34:56Z","age_seconds":12.5,"coverage":"S&P 500","error":"Late sample","consumers":["ml_model","momentum"],"dependencies":["massive-db","exchange-calendar"]},
+            {"source_id":"source:missing","freshness":"unavailable","as_of_utc":null,"age_seconds":null,"coverage":null,"error":"No reviewed adapter","consumers":[],"dependencies":[]}
         ],
-        "evidence":[{"evidence_id":"evidence:1","evidence_type":"receipt","source":"controller","created_at_utc":"2026-07-15T12:34:56Z","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+        "evidence":[{"evidence_id":"evidence:1","evidence_type":"receipt","source":"controller","created_at_utc":"2026-07-15T12:34:56Z","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","symbols":["NVDA"],"agent_ids":["agent:qwen"],"model_ids":["model:active"],"order_ids":["order:1"],"approval_ids":["approval:stale"],"source_ids":["source:massive"],"raw_log_id":"log:market","raw_log_excerpt":["line one from bounded raw log","line two from bounded raw log"],"raw_log_truncated":true,"raw_log_next_cursor":"cursor:raw-next"}]
     });
     value["memory"] = json!({
         "freshness":"fresh","as_of_utc":"2026-07-15T12:34:56Z","source":"controller-memory","error":null,
+        "agent_usage_error":"No trusted memory-use source is configured.",
         "rows":[
-            {"memory_id":"memory:core","status":"core","summary":"Use controller\u{fff9}truth.","evidence_ids":["evidence:1"],"updated_at_utc":"2026-07-15T12:34:56Z"},
-            {"memory_id":"memory:archive","status":"archived","summary":"Older reviewed note.","evidence_ids":[],"updated_at_utc":"2026-01-15T12:34:56Z"}
+            {"memory_id":"memory:core","status":"core","summary":"Use controller\u{fff9}truth.","evidence_ids":["evidence:1"],"updated_at_utc":"2026-07-15T12:34:56Z","used_by_agents":["agent:qwen","agent:risk"],"change_reason":"Promoted after reviewed evidence."},
+            {"memory_id":"memory:archive","status":"archived","summary":"Older reviewed note.","evidence_ids":[],"updated_at_utc":"2026-01-15T12:34:56Z","used_by_agents":[],"change_reason":"Archived for a stronger V20 rule."}
         ],
-        "history":[{"event_id":"event:memory","occurred_at_utc":"2026-07-15T12:34:56Z","impact":true,"severity":"info","summary":"Memory archived\u{2066}with review","agent_id":null,"symbol":null,"model_id":null,"approval_id":null,"order_id":null,"evidence_ids":["evidence:1"]}]
+        "history":[{"event_id":"event:memory","occurred_at_utc":"2026-07-15T12:34:56Z","impact":true,"severity":"info","summary":"Memory archived\u{2066}with review","agent_id":null,"symbol":null,"model_id":null,"approval_id":null,"order_id":null,"work_id":null,"evidence_ids":["evidence:1"]}]
     });
     value["system"] = json!({
         "freshness":"fresh","as_of_utc":"2026-07-15T12:34:56Z","source":"controller-system","error":null,
@@ -624,8 +743,8 @@ fn fixture() -> ConsoleSnapshot {
             {"metric_id":"metric:gpu","value":42.0,"unit":"percent","freshness":"stale","observed_at_utc":"2026-07-15T12:34:56Z","error":"Sensor delayed"}
         ],
         "repositories":[
-            {"repository_id":"repository:v20","freshness":"fresh","as_of_utc":"2026-07-15T12:34:56Z","source":"git","error":null,"branch":"codex/vesper/ratatui-console","revision":"0123456789abcdef","clean":false,"worktrees":["C:/Users/bgonn/Desktop/v20","C:/tmp/worktree"],"unpushed_commit_count":2},
-            {"repository_id":"repository:missing","freshness":"unavailable","as_of_utc":null,"source":"git","error":"Repository unavailable","branch":null,"revision":null,"clean":null,"worktrees":[],"unpushed_commit_count":null}
+            {"repository_id":"repository:v20","freshness":"fresh","as_of_utc":"2026-07-15T12:34:56Z","source":"git","error":null,"branch":"codex/vesper/ratatui-console","revision":"0123456789abcdef","clean":false,"worktrees":["C:/Users/bgonn/Desktop/v20","C:/tmp/worktree"],"unpushed_commit_count":2,"checks":[{"check_id":"check:tests","state":"pass","reason":null,"observed_at_utc":"2026-07-15T12:34:56Z"}]},
+            {"repository_id":"repository:missing","freshness":"unavailable","as_of_utc":null,"source":"git","error":"Repository unavailable","branch":null,"revision":null,"clean":null,"worktrees":[],"unpushed_commit_count":null,"checks":[]}
         ],
         "live_readiness": {
             "broker":{"state":"ready","reason":"Reviewed broker connection."},
@@ -649,7 +768,13 @@ fn fixture() -> ConsoleSnapshot {
             "broker_positions_as_of_utc":"2026-07-15T12:34:56Z",
             "desired_portfolio_id":"portfolio:candidate",
             "orders":[{"symbol":"NVDA","side":"buy","quantity":"2.5","approval_required":true}]
-        }
+        },
+        "qwen":{"state":"busy","loaded_model":"qwen:64k","current_agent":"agent:qwen","queue_length":2,"context_percent":62.5,"last_inference_ms":145.0,"observed_at_utc":"2026-07-15T12:34:56Z","error":null},
+        "health":[
+            {"component":"backup","state":"healthy","reason":null,"observed_at_utc":"2026-07-15T12:34:56Z","checks":[{"check_id":"check:backup","state":"pass","reason":null}],"broker_actions_blocked":false},
+            {"component":"recovery","state":"blocked","reason":"Restore verification failed.","observed_at_utc":"2026-07-15T12:34:56Z","checks":[{"check_id":"check:restore","state":"fail","reason":"Restore checksum mismatch."}],"broker_actions_blocked":true},
+            {"component":"notifications","state":"degraded","reason":"Phone delivery is not configured.","observed_at_utc":"2026-07-15T12:34:56Z","checks":[{"check_id":"check:windows","state":"pass","reason":null}],"broker_actions_blocked":false}
+        ]
     });
     serde_json::from_value(value).expect("valid system screen fixture")
 }

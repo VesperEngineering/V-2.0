@@ -64,6 +64,8 @@ pub struct ScreenState {
     pub detail_open: bool,
     pub show_all_events: bool,
     pub narrow_panel: usize,
+    pub visible_columns: Vec<String>,
+    pub panel_sizes: Vec<u16>,
 }
 
 impl Default for ScreenState {
@@ -79,6 +81,8 @@ impl Default for ScreenState {
             detail_open: false,
             show_all_events: false,
             narrow_panel: 0,
+            visible_columns: Vec::new(),
+            panel_sizes: Vec::new(),
         }
     }
 }

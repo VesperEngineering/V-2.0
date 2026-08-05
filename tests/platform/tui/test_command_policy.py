@@ -31,7 +31,10 @@ VALID_PAYLOADS: Mapping[str, dict[str, object]] = {
         "body": "Note",
         "visibility": "private",
     },
-    "alert.dismiss": {"alert_id": "alert:1"},
+    "alert.dismiss": {
+        "alert_id": "alert:1",
+        "created_at_utc": "2026-08-04T18:00:00Z",
+    },
     "layout.reset": {"screen": None},
     "approval.approve": {"run_id": "run:1", "checkpoint_id": "checkpoint:1"},
     "approval.hold": {"run_id": "run:1", "checkpoint_id": "checkpoint:1"},

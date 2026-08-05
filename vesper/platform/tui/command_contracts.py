@@ -125,6 +125,7 @@ class NoteAddPayload(StrictModel):
 
 class AlertDismissPayload(StrictModel):
     alert_id: SafeId
+    created_at_utc: UtcDateTime
 
 
 class LayoutResetPayload(StrictModel):

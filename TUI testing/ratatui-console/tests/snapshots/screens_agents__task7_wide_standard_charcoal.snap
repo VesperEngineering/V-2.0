@@ -36,34 +36,34 @@ AGENTS
 
 MODELS & REGIME
 ┌> MODEL OPINIONS / FINAL──────────────────────┐┌CANDIDATES─────────────────────────────────────────────────────┐┌EVIDENCE & METRICS─────────────────┐
-│FINAL REGIME: UNAVAILABLE - controller truth  ││  candidate:evaluating | FAMILY approved-family | STRATEGY     ││METRICS                            │
-│not provided                                  ││ml_model | 2026-08-02 20:00:00 EDT                             ││  metric:cpu | 12.5000 percent |   │
-│OPINION CONSENSUS: UNCERTAIN                  ││STATUS EVALUATING | RETENTION POLICY UNAVAILABLE | EVIDENCE    ││FRESH | 2026-08-02 20:00:00 EDT |  │
-│                                              ││evidence:evaluating                                            ││ERROR NONE                         │
-│  model:macro | risk-on | 80.0%               ││                                                               ││                                   │
-│2026-08-02 20:00:00 EDT                       ││  candidate:failed | FAMILY approved-family | STRATEGY ml_model││EVIDENCE                           │
-│                                              ││| 2026-08-02 20:00:00 EDT                                      ││  evidence:evaluating |            │
-│  model:micro | risk-off | 60.0%              ││STATUS FAILED | RETENTION POLICY 30 DAYS | EVIDENCE            ││evaluation-receipt | SOURCE        │
-│2026-08-02 20:00:00 EDT                       ││evidence:failed                                                ││controller                         │
-│                                              ││                                                               ││2026-08-02 20:00:00 EDT | SHA256   │
-│                                              ││  candidate:passed | FAMILY approved-family | STRATEGY ml_model││aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
-│                                              ││| 2026-08-02 20:00:00 EDT                                      ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaa      │
-│                                              ││STATUS PASSED | RETENTION POLICY 90 DAYS | EVIDENCE            ││                                   │
-│                                              ││evidence:passed                                                ││  evidence:failed | gate-receipt | │
-│                                              ││                                                               ││SOURCE controller                  │
-│                                              ││  candidate:active | FAMILY approved-family | STRATEGY ml_model││2026-08-02 20:00:00 EDT | SHA256   │
-│                                              ││| 2026-08-02 20:00:00 EDT                                      ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
-│                                              ││STATUS ACTIVE | RETENTION POLICY PERMANENT | EVIDENCE          ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbb      │
-│                                              ││evidence:active                                                ││                                   │
+│FINAL REGIME: sideways | CONFIDENCE 73.0%     ││  candidate:evaluating | FAMILY approved-family | STRATEGY     ││GATES                              │
+│ACTIVE model:active                           ││ml_model                                                       ││gate:sharpe | PASS                 │
+│ROLLBACK model:rollback                       ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:evaluating         ││METRIC metric:sharpe >= 1.2000 |   │
+│FAMILY approved-family                        ││STATUS EVALUATING | RETENTION POLICY UNAVAILABLE               ││VALUE 1.2500 | BASELINE 1.1000     │
+│STRATEGY ml_model                             ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││WINDOW 2024-01-01 through          │
+│FEATURE SET features:v20                      ││dddddddddddd                                                   ││2026-06-30                         │
+│AUTOMATIC CHANGES: BLOCKED                    ││STATUS DETAIL Controller evaluation is current.                ││REASON Candidate cleared the       │
+│BLOCK REASON: Risk gate requires review.      ││                                                               ││approved threshold.                │
+│MODEL OPINIONS                                ││  candidate:failed | FAMILY approved-family | STRATEGY ml_model││EVIDENCE evidence:evaluating       │
+│  model:macro | risk-on | 80.0%               ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:failed             ││METRICS                            │
+│2026-08-02 20:00:00 EDT                       ││STATUS FAILED | RETENTION POLICY 30 DAYS                       ││  metric:cpu | 12.5000 percent |   │
+│                                              ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││FRESH | 2026-08-02 20:00:00 EDT |  │
+│  model:micro | risk-off | 60.0%              ││dddddddddddd                                                   ││ERROR NONE                         │
+│2026-08-02 20:00:00 EDT                       ││STATUS DETAIL Controller evaluation is current.                ││                                   │
+│                                              ││                                                               ││EVIDENCE                           │
+│                                              ││  candidate:passed | FAMILY approved-family | STRATEGY ml_model││  evidence:evaluating |            │
+│                                              ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:passed             ││evaluation-receipt | SOURCE        │
+│                                              ││STATUS PASSED | RETENTION POLICY 90 DAYS                       ││controller                         │
+│                                              ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││2026-08-02 20:00:00 EDT | SHA256   │
+│                                              ││dddddddddddd                                                   ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
+│                                              ││STATUS DETAIL Controller evaluation is current.                ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaa      │
 │                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
-│                                              ││                                                               ││                                   │
+│                                              ││  candidate:active | FAMILY approved-family | STRATEGY ml_model││  evidence:failed | gate-receipt | │
+│                                              ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:active             ││SOURCE controller                  │
+│                                              ││STATUS ACTIVE | RETENTION POLICY PERMANENT                     ││2026-08-02 20:00:00 EDT | SHA256   │
+│                                              ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
+│                                              ││dddddddddddd                                                   ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbb      │
+│                                              ││STATUS DETAIL Controller evaluation is current.                ││                                   │
 │                                              ││                                                               ││                                   │
 │                                              ││                                                               ││                                   │
 └──────────────────────────────────────────────┘└───────────────────────────────────────────────────────────────┘└───────────────────────────────────┘

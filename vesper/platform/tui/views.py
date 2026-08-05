@@ -89,6 +89,7 @@ DecimalString = Annotated[
 ]
 WireUInt = Annotated[int, Field(ge=0, le=2**64 - 1)]
 Priority = Annotated[int, Field(ge=0, le=100)]
+PercentFloat = Annotated[FiniteFloat, Field(ge=0, le=100)]
 
 
 class StrictModel(BaseModel):
@@ -193,6 +194,14 @@ class PortfolioRow(StrictModel):
     reconciliation: Literal["not-required", "pending", "matched", "mismatch", "unavailable"]
 
 
+class AgentActivityRow(StrictModel):
+    activity_id: SafeId
+    kind: Literal["stage", "tool", "file", "decision", "error", "result"]
+    summary: NonEmptyStr
+    occurred_at_utc: UtcDateTime
+    evidence_ids: tuple[SafeId, ...]
+
+
 class AgentCard(StrictModel):
     work_id: SafeId
     agent: NonEmptyStr
@@ -203,6 +212,13 @@ class AgentCard(StrictModel):
     elapsed_seconds: NonNegativeFiniteFloat | None
     model: str | None
     affected_areas: tuple[str, ...]
+    session_id: SafeId | None
+    plan_steps: tuple[NonEmptyStr, ...]
+    activity: tuple[AgentActivityRow, ...]
+    evidence_ids: tuple[SafeId, ...]
+    context_percent: PercentFloat | None
+    chat_agent_id: SafeId | None
+    detail_next_cursor: NonEmptyStr | None
 
 
 class TimelineRow(StrictModel):
@@ -217,6 +233,7 @@ class TimelineRow(StrictModel):
     approval_id: SafeId | None
     order_id: SafeId | None
     evidence_ids: tuple[SafeId, ...]
+    work_id: SafeId | None
 
 
 class FillRow(StrictModel):
@@ -232,7 +249,9 @@ class OrderRow(StrictModel):
     symbol: SafeId
     side: Literal["buy", "sell"]
     quantity: DecimalString
-    status: Literal["proposed", "approved", "submitted", "partial", "filled", "rejected", "cancelled"]
+    status: Literal[
+        "proposed", "approved", "submitted", "partial", "filled", "rejected", "cancelled"
+    ]
     submitted_at_utc: UtcDateTime | None
     broker_order_id: str | None
     fills: tuple[FillRow, ...]
@@ -255,6 +274,25 @@ class CandidateRow(StrictModel):
     status: Literal["training", "evaluating", "passed", "failed", "rejected", "active", "rollback"]
     evidence_ids: tuple[SafeId, ...]
     created_at_utc: UtcDateTime
+    feature_set_id: SafeId | None
+    data_identity: Sha256Hex | None
+    evaluation_contract: Sha256Hex | None
+    status_reason: NonEmptyStr | None
+    status_at_utc: UtcDateTime | None
+
+
+class ModelGateRow(StrictModel):
+    gate_id: SafeId
+    candidate_id: SafeId
+    metric_id: SafeId
+    candidate_value: FiniteFloat | None
+    baseline_value: FiniteFloat | None
+    comparison: Literal["gte", "lte", "gt", "lt", "eq"]
+    threshold: FiniteFloat
+    evaluation_window: NonEmptyStr
+    state: Literal["pass", "fail", "pending", "unavailable"]
+    reason: NonEmptyStr
+    evidence_ids: tuple[SafeId, ...]
 
 
 class RiskLimitRow(StrictModel):
@@ -262,6 +300,17 @@ class RiskLimitRow(StrictModel):
     current_value: DecimalString
     proposed_value: DecimalString | None
     status: Literal["within", "violated", "pending", "unavailable"]
+    proposal_reason: NonEmptyStr | None
+    review_state: Literal[
+        "not-required", "pending", "approved", "rejected", "unavailable"
+    ]
+    evidence_ids: tuple[SafeId, ...]
+
+
+class ApprovalWeightChange(StrictModel):
+    symbol: SafeId
+    current_weight: FiniteFloat
+    proposed_weight: FiniteFloat
 
 
 class ApprovalRow(StrictModel):
@@ -272,6 +321,38 @@ class ApprovalRow(StrictModel):
     reason: str | None
     evidence_ids: tuple[SafeId, ...]
     requested_at_utc: UtcDateTime
+    affected_symbols: tuple[SafeId, ...]
+    weight_changes: tuple[ApprovalWeightChange, ...]
+    risks: tuple[NonEmptyStr, ...]
+    expected_consequences: tuple[NonEmptyStr, ...]
+    basis_sha256: Sha256Hex | None
+    stale_reason: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def explain_stale_approval(self) -> Self:
+        if self.state == "stale" and self.stale_reason is None:
+            raise ValueError("stale approvals require a stale reason")
+        return self
+
+
+class BlockedActionRow(StrictModel):
+    action_id: SafeId
+    action: NonEmptyStr
+    reason: NonEmptyStr
+    affected_symbols: tuple[SafeId, ...]
+    created_at_utc: UtcDateTime
+
+
+class CircuitBreakerView(StrictModel):
+    state: Literal["armed", "tripped", "reset", "unavailable"]
+    reason: NonEmptyStr | None
+    observed_at_utc: UtcDateTime | None
+
+    @model_validator(mode="after")
+    def explain_unavailable_state(self) -> Self:
+        if self.state == "unavailable" and self.reason is None:
+            raise ValueError("unavailable circuit breaker state requires a reason")
+        return self
 
 
 class SourceRow(StrictModel):
@@ -282,6 +363,7 @@ class SourceRow(StrictModel):
     coverage: str | None
     error: str | None
     consumers: tuple[NonEmptyStr, ...]
+    dependencies: tuple[NonEmptyStr, ...]
 
     @model_validator(mode="after")
     def require_truthful_freshness(self) -> Self:
@@ -302,6 +384,24 @@ class EvidenceRow(StrictModel):
     source: NonEmptyStr
     created_at_utc: UtcDateTime
     sha256: Sha256Hex
+    symbols: tuple[SafeId, ...]
+    agent_ids: tuple[SafeId, ...]
+    model_ids: tuple[SafeId, ...]
+    order_ids: tuple[SafeId, ...]
+    approval_ids: tuple[SafeId, ...]
+    source_ids: tuple[SafeId, ...]
+    raw_log_id: SafeId | None
+    raw_log_excerpt: Annotated[tuple[NonEmptyStr, ...], Field(max_length=50)]
+    raw_log_truncated: bool
+    raw_log_next_cursor: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def require_raw_log_identity(self) -> Self:
+        if self.raw_log_id is None and (
+            self.raw_log_excerpt or self.raw_log_truncated or self.raw_log_next_cursor is not None
+        ):
+            raise ValueError("raw-log metadata requires a raw_log_id")
+        return self
 
 
 class MemoryRow(StrictModel):
@@ -310,6 +410,8 @@ class MemoryRow(StrictModel):
     summary: NonEmptyStr
     evidence_ids: tuple[SafeId, ...]
     updated_at_utc: UtcDateTime
+    used_by_agents: tuple[SafeId, ...]
+    change_reason: NonEmptyStr | None
 
 
 class ServiceRow(StrictModel):
@@ -317,6 +419,19 @@ class ServiceRow(StrictModel):
     state: Literal["running", "paused", "stopped", "failed", "unavailable"]
     health_reason: str | None
     observed_at_utc: UtcDateTime
+
+
+class RepositoryCheckRow(StrictModel):
+    check_id: SafeId
+    state: Literal["pass", "fail", "running", "unavailable"]
+    reason: NonEmptyStr | None
+    observed_at_utc: UtcDateTime | None
+
+    @model_validator(mode="after")
+    def explain_unsuccessful_state(self) -> Self:
+        if self.state in {"fail", "unavailable"} and self.reason is None:
+            raise ValueError("failed and unavailable repository checks require a reason")
+        return self
 
 
 class RepositoryRow(StrictModel):
@@ -330,6 +445,7 @@ class RepositoryRow(StrictModel):
     clean: bool | None
     worktrees: tuple[NonEmptyStr, ...]
     unpushed_commit_count: WireUInt | None
+    checks: tuple[RepositoryCheckRow, ...]
 
     @model_validator(mode="after")
     def require_truthful_freshness(self) -> Self:
@@ -409,6 +525,28 @@ class ModelsView(ScreenView):
     candidates: tuple[CandidateRow, ...]
     metrics: tuple[MetricRow, ...]
     evidence: tuple[EvidenceRow, ...]
+    active_model_id: SafeId | None
+    rollback_model_id: SafeId | None
+    approved_family: NonEmptyStr | None
+    approved_strategy: Literal["ml_model", "momentum"] | None
+    approved_feature_set_id: SafeId | None
+    final_regime: NonEmptyStr | None
+    final_regime_confidence: ConfidenceFloat | None
+    regime_state: Literal["decided", "uncertain", "unavailable"]
+    automatic_changes_blocked: bool
+    block_reason: NonEmptyStr | None
+    gates: tuple[ModelGateRow, ...]
+
+    @model_validator(mode="after")
+    def require_fail_closed_regime_state(self) -> Self:
+        if self.regime_state == "decided":
+            if self.final_regime is None or self.final_regime_confidence is None:
+                raise ValueError("decided regime state requires a regime and confidence")
+        elif not self.automatic_changes_blocked or self.block_reason is None:
+            raise ValueError(
+                "uncertain and unavailable regime states must block automatic changes with a reason"
+            )
+        return self
 
 
 class TimelineView(ScreenView):
@@ -421,6 +559,8 @@ class RiskView(ScreenView):
     approvals: tuple[ApprovalRow, ...]
     alerts: tuple[AlertRow, ...]
     metrics: tuple[MetricRow, ...]
+    blocked_actions: tuple[BlockedActionRow, ...]
+    circuit_breaker: CircuitBreakerView
 
 
 class DataView(ScreenView):
@@ -431,6 +571,7 @@ class DataView(ScreenView):
 class MemoryView(ScreenView):
     rows: tuple[MemoryRow, ...]
     history: tuple[TimelineRow, ...]
+    agent_usage_error: NonEmptyStr
 
 
 class ReadinessGate(StrictModel):
@@ -503,6 +644,53 @@ class TransitionPlanView(StrictModel):
         return self
 
 
+class QwenStatusView(StrictModel):
+    state: Literal["loading", "ready", "busy", "quiet", "stopped", "unavailable"]
+    loaded_model: NonEmptyStr | None
+    current_agent: SafeId | None
+    queue_length: WireUInt | None
+    context_percent: PercentFloat | None
+    last_inference_ms: NonNegativeFiniteFloat | None
+    observed_at_utc: UtcDateTime | None
+    error: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def require_truthful_state(self) -> Self:
+        if self.state == "unavailable":
+            if self.error is None:
+                raise ValueError("unavailable Qwen state requires an error")
+        elif self.observed_at_utc is None:
+            raise ValueError("available Qwen state requires an observation time")
+        return self
+
+
+class SystemHealthCheckRow(StrictModel):
+    check_id: SafeId
+    state: Literal["pass", "fail", "unavailable"]
+    reason: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def explain_unsuccessful_state(self) -> Self:
+        if self.state in {"fail", "unavailable"} and self.reason is None:
+            raise ValueError("failed and unavailable system checks require a reason")
+        return self
+
+
+class SystemHealthRow(StrictModel):
+    component: Literal["backup", "recovery", "notifications"]
+    state: Literal["healthy", "degraded", "blocked", "unavailable"]
+    reason: NonEmptyStr | None
+    observed_at_utc: UtcDateTime | None
+    checks: tuple[SystemHealthCheckRow, ...]
+    broker_actions_blocked: bool
+
+    @model_validator(mode="after")
+    def explain_unhealthy_state(self) -> Self:
+        if self.state in {"degraded", "blocked", "unavailable"} and self.reason is None:
+            raise ValueError("unhealthy system state requires a reason")
+        return self
+
+
 class SystemView(ScreenView):
     services: tuple[ServiceRow, ...]
     metrics: tuple[MetricRow, ...]
@@ -510,6 +698,16 @@ class SystemView(ScreenView):
     live_readiness: LiveReadinessView
     live_account: AccountSummaryView | None
     live_transition_plan: TransitionPlanView | None
+    qwen: QwenStatusView
+    health: tuple[SystemHealthRow, ...]
+
+    @model_validator(mode="after")
+    def require_all_health_components_once(self) -> Self:
+        components = tuple(row.component for row in self.health)
+        expected = {"backup", "recovery", "notifications"}
+        if len(components) != len(expected) or set(components) != expected:
+            raise ValueError("system health requires backup, recovery, and notifications once each")
+        return self
 
 
 EventTarget: TypeAlias = Literal[
@@ -590,6 +788,21 @@ class EventPresentation(StrictModel):
     system: ScreenMeta
     portfolio_rank_source: NonEmptyStr | None
     timeline_hidden_event_count: WireUInt
+    model_active_model_id: SafeId | None
+    model_rollback_model_id: SafeId | None
+    model_approved_family: NonEmptyStr | None
+    model_approved_strategy: Literal["ml_model", "momentum"] | None
+    model_approved_feature_set_id: SafeId | None
+    model_final_regime: NonEmptyStr | None
+    model_final_regime_confidence: ConfidenceFloat | None
+    model_regime_state: Literal["decided", "uncertain", "unavailable"]
+    model_automatic_changes_blocked: bool
+    model_block_reason: NonEmptyStr | None
+    model_gates: tuple[ModelGateRow, ...]
+    risk_blocked_actions: tuple[BlockedActionRow, ...]
+    risk_circuit_breaker: CircuitBreakerView
+    system_qwen: QwenStatusView
+    system_health: tuple[SystemHealthRow, ...]
 
     @model_validator(mode="after")
     def require_canonical_omissions(self) -> Self:
@@ -598,6 +811,17 @@ class EventPresentation(StrictModel):
             raise ValueError("event presentation omission targets must be unique")
         if targets != tuple(sorted(targets, key=_EVENT_TARGET_ORDER.__getitem__)):
             raise ValueError("event presentation omission targets must use canonical order")
+        if self.model_regime_state == "decided":
+            if self.model_final_regime is None or self.model_final_regime_confidence is None:
+                raise ValueError("decided model regime requires a regime and confidence")
+        elif not self.model_automatic_changes_blocked or self.model_block_reason is None:
+            raise ValueError(
+                "uncertain and unavailable model regimes must block automatic changes with a reason"
+            )
+        components = tuple(row.component for row in self.system_health)
+        expected = {"backup", "recovery", "notifications"}
+        if len(components) != len(expected) or set(components) != expected:
+            raise ValueError("system health requires backup, recovery, and notifications once each")
         return self
 
 

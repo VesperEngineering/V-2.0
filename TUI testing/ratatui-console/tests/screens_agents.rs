@@ -97,6 +97,7 @@ fn rich_snapshot_value() -> Value {
             "active",
             "Queued task accepted",
             Some("agent:queue"),
+            Some("work:queued-urgent"),
             &["evidence:queue"]
         ),
         event(
@@ -105,6 +106,7 @@ fn rich_snapshot_value() -> Value {
             "urgent",
             "Task failed validation",
             Some("agent:failed"),
+            Some("work:failed"),
             &["evidence:failed"]
         )
     ]);
@@ -138,16 +140,59 @@ fn rich_snapshot_value() -> Value {
             "evidence_type": "evaluation-receipt",
             "source": "controller",
             "created_at_utc": "2026-08-03T00:00:00Z",
-            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "symbols": ["NVDA"],
+            "agent_ids": ["v20-model"],
+            "model_ids": ["model:macro"],
+            "order_ids": [],
+            "approval_ids": [],
+            "source_ids": ["source:massive"],
+            "raw_log_id": "log:evaluating",
+            "raw_log_excerpt": ["gate evaluation started"],
+            "raw_log_truncated": true,
+            "raw_log_next_cursor": "cursor:evaluating"
         },
         {
             "evidence_id": "evidence:failed",
             "evidence_type": "gate-receipt",
             "source": "controller",
             "created_at_utc": "2026-08-03T00:00:00Z",
-            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "symbols": [],
+            "agent_ids": ["v20-risk"],
+            "model_ids": ["model:micro"],
+            "order_ids": [],
+            "approval_ids": ["approval:1"],
+            "source_ids": [],
+            "raw_log_id": null,
+            "raw_log_excerpt": [],
+            "raw_log_truncated": false,
+            "raw_log_next_cursor": null
         }
     ]);
+    value["models"]["active_model_id"] = json!("model:active");
+    value["models"]["rollback_model_id"] = json!("model:rollback");
+    value["models"]["approved_family"] = json!("approved-family");
+    value["models"]["approved_strategy"] = json!("ml_model");
+    value["models"]["approved_feature_set_id"] = json!("features:v20");
+    value["models"]["final_regime"] = json!("sideways");
+    value["models"]["final_regime_confidence"] = json!(0.73);
+    value["models"]["regime_state"] = json!("decided");
+    value["models"]["automatic_changes_blocked"] = json!(true);
+    value["models"]["block_reason"] = json!("Risk gate requires review.");
+    value["models"]["gates"] = json!([{
+        "gate_id": "gate:sharpe",
+        "candidate_id": "candidate:evaluating",
+        "metric_id": "metric:sharpe",
+        "candidate_value": 1.25,
+        "baseline_value": 1.10,
+        "comparison": "gte",
+        "threshold": 1.20,
+        "evaluation_window": "2024-01-01 through 2026-06-30",
+        "state": "pass",
+        "reason": "Candidate cleared the approved threshold.",
+        "evidence_ids": ["evidence:evaluating"]
+    }]);
     value["timeline"]["rows"] = json!([
         event(
             "event:impact",
@@ -155,6 +200,7 @@ fn rich_snapshot_value() -> Value {
             "urgent",
             "Portfolio impact detected",
             Some("agent:queue"),
+            Some("work:queued-normal"),
             &["evidence:impact"]
         ),
         event(
@@ -162,6 +208,7 @@ fn rich_snapshot_value() -> Value {
             false,
             "info",
             "Routine health sample",
+            None,
             None,
             &["evidence:routine"]
         )
@@ -178,6 +225,7 @@ fn agent(
     priority: u64,
     urgent: bool,
 ) -> Value {
+    let suffix = work_id.replace(':', "-");
     json!({
         "work_id": work_id,
         "agent": agent_id,
@@ -187,7 +235,21 @@ fn agent(
         "urgent": urgent,
         "elapsed_seconds": 65.0,
         "model": "qwen:64k",
-        "affected_areas": ["portfolio", "evidence"]
+        "affected_areas": ["portfolio", "evidence"],
+        "session_id": format!("session:{suffix}"),
+        "plan_steps": ["Inspect approved inputs", "Run deterministic checks"],
+        "activity": [
+            {"activity_id":format!("activity:{suffix}:stage"),"kind":"stage","summary":"Entered current stage","occurred_at_utc":"2026-08-03T00:00:00Z","evidence_ids":[]},
+            {"activity_id":format!("activity:{suffix}:tool"),"kind":"tool","summary":"Queried controller index","occurred_at_utc":"2026-08-03T00:00:01Z","evidence_ids":["evidence:agent"]},
+            {"activity_id":format!("activity:{suffix}:file"),"kind":"file","summary":"Read vesper/platform/tui/views.py","occurred_at_utc":"2026-08-03T00:00:02Z","evidence_ids":[]},
+            {"activity_id":format!("activity:{suffix}:decision"),"kind":"decision","summary":"Held the proposed change","occurred_at_utc":"2026-08-03T00:00:03Z","evidence_ids":[]},
+            {"activity_id":format!("activity:{suffix}:error"),"kind":"error","summary":"Stale evidence blocked validation","occurred_at_utc":"2026-08-03T00:00:04Z","evidence_ids":["evidence:agent"]},
+            {"activity_id":format!("activity:{suffix}:result"),"kind":"result","summary":"Produced a reviewed plan","occurred_at_utc":"2026-08-03T00:00:05Z","evidence_ids":["evidence:agent"]}
+        ],
+        "evidence_ids": ["evidence:agent"],
+        "context_percent": 62.5,
+        "chat_agent_id": "v20-product",
+        "detail_next_cursor": "cursor:next"
     })
 }
 
@@ -198,7 +260,12 @@ fn candidate(candidate_id: &str, status: &str, evidence_ids: &[&str]) -> Value {
         "strategy": "ml_model",
         "status": status,
         "evidence_ids": evidence_ids,
-        "created_at_utc": "2026-08-03T00:00:00Z"
+        "created_at_utc": "2026-08-03T00:00:00Z",
+        "feature_set_id": "features:v20",
+        "data_identity": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "evaluation_contract": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "status_reason": "Controller evaluation is current.",
+        "status_at_utc": "2026-08-03T00:05:00Z"
     })
 }
 
@@ -208,6 +275,7 @@ fn event(
     severity: &str,
     summary: &str,
     agent_id: Option<&str>,
+    work_id: Option<&str>,
     evidence_ids: &[&str],
 ) -> Value {
     json!({
@@ -221,6 +289,7 @@ fn event(
         "model_id": "model:macro",
         "approval_id": null,
         "order_id": "order:1",
+        "work_id": work_id,
         "evidence_ids": evidence_ids
     })
 }
@@ -350,7 +419,7 @@ fn task7_screens_follow_the_shell_narrow_breakpoint() {
 }
 
 #[test]
-fn agent_chat_and_plan_are_hidden_until_truthful_detail_is_opened() {
+fn agent_deep_detail_shows_auditable_work_history_and_chat_binding_only_when_opened() {
     let snapshot = snapshot(rich_snapshot_value());
     let closed = buffer_text(&render(140, 32, |frame| {
         render_agents(frame, frame.area(), &snapshot.agents, &state());
@@ -363,29 +432,44 @@ fn agent_chat_and_plan_are_hidden_until_truthful_detail_is_opened() {
         selected_id: Some("work:queued-urgent".to_owned()),
         ..state()
     };
-    let open = buffer_text(&render(120, 28, |frame| {
+    let open = buffer_text(&render(120, 48, |frame| {
         render_agents(frame, frame.area(), &snapshot.agents, &detail);
     }));
     for expected in [
         "work:queued-urgent",
         "ELAPSED: 1m 05s",
-        "WORK-LINKED HISTORY: UNAVAILABLE",
-        "no work_id field",
-        "PLAN UNAVAILABLE",
-        "CHAT UNAVAILABLE",
+        "SESSION: session:work-queued-urgent",
+        "CONTEXT: 62.5%",
+        "NEXT CURSOR: cursor:next",
+        "PLAN",
+        "1. Inspect approved inputs",
+        "ACTIVITY",
+        "[STAGE] Entered current stage",
+        "[TOOL] Queried controller index",
+        "[FILE] Read vesper/platform/tui/views.py",
+        "[DECISION] Held the proposed change",
+        "[ERROR] Stale evidence blocked validation",
+        "[RESULT] Produced a reviewed plan",
+        "EVIDENCE: evidence:agent",
+        "CHAT: press i to open approved separate chat v20-product",
+        "WORK-LINKED HISTORY",
+        "event:queue",
+        "Queued task accepted",
+        "evidence:queue",
     ] {
         assert!(open.contains(expected), "missing {expected}\n{open}");
     }
-    for leaked in ["event:queue", "evidence:queue", "Queued task accepted"] {
-        assert!(!open.contains(leaked), "leaked {leaked}\n{open}");
+    for unrelated in ["event:failed", "Task failed validation"] {
+        assert!(
+            !open.contains(unrelated),
+            "unrelated history leaked\n{open}"
+        );
     }
-    assert!(!open.contains("TASK HISTORY"));
-    assert!(!open.contains("tool call"));
     assert!(!open.contains("private reasoning"));
 }
 
 #[test]
-fn models_keep_final_regime_unavailable_and_label_opinion_consensus() {
+fn models_use_only_the_controller_final_regime_and_show_approved_model_policy() {
     let mut value = rich_snapshot_value();
     let disagree = snapshot(value.clone());
     let text = buffer_text(&render(140, 30, |frame| {
@@ -394,17 +478,48 @@ fn models_keep_final_regime_unavailable_and_label_opinion_consensus() {
     for expected in ["model:macro", "model:micro", "risk-on", "risk-off"] {
         assert!(text.contains(expected), "missing {expected}\n{text}");
     }
-    assert!(text.contains("FINAL REGIME: UNAVAILABLE"));
-    assert!(text.contains("OPINION CONSENSUS: UNCERTAIN"));
+    for expected in [
+        "FINAL REGIME: sideways",
+        "73.0%",
+        "ACTIVE model:active",
+        "ROLLBACK model:rollback",
+        "FAMILY approved-family",
+        "STRATEGY ml_model",
+        "FEATURE SET features:v20",
+        "AUTOMATIC CHANGES: BLOCKED",
+        "Risk gate requires review.",
+        "gate:sharpe",
+        "PASS",
+        "2024-01-01 through",
+        "2026-06-30",
+    ] {
+        assert!(text.contains(expected), "missing {expected}\n{text}");
+    }
+    assert!(
+        !text.contains("OPINION CONSENSUS"),
+        "must not infer votes\n{text}"
+    );
 
     value["models"]["opinions"][1]["regime"] = json!("risk-on");
-    let agree = snapshot(value);
+    let agree = snapshot(value.clone());
     let text = buffer_text(&render(140, 30, |frame| {
         render_models(frame, frame.area(), &agree.models, &state());
     }));
-    assert!(text.contains("FINAL REGIME: UNAVAILABLE"));
-    assert!(text.contains("OPINION CONSENSUS: risk-on"));
-    assert!(!text.contains("OPINION CONSENSUS: UNCERTAIN"));
+    assert!(text.contains("FINAL REGIME: sideways"));
+    assert!(!text.contains("FINAL REGIME: risk-on"));
+
+    value["models"]["final_regime"] = Value::Null;
+    value["models"]["final_regime_confidence"] = Value::Null;
+    value["models"]["regime_state"] = json!("unavailable");
+    let unavailable = snapshot(value);
+    let text = buffer_text(&render(140, 30, |frame| {
+        render_models(frame, frame.area(), &unavailable.models, &state());
+    }));
+    assert!(text.contains("FINAL REGIME: UNAVAILABLE"), "{text}");
+    assert!(
+        !text.contains("FINAL REGIME: risk-on"),
+        "must not infer votes\n{text}"
+    );
 }
 
 #[test]
@@ -466,6 +581,10 @@ fn candidate_rows_show_status_retention_and_real_evidence_ids() {
         "STATUS ROLLBACK | RETENTION POLICY PERMANENT",
         "evidence:training",
         "evidence:rollback",
+        "FEATURE features:v20",
+        "DATA cccccccccccc",
+        "EVALUATION dddddddddddd",
+        "Controller evaluation is current.",
     ] {
         assert!(text.contains(expected), "missing {expected}\n{text}");
     }

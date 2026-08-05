@@ -35,9 +35,6 @@ DEFAULT_APPROVAL_REASON = "Approved through V20 TUI."
 DISABLED_COMMAND_REASONS: Mapping[str, str] = MappingProxyType(
     {
         "alert.dismiss": "No controller-owned alert dismissal store is configured.",
-        "layout.reset": (
-            "Layout reset is local to this console and has no durable command adapter."
-        ),
         "approval.rework": "No reviewed approval rework queue adapter is configured.",
         "agent.send-message": "No controller-owned agent message port is configured.",
         "agent.pause": "No controller-owned pause port is configured.",

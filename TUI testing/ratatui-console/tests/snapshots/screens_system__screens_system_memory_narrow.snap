@@ -2,13 +2,13 @@
 source: tests/screens_system.rs
 expression: "|_, _| { render_memory_narrow(&fixture().memory, 2) } (78, 22)"
 ---
+┌AGENT USE STATUS────────────────────────────────────────────────────────────┐
+│[OK] AGENT MEMORY USE REPORTED                                              │
+│See USED BY on each memory row.                                             │
+└────────────────────────────────────────────────────────────────────────────┘
 ┌> CHANGE HISTORY - PANEL 3/3────────────────────────────────────────────────┐
-│Reasons/agent use: [?] UNAVAILABLE                                          │
 │[i] INFO 2026-07-15 08:34:56 EDT | Memory archived?with review | Evidence   │
 │evidence:1                                                                  │
-│                                                                            │
-│                                                                            │
-│                                                                            │
 │                                                                            │
 │                                                                            │
 │                                                                            │

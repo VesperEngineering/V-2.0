@@ -223,7 +223,9 @@ class NoteAddPayload(StrictModel):
     target_id: SafeId
     body: Annotated[str, StringConstraints(min_length=1, max_length=8000)]
     visibility: Literal["private", "shared"]
-class AlertDismissPayload(StrictModel): alert_id: SafeId
+class AlertDismissPayload(StrictModel):
+    alert_id: SafeId
+    created_at_utc: UtcDateTime
 class LayoutResetPayload(StrictModel): screen: ScreenName | None = None
 class ApprovalPayload(StrictModel): run_id: SafeId; checkpoint_id: SafeId
 class ApprovalReworkPayload(ApprovalPayload): evidence_ids: tuple[SafeId, ...]
@@ -672,11 +674,24 @@ Expected: FAIL because command routing is absent.
 - `alert.dismiss`, `note.add`, and `layout.reset`: call only their TUI-owned
   stores/services.
 
+`alert.dismiss` carries the alert ID and reviewed `created_at_utc`. Admission
+must compare both fields with the current controller alert before writing a
+command or binding. A resolved/reopened alert with the same ID is a new
+occurrence and requires a new review. Binding, dismissal, recovery, and receipt
+must keep the original pair exact. Use a completion time no earlier than the
+worker claim or bound alert timestamp so a clock rollback cannot create an
+invalid durable ledger. Admission and capability state allow dismissal only
+for a resolved alert. Projection suppression also applies only to that exact
+resolved occurrence; urgent alerts always remain visible.
+
 Every enabled port receives `command_id` as its downstream idempotency key.
 Approve/reject recovery reads the checkpoint decision; enqueue recovery reads
 the deterministic work ID; TUI-store handlers commit effect and terminal receipt
 in one SQLite transaction. If a future external adapter returns `unknown`, mark
 the receipt `failed` with `manual-intervention-required` and never reissue it.
+At console startup, expired TUI-owned commands recover even when platform
+runtime truth is unavailable. External commands remain untouched until runtime
+truth is fresh.
 
 Add `MessageRoutingPort.route(text, screen, selected_entity) -> AgentRouteView`.
 Routes use only exact existing `AgentRole` values: Portfolio to

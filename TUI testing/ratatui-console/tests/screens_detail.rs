@@ -309,3 +309,130 @@ fn direct_detail_uses_the_typed_target_when_safe_ids_collide() {
     assert!(text.contains("APPROVAL DETAIL"), "{text}");
     assert!(!text.contains("RISK LIMIT DETAIL"), "{text}");
 }
+
+#[test]
+fn direct_detail_exposes_deep_audit_fields_and_bounded_raw_logs() {
+    let mut value = snapshot_value();
+    value["risk"]["limits"][0]["proposed_value"] = json!("0.12");
+    value["risk"]["limits"][0]["proposal_reason"] = json!("Reviewed concentration change.");
+    value["risk"]["limits"][0]["review_state"] = json!("pending");
+    value["risk"]["limits"][0]["evidence_ids"] = json!(["evidence:1"]);
+    value["data"]["evidence"][0]["raw_log_id"] = json!("log:data");
+    value["data"]["evidence"][0]["raw_log_excerpt"] = Value::Array(
+        (0..10)
+            .map(|index| json!(format!("bounded raw line {index}")))
+            .collect(),
+    );
+    value["data"]["evidence"][0]["raw_log_truncated"] = json!(true);
+    value["data"]["evidence"][0]["raw_log_next_cursor"] = json!("cursor:raw-next");
+    let snapshot = snapshot(value);
+
+    let agent = buffer_text(&render(&snapshot, Screen::Orders, "work:1"));
+    for expected in [
+        "SESSION ID: session:1",
+        "CONTEXT: 25.0%",
+        "PLAN STEPS (2)",
+        "1. Inspect evidence",
+        "ACTIVITY (1)",
+        "[STAGE] Review started",
+        "EVIDENCE: evidence:1",
+        "CHAT AGENT: portfolio-research",
+        "WORK-LINKED HISTORY (1)",
+        "event:1 | AAPL review started",
+    ] {
+        assert!(agent.contains(expected), "missing {expected:?}\n{agent}");
+    }
+
+    let candidate = buffer_text(&render(&snapshot, Screen::ModelsRegime, "candidate:1"));
+    for expected in [
+        "FEATURE SET: features:v1",
+        "DATA IDENTITY: aaaaaaaaaaaa",
+        "EVALUATION CONTRACT: bbbbbbbbbbbb",
+        "STATUS REASON: Evaluation is running.",
+        "STATUS AT: 2026-08-02 20:00:00 EDT",
+    ] {
+        assert!(
+            candidate.contains(expected),
+            "missing {expected:?}\n{candidate}"
+        );
+    }
+
+    let limit = buffer_text(&render(
+        &snapshot,
+        Screen::RiskApprovals,
+        "limit:concentration",
+    ));
+    for expected in [
+        "PROPOSAL REASON: Reviewed concentration change.",
+        "REVIEW: PENDING",
+        "EVIDENCE: evidence:1",
+    ] {
+        assert!(limit.contains(expected), "missing {expected:?}\n{limit}");
+    }
+
+    let approval = buffer_text(&render(&snapshot, Screen::RiskApprovals, "approval:1"));
+    for expected in [
+        "AFFECTED SYMBOLS: AAPL",
+        "AAPL: 10.0% -> 11.0%",
+        "RISKS: Concentration increases.",
+        "EXPECTED CONSEQUENCES: AAPL allocation rises.",
+        "BASIS SHA256: cccccccccccc",
+        "STALE REASON: NONE",
+    ] {
+        assert!(
+            approval.contains(expected),
+            "missing {expected:?}\n{approval}"
+        );
+    }
+
+    let source = buffer_text(&render(&snapshot, Screen::DataEvidence, "source:massive"));
+    assert!(
+        source.contains("DEPENDENCIES: split adjustments"),
+        "{source}"
+    );
+
+    let evidence = buffer_text(&render(&snapshot, Screen::DataEvidence, "evidence:1"));
+    for expected in [
+        "SYMBOLS: AAPL",
+        "AGENTS: portfolio-research",
+        "MODELS: model:active",
+        "ORDERS: order:1",
+        "APPROVALS: approval:1",
+        "SOURCES: source:massive",
+        "RAW LOG ID: log:data",
+        "RAW LOG EXCERPT (10)",
+        "bounded raw line 0",
+        "RAW LOG LINES OMITTED: 2",
+        "TRUNCATED: YES",
+        "NEXT CURSOR: cursor:raw-next",
+    ] {
+        assert!(
+            evidence.contains(expected),
+            "missing {expected:?}\n{evidence}"
+        );
+    }
+    assert!(
+        !evidence.contains("bounded raw line 8"),
+        "unbounded raw log\n{evidence}"
+    );
+
+    let memory = buffer_text(&render(&snapshot, Screen::Memory, "memory:1"));
+    for expected in [
+        "USED BY AGENTS: portfolio-research",
+        "CHANGE REASON: Retained controller authority rule.",
+    ] {
+        assert!(memory.contains(expected), "missing {expected:?}\n{memory}");
+    }
+
+    let repository = buffer_text(&render(&snapshot, Screen::System, "repository:v20"));
+    for expected in [
+        "REPOSITORY CHECKS (1)",
+        "check:tests | PASS",
+        "2026-08-02 20:00:00 EDT",
+    ] {
+        assert!(
+            repository.contains(expected),
+            "missing {expected:?}\n{repository}"
+        );
+    }
+}

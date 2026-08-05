@@ -136,19 +136,19 @@ THEME Charcoal | MODE Standard
 ┌RISK LIMITS──────────────────────────────────────────────────────┐┌> APPROVALS────────────────────────────────────────┐
 │[OK] WITHIN limit:concentration | Current 0.10 | Proposed        ││> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT │
 │UNAVAILABLE                                                      ││| Review required | Evidence evidence:1            │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
+│PROPOSAL UNAVAILABLE | REVIEW NOT REQUIRED                       ││SYMBOLS AAPL                                       │
+│EVIDENCE NONE                                                    ││AAPL 10.0% -> 11.0%                                │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌ALERTS───────────────────────────────────────────────────────────┐┌RISK METRICS───────────────────────────────────────┐
-│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││Blocked actions + Circuit breaker: [?] UNAVAILABLE │
-│20:00:00 EDT | Open                                              ││(RiskView gap)                                     │
-│                                                                 ││[OK] FRESH metric:cpu | 12.50 percent | 2026-08-02 │
+│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││CIRCUIT BREAKER: ARMED | 2026-08-02 20:00:00 EDT   │
+│20:00:00 EDT | Open                                              ││REASON UNAVAILABLE                                 │
+│                                                                 ││BLOCKED ACTIONS                                    │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
-│ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
-│Receipt cmd:PID:TICKS:COUNT REJECTED - Control state changed. | Timeline: cmd:PID:TICKS:COUNT │
-│                                                                                                                      │
+│ [x] Hold                  [x] Reject                [x] Rework                [x] Dismiss Alert                      │
+│ [x] Reset Layout          [ ] Lock TUI                                                                               │
+│Receipt cmd:PID:TICKS:COUNT REJECTED - Control state changed. | Timeline: cmd:PID:TICKS:COUNT│
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -173,19 +173,19 @@ THEME Charcoal | MODE Standard
 ┌RISK LIMITS──────────────────────────────────────────────────────┐┌> APPROVALS────────────────────────────────────────┐
 │[OK] WITHIN limit:concentration | Current 0.10 | Proposed        ││> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT │
 │UNAVAILABLE                                                      ││| Review required | Evidence evidence:1            │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
+│PROPOSAL UNAVAILABLE | REVIEW NOT REQUIRED                       ││SYMBOLS AAPL                                       │
+│EVIDENCE NONE                                                    ││AAPL 10.0% -> 11.0%                                │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌ALERTS───────────────────────────────────────────────────────────┐┌RISK METRICS───────────────────────────────────────┐
-│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││Blocked actions + Circuit breaker: [?] UNAVAILABLE │
-│20:00:00 EDT | Open                                              ││(RiskView gap)                                     │
-│                                                                 ││[OK] FRESH metric:cpu | 12.50 percent | 2026-08-02 │
+│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││CIRCUIT BREAKER: ARMED | 2026-08-02 20:00:00 EDT   │
+│20:00:00 EDT | Open                                              ││REASON UNAVAILABLE                                 │
+│                                                                 ││BLOCKED ACTIONS                                    │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
-│ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
-│Receipt cmd:PID:TICKS:COUNT RUNNING - Command is running. | Timeline: cmd:PID:TICKS:COUNT     │
-│                                                                                                                      │
+│ [x] Hold                  [x] Reject                [x] Rework                [x] Dismiss Alert                      │
+│ [x] Reset Layout          [ ] Lock TUI                                                                               │
+│Receipt cmd:PID:TICKS:COUNT RUNNING - Command is running. | Timeline: cmd:PID:TICKS:COUNT│
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -210,19 +210,19 @@ THEME Charcoal | MODE Standard
 ┌RISK LIMITS──────────────────────────────────────────────────────┐┌> APPROVALS────────────────────────────────────────┐
 │[OK] WITHIN limit:concentration | Current 0.10 | Proposed        ││> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT │
 │UNAVAILABLE                                                      ││| Review required | Evidence evidence:1            │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
+│PROPOSAL UNAVAILABLE | REVIEW NOT REQUIRED                       ││SYMBOLS AAPL                                       │
+│EVIDENCE NONE                                                    ││AAPL 10.0% -> 11.0%                                │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌ALERTS───────────────────────────────────────────────────────────┐┌RISK METRICS───────────────────────────────────────┐
-│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││Blocked actions + Circuit breaker: [?] UNAVAILABLE │
-│20:00:00 EDT | Open                                              ││(RiskView gap)                                     │
-│                                                                 ││[OK] FRESH metric:cpu | 12.50 percent | 2026-08-02 │
+│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││CIRCUIT BREAKER: ARMED | 2026-08-02 20:00:00 EDT   │
+│20:00:00 EDT | Open                                              ││REASON UNAVAILABLE                                 │
+│                                                                 ││BLOCKED ACTIONS                                    │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
-│ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
+│ [x] Hold                  [x] Reject                [x] Rework                [x] Dismiss Alert                      │
+│ [x] Reset Layout          [ ] Lock TUI                                                                               │
 │Receipt cmd:PID:TICKS:COUNT COMPLETED - Approval was recorded. | Timeline: cmd:PID:TICKS:COUNT│
-│                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -247,19 +247,19 @@ THEME Charcoal | MODE Standard
 ┌RISK LIMITS──────────────────────────────────────────────────────┐┌> APPROVALS────────────────────────────────────────┐
 │[OK] WITHIN limit:concentration | Current 0.10 | Proposed        ││> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT │
 │UNAVAILABLE                                                      ││| Review required | Evidence evidence:1            │
-│                                                                 ││                                                   │
-│                                                                 ││                                                   │
+│PROPOSAL UNAVAILABLE | REVIEW NOT REQUIRED                       ││SYMBOLS AAPL                                       │
+│EVIDENCE NONE                                                    ││AAPL 10.0% -> 11.0%                                │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌ALERTS───────────────────────────────────────────────────────────┐┌RISK METRICS───────────────────────────────────────┐
-│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││Blocked actions + Circuit breaker: [?] UNAVAILABLE │
-│20:00:00 EDT | Open                                              ││(RiskView gap)                                     │
-│                                                                 ││[OK] FRESH metric:cpu | 12.50 percent | 2026-08-02 │
+│[~] WAITING alert:1 | Approval waiting | Created 2026-08-02      ││CIRCUIT BREAKER: ARMED | 2026-08-02 20:00:00 EDT   │
+│20:00:00 EDT | Open                                              ││REASON UNAVAILABLE                                 │
+│                                                                 ││BLOCKED ACTIONS                                    │
 └─────────────────────────────────────────────────────────────────┘└───────────────────────────────────────────────────┘
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Add Note              [x] Pause Trading         [x] Emergency Stop        [ ] Approve                            │
-│ [x] Hold                  [x] Reject                [x] Rework                [ ] Lock TUI                           │
-│Receipt cmd:PID:TICKS:COUNT FAILED - Command failed safely. | Timeline: cmd:PID:TICKS:COUNT   │
-│                                                                                                                      │
+│ [x] Hold                  [x] Reject                [x] Rework                [x] Dismiss Alert                      │
+│ [x] Reset Layout          [ ] Lock TUI                                                                               │
+│Receipt cmd:PID:TICKS:COUNT FAILED - Command failed safely. | Timeline: cmd:PID:TICKS:COUNT│
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -294,7 +294,7 @@ THEME Charcoal | MODE Standard
 └────────────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────┘
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────┐
 │ [x] Dismiss Alert         [x] Reset Layout          [ ] Take Control          [ ] Lock TUI                           │
-│                                                                                                                      │
+│ [ ] Grow Primary Panel    [ ] Shrink Primary Panel  [ ] Toggle Table Columns                                         │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

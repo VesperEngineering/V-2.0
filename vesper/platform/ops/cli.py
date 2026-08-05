@@ -11,6 +11,8 @@ from threading import Event
 from typing import Literal, Protocol
 
 from vesper.platform.ops.activation import OperationsActivation, OperationsActivationStore
+from vesper.platform.ops.alerts import AtomicAlertRecordStore, OperationsAlertRouter
+from vesper.platform.ops.notification_health import AtomicNotificationFailureHealthSink
 from vesper.platform.ops.policy import OperationsPolicy, OperationsState, ResourceState
 from vesper.platform.ops.supervisor import (
     AtomicDaemonStateStore,
@@ -18,6 +20,11 @@ from vesper.platform.ops.supervisor import (
     validate_state_root,
 )
 from vesper.platform.tui.pipe_security import current_logon_sid
+from vesper.platform.tui.notifications import (
+    UnavailableNotificationPort,
+    WindowsNotificationPort,
+)
+from vesper.platform.tui.session_presence import CurrentLogonSessionProbe
 from vesper.platform.tui.views import SafeId, StrictModel
 
 
@@ -86,6 +93,9 @@ class _NoAuthority:
 
 
 class _IdleStateReader:
+    def __init__(self, incident_id: str | None = None) -> None:
+        self._incident_id = incident_id
+
     def read(self) -> OperationsState:
         return OperationsState(
             resources=ResourceState(
@@ -95,7 +105,9 @@ class _IdleStateReader:
                 disk_free_gb=0,
                 recent_errors=0,
                 qwen_lease_active=False,
-            )
+            ),
+            has_incident=self._incident_id is not None,
+            incident_id=self._incident_id,
         )
 
 
@@ -106,12 +118,32 @@ class _NoEffectExecutor:
 
 def _default_supervisor(config: DaemonLaunchConfig) -> OperationsSupervisor:
     activation_store = OperationsActivationStore(OperationsActivation(), _NoAuthority())
+    notification_health = AtomicNotificationFailureHealthSink(config.state_root)
+    alert_store = AtomicAlertRecordStore(config.state_root)
+    setup_incident = None
+    try:
+        notification_port = WindowsNotificationPort(
+            CurrentLogonSessionProbe(),
+            health=notification_health,
+        )
+    except Exception:
+        try:
+            notification_health.record_notification_failure(
+                "alert:notification-setup",
+                "notification-setup-failed",
+            )
+        except Exception:
+            pass
+        notification_port = UnavailableNotificationPort(health=notification_health)
+        setup_incident = "notification-setup-unavailable"
+    alert_router = OperationsAlertRouter(notification_port, alert_store)
     return OperationsSupervisor(
         OperationsPolicy(activation_store),
-        _IdleStateReader(),
+        _IdleStateReader(setup_incident),
         _NoEffectExecutor(),
         AtomicDaemonStateStore(config.state_root),
         run_id=config.start_nonce,
+        state_observer=alert_router,
     )
 
 

@@ -1,16 +1,17 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{HighlightSpacing, Paragraph, Table, TableState, Wrap};
 
 use crate::contract::{AssetType, MetricRow, PortfolioView, ReturnComponent, ReturnComponentRow};
 use crate::detail::{DetailOverlay, detail_area};
+use crate::layout::{is_narrow_width, portfolio_panels, portfolio_visible_columns};
 use crate::screens::{
     PerformancePeriod, ScreenState, base_style, content_area_with_stale_notice, palette, panel,
     table_row_height, unavailable_message,
 };
 use crate::widgets::sanitize_line;
-use crate::widgets::weights::{weight_header, weight_row};
+use crate::widgets::weights::{weight_constraints, weight_header_for, weight_row_for};
 
 pub fn render_portfolio(
     frame: &mut Frame<'_>,
@@ -21,24 +22,18 @@ pub fn render_portfolio(
     let area =
         content_area_with_stale_notice(frame, area, view.freshness, view.error.as_deref(), state);
     let palette = palette(state);
-    let sections = if area.width < 100 {
-        Layout::vertical([
-            Constraint::Percentage(52),
-            Constraint::Percentage(26),
-            Constraint::Percentage(22),
-        ])
-        .split(area)
-    } else {
-        Layout::vertical([
-            Constraint::Percentage(58),
-            Constraint::Percentage(22),
-            Constraint::Percentage(20),
-        ])
-        .split(area)
-    };
-    render_weights(frame, sections[0], view, state);
-    render_returns(frame, sections[1], view, state);
-    render_metrics(frame, sections[2], view, state);
+    if is_narrow_width(area.width) {
+        match state.narrow_panel % 3 {
+            0 => render_weights(frame, area, view, state, " - PANEL 1/3"),
+            1 => render_returns(frame, area, view, state, " - PANEL 2/3"),
+            _ => render_metrics(frame, area, view, state, " - PANEL 3/3"),
+        }
+        return;
+    }
+    let sections = portfolio_panels(area, &state.panel_sizes);
+    render_weights(frame, sections[0], view, state, "");
+    render_returns(frame, sections[1], view, state, "");
+    render_metrics(frame, sections[2], view, state, "");
 
     if unavailable_message(view.freshness, view.error.as_deref()).is_none()
         && state.detail_open
@@ -118,7 +113,13 @@ fn portfolio_detail_lines(view: &PortfolioView, symbol: &str) -> Vec<String> {
     lines
 }
 
-fn render_weights(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state: &ScreenState) {
+fn render_weights(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &PortfolioView,
+    state: &ScreenState,
+    panel_suffix: &str,
+) {
     let palette = palette(state);
     let rank = view
         .rank_source
@@ -131,7 +132,10 @@ fn render_weights(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
             Paragraph::new(message)
                 .style(base_style(palette))
                 .wrap(Wrap { trim: true })
-                .block(panel(format!("PORTFOLIO WEIGHTS | {rank}"), palette)),
+                .block(panel(
+                    format!("PORTFOLIO WEIGHTS | {rank}{panel_suffix}"),
+                    palette,
+                )),
             area,
         );
         return;
@@ -140,19 +144,23 @@ fn render_weights(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
         frame.render_widget(
             Paragraph::new("No holdings reported.")
                 .style(base_style(palette))
-                .block(panel(format!("PORTFOLIO WEIGHTS | {rank}"), palette)),
+                .block(panel(
+                    format!("PORTFOLIO WEIGHTS | {rank}{panel_suffix}"),
+                    palette,
+                )),
             area,
         );
         return;
     }
     let row_height = table_row_height(state);
+    let columns = portfolio_visible_columns(&state.visible_columns);
     let height = usize::from(area.height.saturating_sub(3) / row_height);
     let rows = view
         .rows
         .iter()
         .skip(state.scroll_offset)
         .take(height)
-        .map(|row| weight_row(row, palette).height(row_height));
+        .map(|row| weight_row_for(row, palette, &columns).height(row_height));
     let selected = state.selected_id.as_deref().and_then(|selected| {
         view.rows
             .iter()
@@ -163,26 +171,27 @@ fn render_weights(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
     let mut table_state = TableState::default();
     table_state.select(selected);
     frame.render_stateful_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Percentage(28),
-                Constraint::Percentage(24),
-                Constraint::Percentage(24),
-                Constraint::Percentage(24),
-            ],
-        )
-        .highlight_symbol("> ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .header(weight_header(palette).height(row_height))
-        .style(base_style(palette))
-        .block(panel(format!("PORTFOLIO WEIGHTS | {rank}"), palette)),
+        Table::new(rows, weight_constraints(&columns))
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always)
+            .header(weight_header_for(palette, &columns).height(row_height))
+            .style(base_style(palette))
+            .block(panel(
+                format!("PORTFOLIO WEIGHTS | {rank}{panel_suffix}"),
+                palette,
+            )),
         area,
         &mut table_state,
     );
 }
 
-fn render_returns(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state: &ScreenState) {
+fn render_returns(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &PortfolioView,
+    state: &ScreenState,
+    panel_suffix: &str,
+) {
     let palette = palette(state);
     let (label, rows) = match state.performance_period {
         PerformancePeriod::Today => ("TODAY", &view.returns_today),
@@ -199,7 +208,10 @@ fn render_returns(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
     frame.render_widget(
         Paragraph::new(lines)
             .style(base_style(palette))
-            .block(panel(format!("PERFORMANCE | {label}"), palette)),
+            .block(panel(
+                format!("PERFORMANCE | {label}{panel_suffix}"),
+                palette,
+            )),
         area,
     );
 }
@@ -215,7 +227,13 @@ fn return_line(row: &ReturnComponentRow) -> Line<'static> {
     Line::from(format!("{label}: {}", row.value.as_str()))
 }
 
-fn render_metrics(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state: &ScreenState) {
+fn render_metrics(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &PortfolioView,
+    state: &ScreenState,
+    panel_suffix: &str,
+) {
     let palette = palette(state);
     let lines = if let Some(message) = unavailable_message(view.freshness, view.error.as_deref()) {
         vec![Line::from(message)]
@@ -227,7 +245,10 @@ fn render_metrics(frame: &mut Frame<'_>, area: Rect, view: &PortfolioView, state
     frame.render_widget(
         Paragraph::new(lines)
             .style(base_style(palette))
-            .block(panel("PORTFOLIO METRICS - EQUAL WEIGHT", palette)),
+            .block(panel(
+                format!("PORTFOLIO METRICS - EQUAL WEIGHT{panel_suffix}"),
+                palette,
+            )),
         area,
     );
 }

@@ -44,6 +44,7 @@ NOW = datetime(2026, 8, 4, 14, 0, tzinfo=timezone.utc)
 CONTROL_HASH = "7c222fb2927d828af22f592134e8932480637c0d1a3a6c9f5d6f0f975f6e3f43"
 HANDLED = {
     "note.add",
+    "layout.reset",
     "approval.approve",
     "approval.hold",
     "approval.reject",
@@ -56,7 +57,10 @@ PAYLOADS: dict[str, dict[str, object]] = {
         "body": "Review concentration.",
         "visibility": "private",
     },
-    "alert.dismiss": {"alert_id": "alert:1"},
+    "alert.dismiss": {
+        "alert_id": "alert:1",
+        "created_at_utc": "2026-08-04T18:00:00Z",
+    },
     "layout.reset": {"screen": None},
     "approval.approve": {"run_id": "run:1", "checkpoint_id": "checkpoint:1"},
     "approval.hold": {"run_id": "run:1", "checkpoint_id": "checkpoint:1"},
@@ -425,6 +429,24 @@ def test_hold_is_atomic_and_retains_pending_approval_as_tui_decision(tmp_path) -
     registry.close()
 
 
+def test_layout_reset_is_a_local_receipt_with_zero_platform_effects(tmp_path) -> None:
+    port = PortSpy()
+    registry = _registry(tmp_path / "registry.db", port, MutableClock())
+    request = _request("layout.reset")
+
+    receipt = registry.execute(_context(request), request)
+
+    assert receipt.status is ReceiptStatus.COMPLETED
+    assert receipt.code == "completed"
+    assert receipt.safe_message == "Layout reset approved."
+    assert receipt.result is None
+    assert "layout.reset" in registry.enabled_command_types
+    assert port.calls == []
+    assert port.recovery_calls == []
+    assert registry.execute(_context(request), request) == receipt
+    registry.close()
+
+
 @pytest.mark.parametrize(
     ("command_type", "expected_method", "resume_required"),
     (
@@ -454,7 +476,7 @@ def test_external_handlers_call_exactly_one_port_and_preserve_result(
     registry.close()
 
 
-def test_other_26_commands_are_safe_durable_rejections_with_zero_port_calls(
+def test_other_25_commands_are_safe_durable_rejections_with_zero_port_calls(
     tmp_path,
 ) -> None:
     assert set(DISABLED_COMMAND_REASONS) == {
@@ -480,7 +502,7 @@ def test_other_26_commands_are_safe_durable_rejections_with_zero_port_calls(
         rows = connection.execute(
             "SELECT handler_key, accepted_request_json, result_json FROM commands"
         ).fetchall()
-    assert len(rows) == 26
+    assert len(rows) == 25
     assert all(tuple(row) == (None, None, None) for row in rows)
     registry.close()
 

@@ -1,21 +1,22 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::text::Line;
-use ratatui::widgets::{HighlightSpacing, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Cell, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap};
 
 use crate::contract::{AgentStage, ImpactView};
+use crate::layout::{impact_panels, impact_visible_columns, is_narrow_width};
 use crate::screens::{
     ScreenState, base_style, clean, content_area_with_stale_notice, palette, panel,
     table_row_height, unavailable_message,
 };
 use crate::widgets::sanitize_line;
 use crate::widgets::timeline::timeline_line;
-use crate::widgets::weights::{weight_header, weight_row};
+use crate::widgets::weights::{weight_constraints, weight_header_for, weight_row_for};
 
 pub fn render_impact(frame: &mut Frame<'_>, area: Rect, view: &ImpactView, state: &ScreenState) {
     let area =
         content_area_with_stale_notice(frame, area, view.freshness, view.error.as_deref(), state);
-    if area.width < 100 {
+    if is_narrow_width(area.width) {
         match state.narrow_panel % 3 {
             0 => render_holdings(frame, area, view, state, "HOLDINGS - PANEL 1/3"),
             1 => render_events(frame, area, view, state, "IMPACT FEED - PANEL 2/3"),
@@ -24,13 +25,10 @@ pub fn render_impact(frame: &mut Frame<'_>, area: Rect, view: &ImpactView, state
         return;
     }
 
-    let columns =
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).split(area);
-    let right = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(columns[1]);
-    render_holdings(frame, columns[0], view, state, "HOLDINGS");
-    render_events(frame, right[0], view, state, "IMPACT FEED");
-    render_agents(frame, right[1], view, state, "AGENT WORK");
+    let panels = impact_panels(area, &state.panel_sizes);
+    render_holdings(frame, panels[0], view, state, "HOLDINGS");
+    render_events(frame, panels[1], view, state, "IMPACT FEED");
+    render_agents(frame, panels[2], view, state, "AGENT WORK");
 }
 
 fn render_holdings(
@@ -72,12 +70,18 @@ fn render_holdings(
         area.height.saturating_sub(3) / row_height
     };
     let height = usize::from(table_rows);
+    let visible = impact_visible_columns(&state.visible_columns);
+    let columns = visible
+        .iter()
+        .copied()
+        .filter(|column| matches!(*column, "symbol" | "current" | "proposed" | "approved"))
+        .collect::<Vec<_>>();
     let rows = view
         .holdings
         .iter()
         .skip(state.scroll_offset)
         .take(height)
-        .map(|row| weight_row(row, palette).height(row_height));
+        .map(|row| weight_row_for(row, palette, &columns).height(row_height));
     let selected = state.selected_id.as_deref().and_then(|selected| {
         view.holdings
             .iter()
@@ -87,21 +91,13 @@ fn render_holdings(
     });
     let mut table_state = TableState::default();
     table_state.select(selected);
-    let mut table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(28),
-            Constraint::Percentage(24),
-            Constraint::Percentage(24),
-            Constraint::Percentage(24),
-        ],
-    )
-    .highlight_symbol("> ")
-    .highlight_spacing(HighlightSpacing::Always)
-    .style(base_style(palette))
-    .block(panel(title, palette));
+    let mut table = Table::new(rows, weight_constraints(&columns))
+        .highlight_symbol("> ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .style(base_style(palette))
+        .block(panel(title, palette));
     if !omit_header {
-        table = table.header(weight_header(palette).height(row_height));
+        table = table.header(weight_header_for(palette, &columns).height(row_height));
     }
     frame.render_stateful_widget(table, area, &mut table_state);
 }
@@ -166,30 +162,54 @@ fn render_agents(
         return;
     }
     let row_height = table_row_height(state);
+    let visible = impact_visible_columns(&state.visible_columns);
+    let columns = visible
+        .iter()
+        .copied()
+        .filter(|column| matches!(*column, "agent" | "task" | "stage" | "priority"))
+        .collect::<Vec<_>>();
+    let widths = columns
+        .iter()
+        .map(|column| match *column {
+            "agent" => 25_u32,
+            "task" => 45_u32,
+            "stage" => 20_u32,
+            "priority" => 10_u32,
+            _ => 0,
+        })
+        .collect::<Vec<_>>();
+    let total = widths.iter().sum::<u32>().max(1);
     let rows = view.agents.iter().map(|agent| {
-        Row::new([
-            format!(
+        Row::new(columns.iter().map(|column| match *column {
+            "agent" => Cell::from(format!(
                 "{} {}",
                 if agent.urgent { "[!]" } else { "[ ]" },
                 sanitize_line(agent.agent.as_str())
-            ),
-            clean(&agent.title),
-            stage(agent.stage).to_owned(),
-            agent.priority.get().to_string(),
-        ])
+            )),
+            "task" => Cell::from(clean(&agent.title)),
+            "stage" => Cell::from(stage(agent.stage).to_owned()),
+            "priority" => Cell::from(agent.priority.get().to_string()),
+            _ => Cell::default(),
+        }))
         .height(row_height)
     });
     frame.render_widget(
         Table::new(
             rows,
-            [
-                Constraint::Percentage(25),
-                Constraint::Percentage(45),
-                Constraint::Percentage(20),
-                Constraint::Percentage(10),
-            ],
+            widths
+                .into_iter()
+                .map(|width| Constraint::Ratio(width, total)),
         )
-        .header(Row::new(["Agent", "Task", "Stage", "P"]).height(row_height))
+        .header(
+            Row::new(columns.iter().map(|column| match *column {
+                "agent" => "Agent",
+                "task" => "Task",
+                "stage" => "Stage",
+                "priority" => "P",
+                _ => "",
+            }))
+            .height(row_height),
+        )
         .style(base_style(palette))
         .block(panel(title, palette)),
         area,

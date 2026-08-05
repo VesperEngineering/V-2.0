@@ -9,24 +9,31 @@ from pydantic import model_validator
 
 from vesper.platform.tui.views import (
     AgentCard,
+    AlertView,
     ApprovalRow,
+    BlockedActionRow,
     CandidateRow,
+    CircuitBreakerView,
+    ConfidenceFloat,
     DecimalString,
     EvidenceRow,
     FiniteFloat,
     Freshness,
     MemoryRow,
     MetricRow,
+    ModelGateRow,
     ModelOpinionRow,
     NonEmptyStr,
     NonNegativeFiniteFloat,
     OrderRow,
     PortfolioRow,
     RepositoryRow,
+    QwenStatusView,
     SafeId,
     ServiceRow,
     SourceRow,
     StrictModel,
+    SystemHealthRow,
     TimelineRow,
     UtcDateTime,
     WireUInt,
@@ -34,6 +41,7 @@ from vesper.platform.tui.views import (
 
 
 T = TypeVar("T")
+MEMORY_AGENT_USAGE_UNAVAILABLE = "No trusted memory-use source is configured."
 
 
 class SourceSample(StrictModel, Generic[T]):
@@ -85,6 +93,10 @@ class PlatformRuntimeFacts(StrictModel):
     active_work: tuple[AgentCard, ...]
 
 
+class AttentionFacts(StrictModel):
+    alerts: tuple[AlertView, ...]
+
+
 class PortfolioFacts(StrictModel):
     rows: tuple[PortfolioRow, ...]
     rank_source: NonEmptyStr | None
@@ -99,7 +111,28 @@ class ModelFacts(StrictModel):
     configured_model_id: SafeId | None
     opinions: tuple[ModelOpinionRow, ...]
     candidates: tuple[CandidateRow, ...]
+    metrics: tuple[MetricRow, ...]
     evidence: tuple[EvidenceRow, ...]
+    rollback_model_id: SafeId | None
+    approved_family: NonEmptyStr | None
+    approved_feature_set_id: SafeId | None
+    final_regime: NonEmptyStr | None
+    final_regime_confidence: ConfidenceFloat | None
+    regime_state: Literal["decided", "uncertain", "unavailable"]
+    automatic_changes_blocked: bool
+    block_reason: NonEmptyStr | None
+    gates: tuple[ModelGateRow, ...]
+
+    @model_validator(mode="after")
+    def require_fail_closed_regime_state(self) -> ModelFacts:
+        if self.regime_state == "decided":
+            if self.final_regime is None or self.final_regime_confidence is None:
+                raise ValueError("decided regime state requires a regime and confidence")
+        elif not self.automatic_changes_blocked or self.block_reason is None:
+            raise ValueError(
+                "uncertain and unavailable regime states must block automatic changes with a reason"
+            )
+        return self
 
 
 class LegacyPositionFact(StrictModel):
@@ -117,6 +150,20 @@ class RiskFacts(StrictModel):
     breaker_tripped: bool
     positions: tuple[LegacyPositionFact, ...]
     broker_reconciled: Literal[False] = False
+    blocked_actions: tuple[BlockedActionRow, ...] | None
+    blocked_actions_error: NonEmptyStr | None
+    circuit_breaker: CircuitBreakerView | None
+    circuit_breaker_error: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def explain_deep_risk_components(self) -> RiskFacts:
+        for label, value, error in (
+            ("blocked_actions", self.blocked_actions, self.blocked_actions_error),
+            ("circuit_breaker", self.circuit_breaker, self.circuit_breaker_error),
+        ):
+            if (value is None) == (error is None):
+                raise ValueError(f"{label} must be present or have one unavailable reason")
+        return self
 
 
 class DataFacts(StrictModel):
@@ -126,6 +173,8 @@ class DataFacts(StrictModel):
 
 class MemoryFacts(StrictModel):
     rows: tuple[MemoryRow, ...]
+    history: tuple[TimelineRow, ...]
+    agent_usage_error: NonEmptyStr
 
 
 class TimelineFacts(StrictModel):
@@ -148,6 +197,10 @@ class SystemFacts(StrictModel):
     metrics_error: NonEmptyStr | None
     repositories: tuple[RepositoryRow, ...] | None
     repositories_error: NonEmptyStr | None
+    qwen: QwenStatusView | None
+    qwen_error: NonEmptyStr | None
+    health: tuple[SystemHealthRow, ...] | None
+    health_error: NonEmptyStr | None
 
     @model_validator(mode="after")
     def explain_each_component(self) -> SystemFacts:
@@ -155,6 +208,8 @@ class SystemFacts(StrictModel):
             ("services", self.services, self.services_error),
             ("metrics", self.metrics, self.metrics_error),
             ("repositories", self.repositories, self.repositories_error),
+            ("qwen", self.qwen, self.qwen_error),
+            ("health", self.health, self.health_error),
         ):
             if (value is None) == (error is None):
                 raise ValueError(f"{label} must be present or have one unavailable reason")
@@ -210,6 +265,11 @@ class ModelReadPort(Protocol):
 @runtime_checkable
 class RiskReadPort(Protocol):
     def read(self) -> SourceSample[RiskFacts]: ...
+
+
+@runtime_checkable
+class AttentionReadPort(Protocol):
+    def read(self) -> SourceSample[AttentionFacts]: ...
 
 
 @runtime_checkable

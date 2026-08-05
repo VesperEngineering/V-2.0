@@ -7,10 +7,13 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::contract::{AgentCard, AgentStage, AgentsView, Freshness};
+use crate::contract::{
+    AgentActivityKind, AgentCard, AgentStage, AgentsView, Freshness, TimelineRow,
+};
 use crate::layout::DisplayMode;
 use crate::screens::ScreenState;
 use crate::theme::Palette;
+use crate::ui::format_eastern_time;
 
 const MAIN_STAGES: [(AgentStage, &str); 4] = [
     (AgentStage::Queued, "QUEUED"),
@@ -235,7 +238,7 @@ fn detail_content(view: &AgentsView, state: &ScreenState) -> Vec<Line<'static>> 
     if let Some(message) = unavailable_message(view.freshness, view.error.as_deref()) {
         vec![Line::from(message)]
     } else if let Some(card) = selected_card(view, state) {
-        detail_lines(card)
+        detail_lines(card, &view.history)
     } else {
         vec![Line::from(
             "TASK DETAIL UNAVAILABLE - No selected task was reported.",
@@ -250,7 +253,7 @@ fn selected_card<'a>(view: &'a AgentsView, state: &ScreenState) -> Option<&'a Ag
         .find(|card| card.work_id.as_str() == selected)
 }
 
-fn detail_lines(card: &AgentCard) -> Vec<Line<'static>> {
+fn detail_lines(card: &AgentCard, history: &[TimelineRow]) -> Vec<Line<'static>> {
     let model = card
         .model
         .as_deref()
@@ -267,7 +270,18 @@ fn detail_lines(card: &AgentCard) -> Vec<Line<'static>> {
     let elapsed = card
         .elapsed_seconds
         .map_or_else(|| "UNAVAILABLE".to_owned(), format_elapsed);
-    let lines = vec![
+    let session = card.session_id.as_ref().map_or_else(
+        || "UNAVAILABLE".to_owned(),
+        |value| safe_text(value.as_str()),
+    );
+    let context = card
+        .context_percent
+        .map_or_else(|| "UNAVAILABLE".to_owned(), |value| format!("{value:.1}%"));
+    let cursor = card
+        .detail_next_cursor
+        .as_ref()
+        .map_or_else(|| "NONE".to_owned(), |value| safe_text(value.as_str()));
+    let mut lines = vec![
         Line::from(format!("TASK ID: {}", safe_text(card.work_id.as_str()))),
         Line::from(format!("AGENT: {}", safe_text(card.agent.as_str()))),
         Line::from(format!("TITLE: {}", safe_text(card.title.as_str()))),
@@ -275,12 +289,87 @@ fn detail_lines(card: &AgentCard) -> Vec<Line<'static>> {
         Line::from(format!("ELAPSED: {elapsed}")),
         Line::from(format!("MODEL: {model}")),
         Line::from(format!("AFFECTED: {affected}")),
-        Line::from("PLAN UNAVAILABLE - AgentsView has no plan payload."),
-        Line::from("CHAT UNAVAILABLE - AgentsView has no chat payload."),
-        Line::default(),
-        Line::from("WORK-LINKED HISTORY: UNAVAILABLE - AgentsView history has no work_id field."),
+        Line::from(format!("SESSION: {session}")),
+        Line::from(format!("CONTEXT: {context}")),
+        Line::from(format!("NEXT CURSOR: {cursor}")),
     ];
+    lines.push(Line::from("PLAN"));
+    if card.plan_steps.is_empty() {
+        lines.push(Line::from("[?] UNAVAILABLE - No plan steps reported."));
+    } else {
+        lines.extend(card.plan_steps.iter().enumerate().map(|(index, step)| {
+            Line::from(format!("{}. {}", index + 1, safe_text(step.as_str())))
+        }));
+    }
+    lines.push(Line::from("ACTIVITY"));
+    if card.activity.is_empty() {
+        lines.push(Line::from("[?] UNAVAILABLE - No activity reported."));
+    } else {
+        lines.extend(card.activity.iter().map(|activity| {
+            Line::from(format!(
+                "[{}] {} | {} | EVIDENCE {}",
+                activity_kind_label(activity.kind),
+                safe_text(activity.summary.as_str()),
+                format_eastern_time(&activity.occurred_at_utc),
+                evidence_list(&activity.evidence_ids)
+            ))
+        }));
+    }
+    lines.push(Line::from(format!(
+        "EVIDENCE: {}",
+        evidence_list(&card.evidence_ids)
+    )));
+    lines.push(Line::from(card.chat_agent_id.as_ref().map_or_else(
+        || "CHAT: [?] UNAVAILABLE - No approved chat binding.".to_owned(),
+        |agent_id| {
+            format!(
+                "CHAT: press i to open approved separate chat {}",
+                safe_text(agent_id.as_str())
+            )
+        },
+    )));
+    lines.push(Line::default());
+    lines.push(Line::from("WORK-LINKED HISTORY"));
+    let linked = history
+        .iter()
+        .filter(|row| row.work_id.as_ref() == Some(&card.work_id))
+        .collect::<Vec<_>>();
+    if linked.is_empty() {
+        lines.push(Line::from("[?] UNAVAILABLE - No linked history reported."));
+    } else {
+        lines.extend(linked.into_iter().map(|row| {
+            Line::from(format!(
+                "{} | {} | {} | EVIDENCE {}",
+                safe_text(row.event_id.as_str()),
+                format_eastern_time(&row.occurred_at_utc),
+                safe_text(row.summary.as_str()),
+                evidence_list(&row.evidence_ids)
+            ))
+        }));
+    }
     lines
+}
+
+fn activity_kind_label(kind: AgentActivityKind) -> &'static str {
+    match kind {
+        AgentActivityKind::Stage => "STAGE",
+        AgentActivityKind::Tool => "TOOL",
+        AgentActivityKind::File => "FILE",
+        AgentActivityKind::Decision => "DECISION",
+        AgentActivityKind::Error => "ERROR",
+        AgentActivityKind::Result => "RESULT",
+    }
+}
+
+fn evidence_list(ids: &[crate::contract::SafeId]) -> String {
+    if ids.is_empty() {
+        "NONE REPORTED".to_owned()
+    } else {
+        ids.iter()
+            .map(|value| safe_text(value.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn render_stale_notice(

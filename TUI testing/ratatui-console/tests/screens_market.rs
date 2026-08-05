@@ -7,7 +7,10 @@ use serde_json::{Value, json};
 use vesper_ratatui_console::ConsoleSnapshot;
 use vesper_ratatui_console::contract::AssetType;
 use vesper_ratatui_console::input::InputEvent;
-use vesper_ratatui_console::layout::DisplayMode;
+use vesper_ratatui_console::layout::{
+    DisplayMode, IMPACT_DEFAULT_PANELS, PORTFOLIO_DEFAULT_PANELS, impact_panel_sizes,
+    impact_panels, portfolio_panel_sizes, portfolio_panels, resize_primary_panel,
+};
 use vesper_ratatui_console::screens::impact::render_impact;
 use vesper_ratatui_console::screens::orders::render_orders;
 use vesper_ratatui_console::screens::portfolio::render_portfolio;
@@ -97,13 +100,20 @@ fn impact_uses_portfolio_dominant_wide_layout_and_narrow_panel_focus() {
         narrow_panel: 1,
         ..state()
     };
-    let narrow = render(72, 24, |frame| {
+    let narrow = render(119, 24, |frame| {
         render_impact(frame, frame.area(), &snapshot.impact, &narrow_state);
     });
     let narrow = buffer_text(&narrow);
     assert!(narrow.contains("IMPACT FEED"));
     assert!(narrow.contains("PANEL 2/3"));
     assert!(!narrow.contains("AGENT WORK"));
+
+    let boundary = buffer_text(&render(120, 24, |frame| {
+        render_impact(frame, frame.area(), &snapshot.impact, &narrow_state);
+    }));
+    for title in ["HOLDINGS", "IMPACT FEED", "AGENT WORK"] {
+        assert!(boundary.contains(title), "missing {title}\n{boundary}");
+    }
 
     let large = ScreenState {
         display_mode: DisplayMode::LargeText,
@@ -116,6 +126,170 @@ fn impact_uses_portfolio_dominant_wide_layout_and_narrow_panel_focus() {
         tiny.contains("AAPL"),
         "tiny Large Text must keep real data\n{tiny}"
     );
+}
+
+#[test]
+fn portfolio_narrow_uses_one_focused_panel_at_the_shared_boundary() {
+    let snapshot = snapshot(snapshot_value());
+    let expected = [
+        (0, "PORTFOLIO WEIGHTS", "PERFORMANCE", "PORTFOLIO METRICS"),
+        (1, "PERFORMANCE", "PORTFOLIO WEIGHTS", "PORTFOLIO METRICS"),
+        (2, "PORTFOLIO METRICS", "PORTFOLIO WEIGHTS", "PERFORMANCE"),
+    ];
+    for (panel, visible, hidden_a, hidden_b) in expected {
+        let focused = buffer_text(&render(119, 24, |frame| {
+            render_portfolio(
+                frame,
+                frame.area(),
+                &snapshot.portfolio,
+                &ScreenState {
+                    narrow_panel: panel,
+                    ..state()
+                },
+            );
+        }));
+        assert!(focused.contains(visible), "missing {visible}\n{focused}");
+        assert!(
+            !focused.contains(hidden_a),
+            "unexpected {hidden_a}\n{focused}"
+        );
+        assert!(
+            !focused.contains(hidden_b),
+            "unexpected {hidden_b}\n{focused}"
+        );
+        assert!(
+            focused.contains(&format!("PANEL {}/3", panel + 1)),
+            "missing focused-panel marker\n{focused}"
+        );
+    }
+
+    let boundary = buffer_text(&render(120, 24, |frame| {
+        render_portfolio(frame, frame.area(), &snapshot.portfolio, &state());
+    }));
+    for title in ["PORTFOLIO WEIGHTS", "PERFORMANCE", "PORTFOLIO METRICS"] {
+        assert!(boundary.contains(title), "missing {title}\n{boundary}");
+    }
+}
+
+#[test]
+fn compact_market_columns_hide_both_headers_and_row_cells() {
+    let mut value = snapshot_value();
+    value["impact"]["holdings"][0]["proposed_weight"] = json!(0.1234);
+    value["portfolio"]["rows"][0]["proposed_weight"] = json!(0.1234);
+    let snapshot = snapshot(value);
+    let impact_state = ScreenState {
+        visible_columns: vec![
+            "symbol".to_owned(),
+            "current".to_owned(),
+            "agent".to_owned(),
+            "task".to_owned(),
+        ],
+        ..state()
+    };
+    let impact = buffer_text(&render(140, 36, |frame| {
+        render_impact(frame, frame.area(), &snapshot.impact, &impact_state);
+    }));
+    for visible in [
+        "Symbol",
+        "Current",
+        "Agent",
+        "Task",
+        "portfolio-res",
+        "Review AAPL",
+    ] {
+        assert!(impact.contains(visible), "missing {visible}\n{impact}");
+    }
+    for hidden in ["Proposed", "Approved", "Stage", "RUNNING", "12.34%"] {
+        assert!(!impact.contains(hidden), "unexpected {hidden}\n{impact}");
+    }
+
+    let portfolio_state = ScreenState {
+        visible_columns: vec!["symbol".to_owned(), "current".to_owned()],
+        ..state()
+    };
+    let portfolio = buffer_text(&render(140, 36, |frame| {
+        render_portfolio(frame, frame.area(), &snapshot.portfolio, &portfolio_state);
+    }));
+    assert!(portfolio.contains("Symbol"));
+    assert!(portfolio.contains("Current"));
+    for hidden in ["Proposed", "Approved", "12.34%"] {
+        assert!(
+            !portfolio.contains(hidden),
+            "unexpected {hidden}\n{portfolio}"
+        );
+    }
+}
+
+#[test]
+fn panel_preferences_move_wide_boundaries_but_leave_narrow_impact_unchanged() {
+    let area = ratatui::layout::Rect::new(0, 0, 140, 36);
+    let default = impact_panels(area, &[]);
+    let grown = impact_panels(area, &[70, 30]);
+    assert!(grown[0].width > default[0].width);
+    assert_eq!(grown[1].x, grown[0].right());
+
+    let portfolio_default = portfolio_panels(area, &[]);
+    let portfolio_grown = portfolio_panels(area, &[63, 22, 15]);
+    assert!(portfolio_grown[0].height > portfolio_default[0].height);
+    assert_eq!(portfolio_grown[1].y, portfolio_grown[0].bottom());
+
+    let snapshot = snapshot(snapshot_value());
+    let narrow_default = render(72, 24, |frame| {
+        render_impact(frame, frame.area(), &snapshot.impact, &state());
+    });
+    let narrow_custom = render(72, 24, |frame| {
+        render_impact(
+            frame,
+            frame.area(),
+            &snapshot.impact,
+            &ScreenState {
+                panel_sizes: vec![85, 15],
+                ..state()
+            },
+        );
+    });
+    assert_eq!(narrow_custom, narrow_default);
+}
+
+#[test]
+fn panel_resize_uses_five_point_steps_and_never_breaks_the_minimum_or_total() {
+    assert_eq!(impact_panel_sizes(&[50, 30]), IMPACT_DEFAULT_PANELS);
+    assert_eq!(impact_panel_sizes(&[90, 10]), IMPACT_DEFAULT_PANELS);
+    assert_eq!(portfolio_panel_sizes(&[60, 40]), PORTFOLIO_DEFAULT_PANELS);
+    assert_eq!(
+        portfolio_panel_sizes(&[u16::MAX, u16::MAX, u16::MAX]),
+        PORTFOLIO_DEFAULT_PANELS
+    );
+    assert_eq!(
+        resize_primary_panel(&IMPACT_DEFAULT_PANELS, &IMPACT_DEFAULT_PANELS, true),
+        [70, 30]
+    );
+    assert_eq!(
+        resize_primary_panel(&PORTFOLIO_DEFAULT_PANELS, &PORTFOLIO_DEFAULT_PANELS, true,),
+        [63, 22, 15]
+    );
+
+    for (mut sizes, defaults) in [
+        (
+            IMPACT_DEFAULT_PANELS.to_vec(),
+            IMPACT_DEFAULT_PANELS.as_slice(),
+        ),
+        (
+            PORTFOLIO_DEFAULT_PANELS.to_vec(),
+            PORTFOLIO_DEFAULT_PANELS.as_slice(),
+        ),
+    ] {
+        for _ in 0..30 {
+            sizes = resize_primary_panel(&sizes, defaults, true);
+            assert_eq!(sizes.iter().sum::<u16>(), 100);
+            assert!(sizes.iter().all(|size| *size >= 15));
+        }
+        for _ in 0..30 {
+            sizes = resize_primary_panel(&sizes, defaults, false);
+            assert_eq!(sizes.iter().sum::<u16>(), 100);
+            assert!(sizes.iter().all(|size| *size >= 15));
+        }
+    }
 }
 
 #[test]
@@ -249,6 +423,16 @@ fn keyboard_controls_reach_panels_periods_scrolling_and_symbol_detail() {
     assert!(opened.contains("AAPL HISTORY"));
     app.handle(InputEvent::Escape);
     assert!(!app.screen_state().detail_open);
+
+    let period_before_panel_focus = app.screen_state().performance_period;
+    app.handle(InputEvent::Char(']'));
+    assert_eq!(app.screen_state().narrow_panel, 1);
+    assert_eq!(
+        app.screen_state().performance_period,
+        period_before_panel_focus
+    );
+    app.handle(InputEvent::Char('['));
+    assert_eq!(app.screen_state().narrow_panel, 0);
 
     app.handle(InputEvent::Right);
     assert_eq!(
@@ -445,7 +629,7 @@ fn orders_group_by_symbol_newest_first_and_show_execution_truth() {
     msft["symbol"] = json!("MSFT");
     value["orders"]["rows"] = json!([older, msft, newest, same_second_later]);
     value["orders"]["reconciliation_agents"] = json!([{
-        "work_id":"work:reconcile-aapl","agent":"reconciliation-agent","title":"Repair AAPL mismatch","stage":"running","priority":100,"urgent":true,"elapsed_seconds":30.0,"model":"qwen:64k","affected_areas":["AAPL","orders"]
+        "work_id":"work:reconcile-aapl","agent":"reconciliation-agent","title":"Repair AAPL mismatch","stage":"running","priority":100,"urgent":true,"elapsed_seconds":30.0,"model":"qwen:64k","affected_areas":["AAPL","orders"],"session_id":"session:reconcile-aapl","plan_steps":["Inspect broker readback"],"activity":[],"evidence_ids":[],"context_percent":25.0,"chat_agent_id":null,"detail_next_cursor":null
     }]);
     let snapshot = snapshot(value);
     let text = buffer_text(&render(150, 38, |frame| {

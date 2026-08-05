@@ -340,6 +340,10 @@ class WindowsSystemProjection:
             metrics_error=None,
             repositories=None,
             repositories_error="Repository facts use a separate read port.",
+            qwen=None,
+            qwen_error="Windows system projection does not provide Qwen status.",
+            health=None,
+            health_error="Windows system projection does not provide backup or recovery health.",
         )
         return SourceSample[SystemFacts](
             value=facts,

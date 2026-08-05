@@ -16,6 +16,10 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 
+// Managed cleanup is bounded to two seconds. Leave one second for a cold PowerShell launch
+// and Windows process accounting while still proving that the ten-second child is not awaited.
+const MANAGED_CLEANUP_TEST_BOUND: Duration = Duration::from_secs(3);
+
 #[test]
 fn framing_is_unsigned_big_endian_and_handles_split_input() {
     let frame = encode_frame_bytes(br#"{"ok":true}"#).unwrap();
@@ -79,7 +83,7 @@ async fn retry_timeout_is_bounded() {
     )
     .await;
     assert!(result.is_err());
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < MANAGED_CLEANUP_TEST_BOUND);
 }
 
 #[tokio::test]
@@ -234,7 +238,7 @@ async fn discovery_timeout_kills_and_waits_for_child() {
             .await
             .is_err()
     );
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < MANAGED_CLEANUP_TEST_BOUND);
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(!marker.exists());
 }

@@ -133,9 +133,7 @@ def test_deterministic_downstream_ids_are_command_bound() -> None:
 
     assert deterministic_approval_id("command:1") == f"tui-approval:{digest}"
     assert deterministic_work_id("command:1") == f"tui-work:{digest}"
-    assert stable_session_id("v20-model-researcher") == stable_session_id(
-        "v20-model-researcher"
-    )
+    assert stable_session_id("v20-model-researcher") == stable_session_id("v20-model-researcher")
     assert stable_session_id("v20-model-researcher") != stable_session_id(
         "v20-portfolio-researcher"
     )
@@ -161,9 +159,7 @@ def test_approval_ports_record_exact_decision_without_execution(
     if decision is ApprovalDecision.APPROVE:
         result = port.approve_run("command:1", "run-1", "checkpoint-1")
     else:
-        result = port.reject_run(
-            "command:1", "run-1", "checkpoint-1", reason=reason
-        )
+        result = port.reject_run("command:1", "run-1", "checkpoint-1", reason=reason)
 
     recorded = factory.controllers[-1].recorded
     assert len(recorded) == 1
@@ -428,11 +424,14 @@ def test_approval_recovery_binds_request_decision_reason_and_operator(tmp_path) 
     port.approve_run(request.command_id, payload.run_id, payload.checkpoint_id)
     assert port.recover(request.command_id, request) == "completed"
     assert port.recover("command:other", request) == "unknown"
-    assert LocalPlatformCommandPort(
-        service,
-        operator_id="operator:other",
-        clock=lambda: NOW,
-    ).recover(request.command_id, request) == "unknown"
+    assert (
+        LocalPlatformCommandPort(
+            service,
+            operator_id="operator:other",
+            clock=lambda: NOW,
+        ).recover(request.command_id, request)
+        == "unknown"
+    )
 
     mismatches = (
         _command_request(
@@ -607,7 +606,6 @@ def test_approval_recovery_fails_closed_on_journal_conflict(tmp_path, monkeypatc
 def test_disabled_ports_return_exact_reason_and_have_no_legacy_target() -> None:
     assert tuple(DISABLED_COMMAND_REASONS) == (
         "alert.dismiss",
-        "layout.reset",
         "approval.rework",
         "agent.send-message",
         "agent.pause",
@@ -642,18 +640,18 @@ def test_disabled_ports_return_exact_reason_and_have_no_legacy_target() -> None:
         assert result.result is None
 
     agent = DisabledAgentActionPort()
-    assert agent.send_message("command:1", object()).safe_message == DISABLED_COMMAND_REASONS[
-        "agent.send-message"
-    ]
-    assert agent.pause("command:1", "work:1").safe_message == DISABLED_COMMAND_REASONS[
-        "agent.pause"
-    ]
-    assert agent.stop("command:1", object()).safe_message == DISABLED_COMMAND_REASONS[
-        "agent.stop"
-    ]
-    assert agent.retry("command:1", "work:1").safe_message == DISABLED_COMMAND_REASONS[
-        "agent.retry"
-    ]
-    assert agent.set_priority("command:1", object()).safe_message == DISABLED_COMMAND_REASONS[
-        "agent.set-priority"
-    ]
+    assert (
+        agent.send_message("command:1", object()).safe_message
+        == DISABLED_COMMAND_REASONS["agent.send-message"]
+    )
+    assert (
+        agent.pause("command:1", "work:1").safe_message == DISABLED_COMMAND_REASONS["agent.pause"]
+    )
+    assert agent.stop("command:1", object()).safe_message == DISABLED_COMMAND_REASONS["agent.stop"]
+    assert (
+        agent.retry("command:1", "work:1").safe_message == DISABLED_COMMAND_REASONS["agent.retry"]
+    )
+    assert (
+        agent.set_priority("command:1", object()).safe_message
+        == DISABLED_COMMAND_REASONS["agent.set-priority"]
+    )

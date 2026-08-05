@@ -7,7 +7,10 @@ from threading import Event
 
 import pytest
 
+from vesper.platform.ops import cli as ops_cli
 from vesper.platform.ops.activation import OperationsActivation, OperationsActivationStore
+from vesper.platform.ops.alerts import AtomicAlertRecordStore, OperationsAlertRouter
+from vesper.platform.ops.notification_health import AtomicNotificationFailureHealthSink
 from vesper.platform.ops.cli import operations_mutex_name, run
 from vesper.platform.ops.policy import OperationsPolicy, OperationsState, ResourceState
 from vesper.platform.ops.services import RuntimeReceipt, ServiceReceipt
@@ -72,6 +75,41 @@ class Executor:
         self.decisions.append(decision)
 
 
+class FailingObserver:
+    def __init__(self) -> None:
+        self.calls: list[tuple[OperationsState, datetime]] = []
+
+    def observe(self, state: OperationsState, observed_at_utc: datetime) -> None:
+        self.calls.append((state, observed_at_utc))
+        raise RuntimeError("private-notification-failure")
+
+    def observe_failure(self, observed_at_utc: datetime) -> None:
+        del observed_at_utc
+
+
+class NotificationRecorder:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send_attention(self, alert_id: str):
+        self.sent.append(alert_id)
+
+    def resolve(self, alert_id: str) -> None:
+        raise AssertionError(alert_id)
+
+
+class FailingFailureObserver:
+    def __init__(self) -> None:
+        self.failure_calls: list[datetime] = []
+
+    def observe(self, state: OperationsState, observed_at_utc: datetime) -> None:
+        del state, observed_at_utc
+
+    def observe_failure(self, observed_at_utc: datetime) -> None:
+        self.failure_calls.append(observed_at_utc)
+        raise RuntimeError("private-observer-failure")
+
+
 class StopAfter:
     def __init__(self, waits: int) -> None:
         self.remaining = waits
@@ -104,6 +142,107 @@ def test_supervisor_writes_atomic_heartbeat_health_and_clean_stop(tmp_path: Path
     assert len(executor.decisions) == 1
 
 
+def test_notification_observer_failure_degrades_health_without_stopping_loop(
+    tmp_path: Path,
+) -> None:
+    observer = FailingObserver()
+    executor = Executor()
+    supervisor = OperationsSupervisor(
+        _policy(),
+        StateReader(),
+        executor,
+        AtomicDaemonStateStore(tmp_path),
+        clock=lambda: NOW,
+        state_observer=observer,
+    )
+
+    supervisor.run(StopAfter(1))
+
+    health_raw = (tmp_path / "health.json").read_text(encoding="utf-8")
+    health = json.loads(health_raw)
+    assert health["healthy"] is False
+    assert health["state"] == "stopped"
+    assert health["error"] == "Operations observer failed (RuntimeError)."
+    assert "private-notification-failure" not in health_raw
+    assert observer.calls == [(_state(), NOW)]
+    assert len(executor.decisions) == 1
+
+
+def test_notification_setup_failure_never_prevents_default_daemon_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_probe():
+        raise OSError("private-notification-setup-failure")
+
+    monkeypatch.setattr(ops_cli, "CurrentLogonSessionProbe", fail_probe)
+    supervisor = ops_cli._default_supervisor(
+        ops_cli.DaemonLaunchConfig(
+            state_root=tmp_path,
+            mode="shadow",
+            activation_receipt_id="grant-1",
+            start_nonce="nonce-1",
+        )
+    )
+
+    supervisor.run(StopAfter(1))
+
+    health_raw = (tmp_path / "health.json").read_text(encoding="utf-8")
+    assert json.loads(health_raw)["state"] == "stopped"
+    assert "private-notification-setup-failure" not in health_raw
+    notification_raw = (tmp_path / "notification-health.json").read_text(encoding="utf-8")
+    notification = json.loads(notification_raw)
+    assert set(notification) == {"code", "observed_at_utc", "state"}
+    assert notification["code"] == "notification-delivery-failed"
+    assert notification["state"] == "failed"
+    assert isinstance(notification["observed_at_utc"], str)
+    assert "private-notification-setup-failure" not in notification_raw
+    alert_raw = (tmp_path / "attention-alert.json").read_text(encoding="utf-8")
+    alert = json.loads(alert_raw)
+    assert alert["severity"] == "urgent"
+    assert alert["alert_id"].startswith("alert:")
+    assert "notification-setup" not in alert_raw
+    heartbeat = json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8"))
+    assert heartbeat["decision_kind"] == "incident"
+
+
+def test_default_daemon_injects_durable_generic_notification_health(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class NotificationPortSpy:
+        def __init__(self, sessions, *, health) -> None:
+            captured["sessions"] = sessions
+            captured["health"] = health
+
+        def send_attention(self, alert_id):  # pragma: no cover - construction only
+            raise AssertionError(alert_id)
+
+        def resolve(self, alert_id):  # pragma: no cover - construction only
+            raise AssertionError(alert_id)
+
+    session_probe = object()
+    monkeypatch.setattr(ops_cli, "CurrentLogonSessionProbe", lambda: session_probe)
+    monkeypatch.setattr(ops_cli, "WindowsNotificationPort", NotificationPortSpy)
+
+    ops_cli._default_supervisor(
+        ops_cli.DaemonLaunchConfig(
+            state_root=tmp_path,
+            mode="shadow",
+            activation_receipt_id="grant-1",
+            start_nonce="nonce-1",
+        )
+    )
+
+    assert captured["sessions"] is session_probe
+    health = captured["health"]
+    assert isinstance(health, AtomicNotificationFailureHealthSink)
+    assert health.path == tmp_path / "notification-health.json"
+    assert not health.path.exists()
+
+
 def test_supervisor_failure_records_unhealthy_without_false_clean_stop(tmp_path: Path) -> None:
     store = AtomicDaemonStateStore(tmp_path)
     supervisor = OperationsSupervisor(
@@ -124,6 +263,50 @@ def test_supervisor_failure_records_unhealthy_without_false_clean_stop(tmp_path:
     assert health["error"] == "Operations loop failed (RuntimeError)."
     assert "do-not-persist-this" not in raw_health
     assert not (tmp_path / "clean-stop.json").exists()
+
+
+def test_real_operations_loop_failure_persists_and_notifies_generic_incident(
+    tmp_path: Path,
+) -> None:
+    notifications = NotificationRecorder()
+    observer = OperationsAlertRouter(notifications, AtomicAlertRecordStore(tmp_path))
+    supervisor = OperationsSupervisor(
+        _policy(),
+        StateReader(error=RuntimeError("portfolio=private")),
+        Executor(),
+        AtomicDaemonStateStore(tmp_path),
+        clock=lambda: NOW,
+        state_observer=observer,
+    )
+
+    with pytest.raises(RuntimeError, match="portfolio=private"):
+        supervisor.run(StopAfter(1))
+
+    raw = (tmp_path / "attention-alert.json").read_text(encoding="utf-8")
+    record = json.loads(raw)
+    assert record["severity"] == "urgent"
+    assert record["resolved_at_utc"] is None
+    assert notifications.sent == [record["alert_id"]]
+    assert "portfolio" not in raw
+
+
+def test_failure_observer_error_never_masks_original_loop_error(tmp_path: Path) -> None:
+    observer = FailingFailureObserver()
+    supervisor = OperationsSupervisor(
+        _policy(),
+        StateReader(error=RuntimeError("original-loop-error")),
+        Executor(),
+        AtomicDaemonStateStore(tmp_path),
+        clock=lambda: NOW,
+        state_observer=observer,
+    )
+
+    with pytest.raises(RuntimeError, match="original-loop-error"):
+        supervisor.run(StopAfter(1))
+
+    raw = (tmp_path / "health.json").read_text(encoding="utf-8")
+    assert "private-observer-failure" not in raw
+    assert observer.failure_calls == [NOW]
 
 
 def test_state_store_rejects_relative_root_and_reparse_points(

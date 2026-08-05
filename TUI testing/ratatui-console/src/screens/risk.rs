@@ -1,5 +1,6 @@
 use crate::contract::{
-    AlertSeverity, ApprovalState, Freshness, MetricRow, RiskLimitStatus, RiskView,
+    AlertSeverity, ApprovalState, CircuitBreakerState, Freshness, MetricRow, RiskLimitStatus,
+    RiskReviewState, RiskView,
 };
 use crate::screens::{DetailKind, ScreenState};
 use crate::ui::format_eastern_time;
@@ -45,30 +46,35 @@ fn render_limits(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            let lines = view
-                .limits
-                .iter()
-                .skip(if focused {
-                    limit_offset(view, state)
-                } else {
-                    0
-                })
-                .map(|row| {
-                    let (badge, style) = limit_status(row.status, state);
-                    Line::from(vec![
-                        Span::raw(marker(state, row.limit_id.as_str(), DetailKind::RiskLimit)),
-                        Span::styled(badge, style),
-                        Span::raw(format!(
-                            " {} | Current {} | Proposed {}",
-                            row.limit_id.as_str(),
-                            row.current_value.as_str(),
-                            row.proposed_value
-                                .as_ref()
-                                .map_or("UNAVAILABLE", |value| value.as_str())
-                        )),
-                    ])
-                })
-                .collect::<Vec<_>>();
+            let mut lines = Vec::new();
+            for row in view.limits.iter().skip(if focused {
+                limit_offset(view, state)
+            } else {
+                0
+            }) {
+                let (badge, style) = limit_status(row.status, state);
+                lines.push(Line::from(vec![
+                    Span::raw(marker(state, row.limit_id.as_str(), DetailKind::RiskLimit)),
+                    Span::styled(badge, style),
+                    Span::raw(format!(
+                        " {} | Current {} | Proposed {}",
+                        row.limit_id.as_str(),
+                        row.current_value.as_str(),
+                        row.proposed_value
+                            .as_ref()
+                            .map_or("UNAVAILABLE", |value| value.as_str())
+                    )),
+                ]));
+                lines.push(Line::from(format!(
+                    "PROPOSAL {} | REVIEW {}",
+                    row.proposal_reason.as_ref().map_or_else(
+                        || "UNAVAILABLE".to_owned(),
+                        |value| sanitize(value.as_str())
+                    ),
+                    risk_review_state(row.review_state)
+                )));
+                lines.push(Line::from(format!("EVIDENCE {}", ids(&row.evidence_ids))));
+            }
             if lines.is_empty() {
                 vec![Line::from("No risk limits reported.")]
             } else {
@@ -96,38 +102,68 @@ fn render_approvals(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            let lines = view
-                .approvals
-                .iter()
-                .skip(if focused {
-                    approval_offset(view, state)
+            let mut lines = Vec::new();
+            for row in view.approvals.iter().skip(if focused {
+                approval_offset(view, state)
+            } else {
+                0
+            }) {
+                let (badge, style) = approval_status(row.state, state);
+                let reason = row
+                    .reason
+                    .as_deref()
+                    .map(sanitize)
+                    .unwrap_or_else(|| "Reason UNAVAILABLE".to_owned());
+                lines.push(Line::from(vec![
+                    Span::raw(marker(
+                        state,
+                        row.approval_id.as_str(),
+                        DetailKind::Approval,
+                    )),
+                    Span::styled(badge, style),
+                    Span::raw(format!(
+                        " {} | {} | {} | Evidence {}",
+                        row.approval_id.as_str(),
+                        format_eastern_time(&row.requested_at_utc),
+                        reason,
+                        ids(&row.evidence_ids)
+                    )),
+                ]));
+                lines.push(Line::from(format!(
+                    "SYMBOLS {}",
+                    ids(&row.affected_symbols)
+                )));
+                if row.weight_changes.is_empty() {
+                    lines.push(Line::from("WEIGHTS NONE"));
                 } else {
-                    0
-                })
-                .map(|row| {
-                    let (badge, style) = approval_status(row.state, state);
-                    let reason = row
-                        .reason
-                        .as_deref()
-                        .map(sanitize)
-                        .unwrap_or_else(|| "Reason UNAVAILABLE".to_owned());
-                    Line::from(vec![
-                        Span::raw(marker(
-                            state,
-                            row.approval_id.as_str(),
-                            DetailKind::Approval,
-                        )),
-                        Span::styled(badge, style),
-                        Span::raw(format!(
-                            " {} | {} | {} | Evidence {}",
-                            row.approval_id.as_str(),
-                            format_eastern_time(&row.requested_at_utc),
-                            reason,
-                            ids(&row.evidence_ids)
-                        )),
-                    ])
-                })
-                .collect::<Vec<_>>();
+                    for weight in &row.weight_changes {
+                        lines.push(Line::from(format!(
+                            "{} {:.1}% -> {:.1}%",
+                            weight.symbol.as_str(),
+                            weight.current_weight * 100.0,
+                            weight.proposed_weight * 100.0
+                        )));
+                    }
+                }
+                lines.push(Line::from(format!("RISKS {}", texts(&row.risks))));
+                lines.push(Line::from(format!(
+                    "CONSEQUENCES {}",
+                    texts(&row.expected_consequences)
+                )));
+                lines.push(Line::from(format!(
+                    "BASIS {}",
+                    row.basis_sha256.as_ref().map_or_else(
+                        || "UNAVAILABLE".to_owned(),
+                        |value| value.as_str().chars().take(12).collect()
+                    )
+                )));
+                lines.push(Line::from(format!(
+                    "STALE REASON {}",
+                    row.stale_reason
+                        .as_ref()
+                        .map_or_else(|| "NONE".to_owned(), |value| sanitize(value.as_str()))
+                )));
+            }
             if lines.is_empty() {
                 vec![Line::from("No approvals reported.")]
             } else {
@@ -214,9 +250,41 @@ fn render_metrics(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            let mut lines = vec![Line::from(
-                "Blocked actions + Circuit breaker: [?] UNAVAILABLE (RiskView gap)",
-            )];
+            let observed = view
+                .circuit_breaker
+                .observed_at_utc
+                .as_ref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time);
+            let reason = view.circuit_breaker.reason.as_ref().map_or_else(
+                || "UNAVAILABLE".to_owned(),
+                |value| sanitize(value.as_str()),
+            );
+            let mut lines = vec![
+                Line::from(format!(
+                    "CIRCUIT BREAKER: {} | {}",
+                    circuit_breaker_state(view.circuit_breaker.state),
+                    observed
+                )),
+                Line::from(format!("REASON {reason}")),
+                Line::from("BLOCKED ACTIONS"),
+            ];
+            if view.blocked_actions.is_empty() {
+                lines.push(Line::from("NONE"));
+            } else {
+                for action in &view.blocked_actions {
+                    lines.push(Line::from(format!(
+                        "BLOCKED {} | {} | SYMBOLS {} | {}",
+                        action.action_id.as_str(),
+                        sanitize(action.action.as_str()),
+                        ids(&action.affected_symbols),
+                        format_eastern_time(&action.created_at_utc)
+                    )));
+                    lines.push(Line::from(format!(
+                        "REASON {}",
+                        sanitize(action.reason.as_str())
+                    )));
+                }
+            }
             lines.extend(
                 view.metrics
                     .iter()
@@ -304,6 +372,25 @@ fn approval_status(status: ApprovalState, state: &ScreenState) -> (&'static str,
     }
 }
 
+fn risk_review_state(state: RiskReviewState) -> &'static str {
+    match state {
+        RiskReviewState::NotRequired => "NOT REQUIRED",
+        RiskReviewState::Pending => "PENDING",
+        RiskReviewState::Approved => "APPROVED",
+        RiskReviewState::Rejected => "REJECTED",
+        RiskReviewState::Unavailable => "UNAVAILABLE",
+    }
+}
+
+fn circuit_breaker_state(state: CircuitBreakerState) -> &'static str {
+    match state {
+        CircuitBreakerState::Armed => "ARMED",
+        CircuitBreakerState::Tripped => "TRIPPED",
+        CircuitBreakerState::Reset => "RESET",
+        CircuitBreakerState::Unavailable => "UNAVAILABLE",
+    }
+}
+
 fn alert_status(status: AlertSeverity, state: &ScreenState) -> (&'static str, Style) {
     let palette = state.theme.palette();
     match status {
@@ -372,6 +459,18 @@ fn ids(values: &[crate::contract::SafeId]) -> String {
             .map(|value| value.as_str())
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+fn texts(values: &[crate::contract::NonEmptyString]) -> String {
+    if values.is_empty() {
+        "NONE".to_owned()
+    } else {
+        values
+            .iter()
+            .map(|value| sanitize(value.as_str()))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 

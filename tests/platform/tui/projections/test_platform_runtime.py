@@ -429,7 +429,7 @@ def test_runtime_facts_project_into_agents_and_approvals_and_bind_control() -> N
     }
     assert (
         ControlStateBuilder().build({}).hash
-        == ControlStateBuilder().build({"platform.runtime": sample}).hash
+        != ControlStateBuilder().build({"platform.runtime": sample}).hash
     )
 
 
@@ -442,6 +442,12 @@ def test_runtime_approval_stays_visible_as_partial_stale_without_risk_limits() -
         reason="Operator decision required.",
         evidence_ids=("evidence-visible",),
         requested_at_utc=NOW,
+        affected_symbols=(),
+        weight_changes=(),
+        risks=(),
+        expected_consequences=(),
+        basis_sha256=None,
+        stale_reason=None,
     )
     sample = SourceSample[PlatformRuntimeFacts](
         value=PlatformRuntimeFacts(pending_approvals=(approval,), active_work=()),
@@ -471,6 +477,12 @@ def test_retained_runtime_approval_is_labeled_stale_not_current() -> None:
         reason="Operator decision required.",
         evidence_ids=("evidence-retained",),
         requested_at_utc=NOW,
+        affected_symbols=(),
+        weight_changes=(),
+        risks=(),
+        expected_consequences=(),
+        basis_sha256=None,
+        stale_reason=None,
     )
     sample = SourceSample[PlatformRuntimeFacts](
         value=PlatformRuntimeFacts(pending_approvals=(approval,), active_work=()),

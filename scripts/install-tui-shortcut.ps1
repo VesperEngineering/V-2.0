@@ -12,12 +12,30 @@ if (-not $ConfirmInstall) {
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$packagedExecutable = [IO.Path]::GetFullPath(
+    (Join-Path $repoRoot 'dist\tui\vesper-ratatui-console.exe')
+)
 if ([string]::IsNullOrWhiteSpace($Executable)) {
-    $Executable = Join-Path $repoRoot 'dist\tui\vesper-ratatui-console.exe'
+    $Executable = $packagedExecutable
 }
 $target = [IO.Path]::GetFullPath($Executable)
+if ($target -ne $packagedExecutable) {
+    throw 'Shortcut target must be the packaged dist\tui executable.'
+}
 if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
     throw 'Build dist\tui\vesper-ratatui-console.exe first.'
+}
+$cursor = $target
+while ($cursor.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    $item = Get-Item -LiteralPath $cursor -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Shortcut target cannot contain a reparse point.'
+    }
+    $parent = [IO.Directory]::GetParent($cursor)
+    if ($null -eq $parent) {
+        break
+    }
+    $cursor = $parent.FullName
 }
 
 $programs = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'

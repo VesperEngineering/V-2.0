@@ -89,6 +89,20 @@ class OperationsExecutor(Protocol):
     def execute(self, decision: ActionDecision) -> None: ...
 
 
+class OperationsStateObserver(Protocol):
+    def observe(self, state: OperationsState, observed_at_utc: datetime) -> None: ...
+
+    def observe_failure(self, observed_at_utc: datetime) -> None: ...
+
+
+class _NullStateObserver:
+    def observe(self, state: OperationsState, observed_at_utc: datetime) -> None:
+        del state, observed_at_utc
+
+    def observe_failure(self, observed_at_utc: datetime) -> None:
+        del observed_at_utc
+
+
 class AtomicDaemonStateStore:
     """Write complete JSON records, then atomically replace the visible file."""
 
@@ -150,6 +164,7 @@ class OperationsSupervisor:
         *,
         clock: Callable[[], datetime] = _utc_now,
         run_id: SafeId = "operations-daemon",
+        state_observer: OperationsStateObserver | None = None,
     ) -> None:
         if type(policy) is not OperationsPolicy:
             raise TypeError("policy must be OperationsPolicy")
@@ -163,6 +178,12 @@ class OperationsSupervisor:
         self._state_store = state_store
         self._clock = clock
         self._run_id = TypeAdapter(SafeId).validate_python(run_id, strict=True)
+        observer = _NullStateObserver() if state_observer is None else state_observer
+        if not callable(getattr(observer, "observe", None)) or not callable(
+            getattr(observer, "observe_failure", None)
+        ):
+            raise TypeError("state_observer must provide observe and observe_failure")
+        self._state_observer = observer
 
     def run(self, stop_event: Event) -> None:
         if not callable(getattr(stop_event, "is_set", None)) or not callable(
@@ -172,12 +193,19 @@ class OperationsSupervisor:
         self._state_store.begin_run()
         self._write_health(healthy=True, state="running", error=None)
         sequence = 0
+        observer_error: str | None = None
         try:
             while not stop_event.is_set():
                 state = self._state_reader.read()
                 if type(state) is not OperationsState:
                     raise TypeError("state reader must return OperationsState")
                 now = self._now()
+                try:
+                    self._state_observer.observe(state, now)
+                except Exception as error:
+                    observer_error = f"Operations observer failed ({type(error).__name__})."
+                else:
+                    observer_error = None
                 decision = self._policy.next_action(state, now)
                 if type(decision) is not ActionDecision:
                     raise TypeError("operations policy returned an invalid decision")
@@ -192,10 +220,15 @@ class OperationsSupervisor:
                         decision_reason=decision.reason,
                     )
                 )
-                self._write_health(healthy=True, state="running", error=None)
+                self._write_health(
+                    healthy=observer_error is None,
+                    state="running",
+                    error=observer_error,
+                )
                 if stop_event.wait(decision.pause_seconds):
                     break
         except Exception as error:
+            self._notify_observer_failure()
             message = f"Operations loop failed ({type(error).__name__})."
             self._write_health(
                 healthy=False,
@@ -207,10 +240,10 @@ class OperationsSupervisor:
         self._state_store.write_health(
             DaemonHealthReceipt(
                 run_id=self._run_id,
-                healthy=True,
+                healthy=observer_error is None,
                 state="stopped",
                 observed_at_utc=stopped_at,
-                error=None,
+                error=observer_error,
             )
         )
         self._state_store.write_clean_stop(
@@ -240,3 +273,13 @@ class OperationsSupervisor:
 
     def _now(self) -> datetime:
         return _UTC.validate_python(self._clock(), strict=True)
+
+    def _notify_observer_failure(self) -> None:
+        try:
+            try:
+                observed_at = self._now()
+            except Exception:
+                observed_at = _utc_now()
+            self._state_observer.observe_failure(observed_at)
+        except Exception:
+            pass

@@ -73,6 +73,8 @@ class MessageType(StrEnum):
     SNAPSHOT = "snapshot"
     SEARCH_REQUEST = "search-request"
     SEARCH_RESULTS = "search-results"
+    MEMORY_CONTENT_REQUEST = "memory-content-request"
+    MEMORY_CONTENT_RESULT = "memory-content-result"
     CHAT_HISTORY_REQUEST = "chat-history-request"
     CHAT_EVENT = "chat-event"
     CHAT_HISTORY_RESULT = "chat-history-result"
@@ -103,6 +105,7 @@ class WireEnvelope(StrictModel):
         if value in {".", ".."}:
             raise ValueError("wire IDs cannot be dot paths")
         return value
+
 
 CANONICAL_WIRE_FIXTURE = (
     b'{"schema_version":1,"message_id":"server:1","sequence":1,'
@@ -171,6 +174,7 @@ SearchQuery = Annotated[
 ]
 SearchLimit = Annotated[int, Field(ge=1, le=100)]
 SearchRequestId = Annotated[int, Field(ge=1, le=2**64 - 1)]
+MemoryContentText = Annotated[str, StringConstraints(min_length=1, max_length=100_000)]
 ChatHistoryLimit = Annotated[int, Field(ge=1, le=20)]
 ChatChunkSequence = Annotated[int, Field(ge=1, le=2**63 - 1)]
 ChatTokenCount = Annotated[int, Field(ge=0, le=2**63 - 1)]
@@ -200,6 +204,30 @@ class SearchResultsPayload(StrictModel):
     indexed_state_version: WireUInt
     results: Annotated[tuple[SearchResult, ...], Field(max_length=100)]
     error: NonEmptyStr | None
+
+
+class MemoryContentRequestPayload(StrictModel):
+    request_id: SearchRequestId
+    memory_id: SafeId
+    reviewed_updated_at_utc: UtcDateTime
+
+
+class MemoryContentResultPayload(StrictModel):
+    request_id: SearchRequestId
+    memory_id: SafeId
+    reviewed_updated_at_utc: UtcDateTime
+    status: Literal["success", "error"]
+    content: MemoryContentText | None
+    error: NonEmptyStr | None
+
+    @model_validator(mode="after")
+    def require_exact_success_or_error_fields(self) -> MemoryContentResultPayload:
+        if self.status == "success":
+            if self.content is None or self.error is not None:
+                raise ValueError("successful memory content requires content and no error")
+        elif self.content is not None or self.error is None:
+            raise ValueError("failed memory content requires an error and no content")
+        return self
 
 
 class ChatHistoryRequestPayload(StrictModel):
@@ -302,6 +330,8 @@ StrictPayload: TypeAlias = (
     | SnapshotPayload
     | SearchRequestPayload
     | SearchResultsPayload
+    | MemoryContentRequestPayload
+    | MemoryContentResultPayload
     | ChatHistoryRequestPayload
     | ChatEventPayload
     | ChatHistoryResultPayload
@@ -328,6 +358,8 @@ PAYLOAD_MODELS: dict[MessageType, PayloadModel] = {
     MessageType.SNAPSHOT: SnapshotPayload,
     MessageType.SEARCH_REQUEST: SearchRequestPayload,
     MessageType.SEARCH_RESULTS: SearchResultsPayload,
+    MessageType.MEMORY_CONTENT_REQUEST: MemoryContentRequestPayload,
+    MessageType.MEMORY_CONTENT_RESULT: MemoryContentResultPayload,
     MessageType.CHAT_HISTORY_REQUEST: ChatHistoryRequestPayload,
     MessageType.CHAT_EVENT: ChatEventPayload,
     MessageType.CHAT_HISTORY_RESULT: ChatHistoryResultPayload,
@@ -370,9 +402,7 @@ _FIXTURE_SHELL = {
         "market_session": "Unavailable",
     },
     "alerts": [],
-    "capabilities": [
-        {"capability_id": "snapshot.read", "state": "read-only", "reason": None}
-    ],
+    "capabilities": [{"capability_id": "snapshot.read", "state": "read-only", "reason": None}],
 }
 _FIXTURE_VIEW = {
     "freshness": "fresh",
@@ -404,6 +434,21 @@ _FIXTURE_AGENT_ROW = {
     "elapsed_seconds": 3.0,
     "model": "qwen:64k",
     "affected_areas": ["portfolio"],
+    "session_id": "session:1",
+    "plan_steps": ["Inspect evidence", "Report result"],
+    "activity": [
+        {
+            "activity_id": "activity:1",
+            "kind": "stage",
+            "summary": "Review started",
+            "occurred_at_utc": "2026-08-03T00:00:00Z",
+            "evidence_ids": ["evidence:1"],
+        }
+    ],
+    "evidence_ids": ["evidence:1"],
+    "context_percent": 25.0,
+    "chat_agent_id": "portfolio-research",
+    "detail_next_cursor": None,
 }
 _FIXTURE_TIMELINE_ROW = {
     "event_id": "event:1",
@@ -417,6 +462,7 @@ _FIXTURE_TIMELINE_ROW = {
     "approval_id": None,
     "order_id": "order:1",
     "evidence_ids": ["evidence:1"],
+    "work_id": "work:1",
 }
 _FIXTURE_FILL_ROW = {
     "fill_id": "fill:1",
@@ -451,12 +497,33 @@ _FIXTURE_CANDIDATE_ROW = {
     "status": "evaluating",
     "evidence_ids": ["evidence:1"],
     "created_at_utc": "2026-08-03T00:00:00Z",
+    "feature_set_id": "features:v1",
+    "data_identity": "a" * 64,
+    "evaluation_contract": "b" * 64,
+    "status_reason": "Evaluation is running.",
+    "status_at_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_MODEL_GATE_ROW = {
+    "gate_id": "gate:oos-ic",
+    "candidate_id": "candidate:1",
+    "metric_id": "model.oos-ic",
+    "candidate_value": 0.12,
+    "baseline_value": 0.08,
+    "comparison": "gte",
+    "threshold": 0.1,
+    "evaluation_window": "2025-01-01/2025-12-31",
+    "state": "pass",
+    "reason": "Candidate cleared the approved threshold.",
+    "evidence_ids": ["evidence:1"],
 }
 _FIXTURE_RISK_LIMIT_ROW = {
     "limit_id": "limit:concentration",
     "current_value": "0.10",
     "proposed_value": None,
     "status": "within",
+    "proposal_reason": None,
+    "review_state": "not-required",
+    "evidence_ids": [],
 }
 _FIXTURE_APPROVAL_ROW = {
     "approval_id": "approval:1",
@@ -466,6 +533,14 @@ _FIXTURE_APPROVAL_ROW = {
     "reason": "Review required",
     "evidence_ids": ["evidence:1"],
     "requested_at_utc": "2026-08-03T00:00:00Z",
+    "affected_symbols": ["AAPL"],
+    "weight_changes": [
+        {"symbol": "AAPL", "current_weight": 0.1, "proposed_weight": 0.11}
+    ],
+    "risks": ["Concentration increases."],
+    "expected_consequences": ["AAPL allocation rises."],
+    "basis_sha256": "c" * 64,
+    "stale_reason": None,
 }
 _FIXTURE_SOURCE_ROW = {
     "source_id": "source:massive",
@@ -475,6 +550,7 @@ _FIXTURE_SOURCE_ROW = {
     "coverage": "S&P 500",
     "error": None,
     "consumers": ["ml_model"],
+    "dependencies": ["split adjustments"],
 }
 _FIXTURE_EVIDENCE_ROW = {
     "evidence_id": "evidence:1",
@@ -482,6 +558,16 @@ _FIXTURE_EVIDENCE_ROW = {
     "source": "fixture",
     "created_at_utc": "2026-08-03T00:00:00Z",
     "sha256": "a" * 64,
+    "symbols": ["AAPL"],
+    "agent_ids": ["portfolio-research"],
+    "model_ids": ["model:active"],
+    "order_ids": ["order:1"],
+    "approval_ids": ["approval:1"],
+    "source_ids": ["source:massive"],
+    "raw_log_id": None,
+    "raw_log_excerpt": [],
+    "raw_log_truncated": False,
+    "raw_log_next_cursor": None,
 }
 _FIXTURE_MEMORY_ROW = {
     "memory_id": "memory:1",
@@ -489,6 +575,8 @@ _FIXTURE_MEMORY_ROW = {
     "summary": "Use controller truth.",
     "evidence_ids": ["evidence:1"],
     "updated_at_utc": "2026-08-03T00:00:00Z",
+    "used_by_agents": ["portfolio-research"],
+    "change_reason": "Retained controller authority rule.",
 }
 _FIXTURE_SERVICE_ROW = {
     "service_id": "service:qwen",
@@ -507,7 +595,43 @@ _FIXTURE_REPOSITORY_ROW = {
     "clean": True,
     "worktrees": ["C:/Users/bgonn/Desktop/v20"],
     "unpushed_commit_count": 0,
+    "checks": [
+        {
+            "check_id": "check:tests",
+            "state": "pass",
+            "reason": None,
+            "observed_at_utc": "2026-08-03T00:00:00Z",
+        }
+    ],
 }
+_FIXTURE_CIRCUIT_BREAKER = {
+    "state": "armed",
+    "reason": None,
+    "observed_at_utc": "2026-08-03T00:00:00Z",
+}
+_FIXTURE_QWEN_STATUS = {
+    "state": "busy",
+    "loaded_model": "qwen:64k",
+    "current_agent": "portfolio-research",
+    "queue_length": 1,
+    "context_percent": 25.0,
+    "last_inference_ms": 210.0,
+    "observed_at_utc": "2026-08-03T00:00:00Z",
+    "error": None,
+}
+_FIXTURE_SYSTEM_HEALTH = [
+    {
+        "component": component,
+        "state": "healthy",
+        "reason": None,
+        "observed_at_utc": "2026-08-03T00:00:00Z",
+        "checks": [
+            {"check_id": f"check:{component}", "state": "pass", "reason": None}
+        ],
+        "broker_actions_blocked": False,
+    }
+    for component in ("backup", "recovery", "notifications")
+]
 _FIXTURE_METRIC_ROW = {
     "metric_id": "metric:cpu",
     "value": 12.5,
@@ -565,6 +689,17 @@ _FIXTURE_SNAPSHOT = {
         "candidates": [_FIXTURE_CANDIDATE_ROW],
         "metrics": [_FIXTURE_METRIC_ROW],
         "evidence": [_FIXTURE_EVIDENCE_ROW],
+        "active_model_id": "model:active",
+        "rollback_model_id": None,
+        "approved_family": "approved-family",
+        "approved_strategy": "ml_model",
+        "approved_feature_set_id": "features:v1",
+        "final_regime": "risk-on",
+        "final_regime_confidence": 0.8,
+        "regime_state": "decided",
+        "automatic_changes_blocked": False,
+        "block_reason": None,
+        "gates": [_FIXTURE_MODEL_GATE_ROW],
     },
     "timeline": {**_FIXTURE_VIEW, "rows": [_FIXTURE_TIMELINE_ROW], "hidden_event_count": 0},
     "risk": {
@@ -573,6 +708,8 @@ _FIXTURE_SNAPSHOT = {
         "approvals": [_FIXTURE_APPROVAL_ROW],
         "alerts": [_FIXTURE_ALERT_ROW],
         "metrics": [_FIXTURE_METRIC_ROW],
+        "blocked_actions": [],
+        "circuit_breaker": _FIXTURE_CIRCUIT_BREAKER,
     },
     "data": {
         **_FIXTURE_VIEW,
@@ -583,6 +720,7 @@ _FIXTURE_SNAPSHOT = {
         **_FIXTURE_VIEW,
         "rows": [_FIXTURE_MEMORY_ROW],
         "history": [_FIXTURE_TIMELINE_ROW],
+        "agent_usage_error": "No trusted memory-use source is configured.",
     },
     "system": {
         **_FIXTURE_VIEW,
@@ -609,6 +747,8 @@ _FIXTURE_SNAPSHOT = {
         | {"enabled": False},
         "live_account": None,
         "live_transition_plan": None,
+        "qwen": _FIXTURE_QWEN_STATUS,
+        "health": _FIXTURE_SYSTEM_HEALTH,
     },
 }
 
@@ -655,6 +795,25 @@ _FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
                     "context_only": True,
                 }
             ],
+            "error": None,
+        },
+    ),
+    (
+        MessageType.MEMORY_CONTENT_REQUEST,
+        {
+            "request_id": 2,
+            "memory_id": "memory:1",
+            "reviewed_updated_at_utc": "2026-08-03T00:00:00Z",
+        },
+    ),
+    (
+        MessageType.MEMORY_CONTENT_RESULT,
+        {
+            "request_id": 2,
+            "memory_id": "memory:1",
+            "reviewed_updated_at_utc": "2026-08-03T00:00:00Z",
+            "status": "success",
+            "content": "Use controller truth.",
             "error": None,
         },
     ),
@@ -749,9 +908,25 @@ _FIXTURE_PAYLOADS: tuple[tuple[MessageType, dict[str, JsonValue]], ...] = (
                 "memory": _FIXTURE_VIEW,
                 "system": _FIXTURE_VIEW,
                 "portfolio_rank_source": _FIXTURE_SNAPSHOT["portfolio"]["rank_source"],
-                "timeline_hidden_event_count": _FIXTURE_SNAPSHOT["timeline"][
-                    "hidden_event_count"
-                ],
+                "timeline_hidden_event_count": _FIXTURE_SNAPSHOT["timeline"]["hidden_event_count"],
+                "model_active_model_id": _FIXTURE_SNAPSHOT["models"]["active_model_id"],
+                "model_rollback_model_id": _FIXTURE_SNAPSHOT["models"]["rollback_model_id"],
+                "model_approved_family": _FIXTURE_SNAPSHOT["models"]["approved_family"],
+                "model_approved_strategy": _FIXTURE_SNAPSHOT["models"]["approved_strategy"],
+                "model_approved_feature_set_id": _FIXTURE_SNAPSHOT["models"]
+                ["approved_feature_set_id"],
+                "model_final_regime": _FIXTURE_SNAPSHOT["models"]["final_regime"],
+                "model_final_regime_confidence": _FIXTURE_SNAPSHOT["models"]
+                ["final_regime_confidence"],
+                "model_regime_state": _FIXTURE_SNAPSHOT["models"]["regime_state"],
+                "model_automatic_changes_blocked": _FIXTURE_SNAPSHOT["models"]
+                ["automatic_changes_blocked"],
+                "model_block_reason": _FIXTURE_SNAPSHOT["models"]["block_reason"],
+                "model_gates": _FIXTURE_SNAPSHOT["models"]["gates"],
+                "risk_blocked_actions": _FIXTURE_SNAPSHOT["risk"]["blocked_actions"],
+                "risk_circuit_breaker": _FIXTURE_SNAPSHOT["risk"]["circuit_breaker"],
+                "system_qwen": _FIXTURE_SNAPSHOT["system"]["qwen"],
+                "system_health": _FIXTURE_SNAPSHOT["system"]["health"],
             },
         },
     ),
@@ -825,6 +1000,7 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "governed-command-contracts",
             "live-readiness",
             "agent-chat",
+            "managed-memory-content",
         ],
         "optional_default": [
             "capability.reason",
@@ -840,6 +1016,8 @@ WIRE_CONTRACT_DESCRIPTOR = _canonical_json_bytes(
             "search-results.error",
             "search-results.results[].occurred_at_utc",
             "search-results.results[].context_only",
+            "memory-content-result.content",
+            "memory-content-result.error",
             "chat-history-request.cursor",
             "chat-history-result.next_cursor",
             "chat-event.chunk_sequence",
@@ -1011,7 +1189,12 @@ def _scrub_json_value(value: dict[str, JsonValue] | list[JsonValue]) -> None:
 class _RevocableJsonIterator:
     __slots__ = ("_state", "_iterator", "_transform")
 
-    def __init__(self, state: _UntrustedDiagnosticState, iterator: object, transform: Callable[[object], object]) -> None:
+    def __init__(
+        self,
+        state: _UntrustedDiagnosticState,
+        iterator: object,
+        transform: Callable[[object], object],
+    ) -> None:
         self._state = state
         self._iterator = iterator
         self._transform = transform
@@ -1057,7 +1240,9 @@ class _RevocableJsonScalar:
         return str(self._require_value())
 
     def __repr__(self) -> str:
-        return "<untrusted diagnostic value>" if self._state.active else "<expired diagnostic value>"
+        return (
+            "<untrusted diagnostic value>" if self._state.active else "<expired diagnostic value>"
+        )
 
     def __getstate__(self) -> object:
         raise TypeError("untrusted protocol diagnostics cannot be serialized")
@@ -1147,7 +1332,9 @@ def _bounded_json_value(value: JsonValue, depth: int = 0) -> JsonValue:
     return value
 
 
-def _unknown_fields(values: dict[str, JsonValue], model: PayloadModel | type[WireEnvelope]) -> dict[str, JsonValue]:
+def _unknown_fields(
+    values: dict[str, JsonValue], model: PayloadModel | type[WireEnvelope]
+) -> dict[str, JsonValue]:
     unknown: dict[str, JsonValue] = {}
     for name, value in values.items():
         if name not in model.model_fields:
@@ -1279,7 +1466,6 @@ def _report_untrusted(
     finally:
         diagnostic._invalidate()
         del diagnostic
-
 
 
 def decode_envelope_json(

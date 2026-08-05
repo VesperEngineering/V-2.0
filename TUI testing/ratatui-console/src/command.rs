@@ -330,6 +330,12 @@ impl CommandTracker {
             .filter_map(|command_id| self.summary(command_id))
             .collect()
     }
+
+    pub fn request(&self, command_id: &str) -> Option<&CommandRequest> {
+        self.by_id
+            .get(command_id)
+            .map(|tracked| &tracked.pending.request)
+    }
 }
 
 fn valid_receipt_transition(current: TrackedCommandState, next: TrackedCommandState) -> bool {

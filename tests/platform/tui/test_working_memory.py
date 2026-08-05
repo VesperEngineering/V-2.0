@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -136,9 +136,7 @@ def test_contract_has_no_manual_pin_and_default_path_is_not_created(
             "durable category",
         ),
         (
-            _candidate(
-                "memory:blocker", "Waiting for this run", category="temporary-blocker"
-            ),
+            _candidate("memory:blocker", "Waiting for this run", category="temporary-blocker"),
             "durable category",
         ),
         (
@@ -256,6 +254,72 @@ def test_core_is_v20_only_bounded_and_stronger_candidate_moves_weaker_to_archive
     store.close()
 
 
+def test_status_transition_updates_timestamp_without_changing_created_time(
+    tmp_path: Path,
+) -> None:
+    later = NOW + timedelta(hours=1)
+    current = NOW
+
+    def clock() -> datetime:
+        return current
+
+    identifiers = iter(("change:initial", "change:replacement"))
+    store = WorkingMemoryStore(
+        tmp_path / "vault",
+        clock=clock,
+        id_factory=lambda: next(identifiers),
+        candidate_validator=lambda _candidate: True,
+    )
+    store.propose(_candidate("memory:old", "old " * 1_500, score=_score(10)))
+    store.curate("validated-work")
+    current = later
+    store.propose(_candidate("memory:new", "new " * 1_500, score=_score(20)))
+    store.curate("validated-work")
+
+    archived = store.archive("old")
+
+    assert len(archived) == 1
+    assert archived[0].memory_id == "memory:old"
+    assert archived[0].created_at_utc == NOW
+    assert archived[0].updated_at_utc == later
+    store.close()
+
+
+def test_new_item_timestamp_never_precedes_acceptance_when_clock_moves_back(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    current = NOW
+
+    def clock() -> datetime:
+        return current
+
+    store = WorkingMemoryStore(
+        vault,
+        clock=clock,
+        id_factory=lambda: "change:clock-rollback",
+        candidate_validator=lambda _candidate: True,
+    )
+    store.propose(_candidate("memory:rollback", "Clock-safe memory."))
+    current = NOW - timedelta(hours=1)
+
+    store.curate("validated-work")
+
+    item = store.core()[0]
+    assert item.created_at_utc == NOW
+    assert item.updated_at_utc == NOW
+    core_metadata = _front_matter(vault / "Core Memory.md")
+    assert core_metadata["created_utc"] == "2026-08-04T12:00:00Z"
+    assert core_metadata["updated_utc"] == "2026-08-04T12:00:00Z"
+    with sqlite3.connect(vault / ".working-memory.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT created_at_utc, updated_at_utc FROM memory_items "
+            "WHERE memory_id = 'memory:rollback'"
+        ).fetchone()
+    assert row == ("2026-08-04T12:00:00Z", "2026-08-04T12:00:00Z")
+    store.close()
+
+
 def test_rare_safety_fact_has_protected_score_floor(tmp_path: Path) -> None:
     store = _store(tmp_path / "vault")
     safety = _candidate(
@@ -356,7 +420,11 @@ def test_demotion_is_archived_and_rollback_restores_prior_core_exactly(
     assert rollback.after_hash == first.after_hash
     assert rollback.removed_ids == ("memory:new",)
     assert [item.memory_id for item in store.archive("new")] == ["memory:new"]
-    assert [row.change_id for row in store.history()] == [rollback.change_id, second.change_id, first.change_id]
+    assert [row.change_id for row in store.history()] == [
+        rollback.change_id,
+        second.change_id,
+        first.change_id,
+    ]
     store.close()
 
 

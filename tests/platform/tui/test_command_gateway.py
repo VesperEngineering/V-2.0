@@ -38,6 +38,7 @@ from vesper.platform.tui.views import AgentCard, ApprovalRow, ConsoleSnapshot, P
 NOW = datetime(2026, 8, 4, tzinfo=timezone.utc)
 HANDLED = {
     "note.add",
+    "layout.reset",
     "approval.approve",
     "approval.hold",
     "approval.reject",
@@ -227,6 +228,12 @@ def _approval_row(
         reason=None,
         evidence_ids=("evidence:1",),
         requested_at_utc=NOW,
+        affected_symbols=(),
+        weight_changes=(),
+        risks=(),
+        expected_consequences=(),
+        basis_sha256=None,
+        stale_reason=None,
     )
 
 
@@ -259,9 +266,7 @@ def test_attaching_registry_publishes_exact_command_catalog(tmp_path: Path) -> N
             *(spec.capability_id for spec in COMMAND_SPECS),
         )
         assert {
-            row.capability_id
-            for row in snapshot.shell.capabilities
-            if row.state.value == "enabled"
+            row.capability_id for row in snapshot.shell.capabilities if row.state.value == "enabled"
         } == HANDLED
         assert {
             row.capability_id: row.reason
@@ -290,9 +295,7 @@ def test_gateway_rejects_registry_with_noncanonical_catalog(tmp_path: Path) -> N
 
     snapshot = gateway.snapshot()
     assert snapshot.command_specs == ()
-    assert all(
-        row.state is CapabilityState.DISABLED for row in snapshot.shell.capabilities
-    )
+    assert all(row.state is CapabilityState.DISABLED for row in snapshot.shell.capabilities)
 
 
 def test_command_registry_requires_platform_runtime_read_port(tmp_path: Path) -> None:
@@ -335,9 +338,7 @@ def test_unavailable_runtime_disables_only_runtime_governed_actions(
     with CommandRegistry(tmp_path / "commands.sqlite3", _Port(), clock=lambda: NOW) as registry:
         gateway = _governed_gateway(tmp_path, registry, runtime=runtime)
 
-        capabilities = {
-            row.capability_id: row for row in gateway.snapshot().shell.capabilities
-        }
+        capabilities = {row.capability_id: row for row in gateway.snapshot().shell.capabilities}
 
         assert capabilities["note.add"].state is CapabilityState.ENABLED
         for capability_id in {
@@ -347,12 +348,8 @@ def test_unavailable_runtime_disables_only_runtime_governed_actions(
             "agent.enqueue",
         }:
             assert capabilities[capability_id].state is CapabilityState.DISABLED
-            assert capabilities[capability_id].reason == (
-                "Platform runtime state is unavailable."
-            )
-        assert capabilities["trading.pause"].reason == DISABLED_COMMAND_REASONS[
-            "trading.pause"
-        ]
+            assert capabilities[capability_id].reason == ("Platform runtime state is unavailable.")
+        assert capabilities["trading.pause"].reason == DISABLED_COMMAND_REASONS["trading.pause"]
         assert runtime.read_count == 1
 
 
@@ -374,20 +371,19 @@ def test_each_publication_rereads_and_binds_platform_runtime(tmp_path: Path) -> 
         assert runtime.read_count == 3
         assert fresh.control_version == unavailable.control_version + 1
         assert fresh.control_hash != unavailable.control_hash
-        assert next(
-            row
-            for row in fresh.shell.capabilities
-            if row.capability_id == "approval.approve"
-        ).state is CapabilityState.ENABLED
+        assert (
+            next(
+                row for row in fresh.shell.capabilities if row.capability_id == "approval.approve"
+            ).state
+            is CapabilityState.ENABLED
+        )
 
 
 def test_gateway_without_registry_never_publishes_enabled_actions(tmp_path: Path) -> None:
     gateway = Gateway(tmp_path / "auth", clock=lambda: NOW)
     upstream = gateway.snapshot()
     capabilities = tuple(
-        row.model_copy(
-            update={"state": CapabilityState.ENABLED, "reason": None}
-        )
+        row.model_copy(update={"state": CapabilityState.ENABLED, "reason": None})
         if row.capability_id == "note.add"
         else row
         for row in upstream.shell.capabilities
@@ -404,9 +400,7 @@ def test_gateway_without_registry_never_publishes_enabled_actions(tmp_path: Path
     )
 
     published = gateway.snapshot()
-    note = next(
-        row for row in published.shell.capabilities if row.capability_id == "note.add"
-    )
+    note = next(row for row in published.shell.capabilities if row.capability_id == "note.add")
     assert note.state is CapabilityState.DISABLED
     assert all(
         row.state is not CapabilityState.ENABLED
@@ -451,6 +445,13 @@ def test_composite_control_state_is_stable_and_binds_agent_roster(tmp_path: Path
             elapsed_seconds=None,
             model="qwen:64k",
             affected_areas=("models",),
+            session_id=None,
+            plan_steps=(),
+            activity=(),
+            evidence_ids=(),
+            context_percent=None,
+            chat_agent_id="v20-model-researcher",
+            detail_next_cursor=None,
         )
         runtime.sample = _runtime_sample(active_work=(agent,))
         changed_upstream = second_upstream.model_copy(
@@ -488,9 +489,7 @@ def test_composite_control_state_binds_approved_agent_catalog(
         )
         gateway.publish_snapshot(
             first_upstream.model_copy(
-                update={
-                    "shell": first_upstream.shell.model_copy(update={"state_version": 2})
-                }
+                update={"shell": first_upstream.shell.model_copy(update={"state_version": 2})}
             )
         )
         changed = gateway.snapshot()
@@ -567,8 +566,7 @@ def test_controller_note_uses_latest_snapshot_and_server_operator(tmp_path: Path
             stored = notes.list(NoteTarget(target_type="stock", target_id="NVDA"))
         assert len(stored) == 1
         assert stored[0].author == (
-            "windows:"
-            "bc484936aeef0b0d16a8e27487182ac53bab2df5d723a51d15e3f52244acaac6"
+            "windows:bc484936aeef0b0d16a8e27487182ac53bab2df5d723a51d15e3f52244acaac6"
         )
 
 
@@ -951,6 +949,13 @@ def test_changed_control_facts_reject_reviewed_request_as_stale(tmp_path: Path) 
             elapsed_seconds=None,
             model="qwen:64k",
             affected_areas=("models",),
+            session_id=None,
+            plan_steps=(),
+            activity=(),
+            evidence_ids=(),
+            context_percent=None,
+            chat_agent_id="v20-model-researcher",
+            detail_next_cursor=None,
         )
         runtime.sample = _runtime_sample(active_work=(agent,))
 
@@ -1085,9 +1090,7 @@ def test_note_add_remains_safe_when_platform_runtime_is_unavailable(
         assert isinstance(payload, CommandReceiptPayload)
         assert payload.receipt.status is ReceiptStatus.COMPLETED
         with NoteStore(registry.ledger) as notes:
-            assert len(
-                notes.list(NoteTarget(target_type="stock", target_id="NVDA"))
-            ) == 1
+            assert len(notes.list(NoteTarget(target_type="stock", target_id="NVDA"))) == 1
 
 
 def test_operational_exception_is_safe_and_never_reissues(tmp_path: Path) -> None:

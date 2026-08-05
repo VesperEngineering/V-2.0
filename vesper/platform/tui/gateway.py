@@ -48,6 +48,8 @@ from .contracts import (
     HeaderView,
     LeaseResultPayload,
     LockResultPayload,
+    MemoryContentRequestPayload,
+    MemoryContentResultPayload,
     MessageType,
     OperatingMode,
     PingPayload,
@@ -66,14 +68,21 @@ from .conversations import ConversationStore
 from .outbox import OutboundQueue
 from .pipe_security import current_logon_sid
 from .search import GlobalSearchService
+from .session_presence import NULL_SESSION_PRESENCE, SessionPresencePublisher
 from .live_readiness import unavailable_live_readiness
 from .snapshot import diff_snapshots, requires_full_snapshot
 from .snapshot_cache import CachedSnapshot, SnapshotCache, SnapshotCacheError
-from .ports import PlatformRuntimeFacts, SourceSample
+from .ports import MEMORY_AGENT_USAGE_UNAVAILABLE, PlatformRuntimeFacts, SourceSample
 from .projections.platform_runtime import platform_runtime_control_binding
+from .projections.managed_memory import (
+    ManagedMemoryProjection,
+    MemoryContentStale,
+    MemoryContentUnavailable,
+)
 from .recovery import RecoveryReport, RecoveryService
 from .views import (
     AgentsView,
+    CircuitBreakerView,
     ConsoleSnapshot,
     DataView,
     EventPayload,
@@ -82,8 +91,10 @@ from .views import (
     ModelsView,
     OrdersView,
     PortfolioView,
+    QwenStatusView,
     RiskView,
     ScreenView,
+    SystemHealthRow,
     SystemView,
     TimelineView,
 )
@@ -151,6 +162,7 @@ class GatewaySession:
         self._authenticated = False
         self._greeted = False
         self._input_sequence = 0
+        self._last_memory_content_request_id = 0
         self._subscribed = False
         self._outbox = OutboundQueue()
         self._lock = threading.RLock()
@@ -178,6 +190,7 @@ class GatewaySession:
         self._lease.release(self.client_id)
         self._authenticated = False
         self._subscribed = False
+        self._last_memory_content_request_id = 0
 
 
 class Gateway:
@@ -189,11 +202,13 @@ class Gateway:
         *,
         clock: Callable[[], datetime] | None = None,
         search_service: GlobalSearchService | None = None,
+        memory_projection: ManagedMemoryProjection | None = None,
         command_registry: CommandRegistry | None = None,
         platform_runtime_reader: _PlatformRuntimeReadPort | None = None,
         recovery_service: RecoveryService | None = None,
         snapshot_cache: SnapshotCache | None = None,
         conversation_store: ConversationStore | None = None,
+        session_presence: SessionPresencePublisher | None = None,
         logon_sid_provider: Callable[[], str] = current_logon_sid,
     ) -> None:
         if not callable(logon_sid_provider):
@@ -204,18 +219,30 @@ class Gateway:
             raise TypeError("snapshot_cache must be a SnapshotCache")
         if conversation_store is not None and type(conversation_store) is not ConversationStore:
             raise TypeError("conversation_store must be a ConversationStore")
+        presence = NULL_SESSION_PRESENCE if session_presence is None else session_presence
+        if not callable(getattr(presence, "set_authenticated", None)) or not callable(
+            getattr(presence, "close", None)
+        ):
+            raise TypeError("session_presence must publish and close")
         self._verifier_path = Path(state_root) / "password-verifier.json"
         self._password_store = PasswordStore(self._verifier_path)
         self._lease = ControlLease()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sessions: dict[str, GatewaySession] = {}
         self._sessions_lock = threading.Lock()
+        self._session_presence = presence
+        self._presence_lock = threading.Lock()
+        self._authenticated_clients: set[str] = set()
+        self._presence_closed = False
         self._publication_lock = threading.RLock()
         self._control_lock = threading.RLock()
         self._snapshot = self._unavailable_snapshot()
         self._upstream_snapshot = self._snapshot
         self._has_projection_snapshot = False
         self._search_service = search_service
+        if memory_projection is not None and type(memory_projection) is not ManagedMemoryProjection:
+            raise TypeError("memory_projection must be a ManagedMemoryProjection")
+        self._memory_projection = memory_projection
         self._command_registry: CommandRegistry | None = None
         self._platform_runtime_reader: _PlatformRuntimeReadPort | None = None
         self._platform_runtime_sample = self._unavailable_platform_runtime_sample()
@@ -240,6 +267,10 @@ class Gateway:
     @property
     def search_service(self) -> GlobalSearchService | None:
         return self._search_service
+
+    @property
+    def memory_projection(self) -> ManagedMemoryProjection | None:
+        return self._memory_projection
 
     def recovery_report(self) -> RecoveryReport | None:
         """Expose read-only recovery facts; this method cannot resume V20."""
@@ -291,6 +322,18 @@ class Gateway:
                 raise RuntimeError("search service is already attached")
             service.update_snapshot(self._snapshot)
             self._search_service = service
+
+    def attach_memory_projection(self, projection: ManagedMemoryProjection) -> None:
+        """Attach one controller-owned exact managed-memory read port."""
+
+        if type(projection) is not ManagedMemoryProjection:
+            raise TypeError("projection must be a ManagedMemoryProjection")
+        with self._publication_lock:
+            if self._memory_projection is projection:
+                return
+            if self._memory_projection is not None:
+                raise RuntimeError("memory projection is already attached")
+            self._memory_projection = projection
 
     def attach_conversation_store(self, store: ConversationStore) -> None:
         """Attach the one controller-owned durable agent-chat store."""
@@ -373,6 +416,30 @@ class Gateway:
             with session._lock:
                 session.lock()
                 session._outbox.close()
+            self._record_authenticated_client(session.client_id, False)
+
+    def has_authenticated_client(self) -> bool:
+        with self._presence_lock:
+            return bool(self._authenticated_clients)
+
+    def close(self) -> None:
+        """Clear and close only the cross-process authentication marker."""
+
+        with self._presence_lock:
+            if self._presence_closed:
+                return
+            self._presence_closed = True
+            was_authenticated = bool(self._authenticated_clients)
+            self._authenticated_clients.clear()
+            try:
+                if was_authenticated:
+                    self._session_presence.set_authenticated(False)
+            except Exception:
+                pass
+            try:
+                self._session_presence.close()
+            except Exception:
+                pass
 
     def poll(self, client_id: SafeId) -> WireEnvelope | None:
         """Return the next admitted frame without running any V20 service."""
@@ -731,6 +798,52 @@ class Gateway:
                         state_version=result.indexed_state_version,
                     ),
                 )
+            if envelope.message_type is MessageType.MEMORY_CONTENT_REQUEST:
+                payload = self._payload(envelope, MemoryContentRequestPayload, session)
+                if isinstance(payload, WireEnvelope):
+                    return (payload,)
+                assert isinstance(payload, MemoryContentRequestPayload)
+                if payload.request_id <= session._last_memory_content_request_id:
+                    return (
+                        self._error(
+                            session,
+                            "memory-request-replay",
+                            "Memory content request ID was already used.",
+                        ),
+                    )
+                session._last_memory_content_request_id = payload.request_id
+                projection = self._memory_projection
+                content: str | None = None
+                error: str | None = None
+                if projection is None:
+                    error = "Managed memory content is unavailable."
+                else:
+                    try:
+                        document = projection.read_content(
+                            payload.memory_id,
+                            payload.reviewed_updated_at_utc,
+                        )
+                        content = document.content
+                    except MemoryContentStale:
+                        error = "Memory changed. Search again."
+                    except MemoryContentUnavailable:
+                        error = "Managed memory content is unavailable."
+                result = MemoryContentResultPayload(
+                    request_id=payload.request_id,
+                    memory_id=payload.memory_id,
+                    reviewed_updated_at_utc=payload.reviewed_updated_at_utc,
+                    status="success" if content is not None else "error",
+                    content=content,
+                    error=error,
+                )
+                return (
+                    self._emit(
+                        session,
+                        MessageType.MEMORY_CONTENT_RESULT,
+                        result,
+                        state_version=self._snapshot.shell.state_version,
+                    ),
+                )
             if envelope.message_type is MessageType.LEASE_REQUEST:
                 try:
                     decode_payload(envelope)
@@ -749,6 +862,7 @@ class Gateway:
                 except ValidationError:
                     return (self._error(session, "invalid-payload", "Message payload is invalid."),)
                 session.lock()
+                self._record_authenticated_client(session.client_id, False)
                 return (
                     self._emit(
                         session,
@@ -1075,6 +1189,17 @@ class Gateway:
             candidates=(),
             metrics=(),
             evidence=(),
+            active_model_id=None,
+            rollback_model_id=None,
+            approved_family=None,
+            approved_strategy=None,
+            approved_feature_set_id=None,
+            final_regime=None,
+            final_regime_confidence=None,
+            regime_state="unavailable",
+            automatic_changes_blocked=True,
+            block_reason="Controller model summary is unavailable.",
+            gates=(),
         )
         timeline = TimelineView(
             **self._unavailable_view("timeline"),
@@ -1087,9 +1212,20 @@ class Gateway:
             approvals=(),
             alerts=(),
             metrics=(),
+            blocked_actions=(),
+            circuit_breaker=CircuitBreakerView(
+                state="unavailable",
+                reason="Controller circuit-breaker status is unavailable.",
+                observed_at_utc=None,
+            ),
         )
         data = DataView(**self._unavailable_view("data"), sources=(), evidence=())
-        memory = MemoryView(**self._unavailable_view("memory"), rows=(), history=())
+        memory = MemoryView(
+            **self._unavailable_view("memory"),
+            rows=(),
+            history=(),
+            agent_usage_error=MEMORY_AGENT_USAGE_UNAVAILABLE,
+        )
         system = SystemView(
             **self._unavailable_view("system"),
             services=(),
@@ -1098,6 +1234,27 @@ class Gateway:
             live_readiness=unavailable_live_readiness(),
             live_account=None,
             live_transition_plan=None,
+            qwen=QwenStatusView(
+                state="unavailable",
+                loaded_model=None,
+                current_agent=None,
+                queue_length=None,
+                context_percent=None,
+                last_inference_ms=None,
+                observed_at_utc=None,
+                error="Controller Qwen status is unavailable.",
+            ),
+            health=tuple(
+                SystemHealthRow(
+                    component=component,
+                    state="unavailable",
+                    reason=f"Controller {component} health is unavailable.",
+                    observed_at_utc=None,
+                    checks=(),
+                    broker_actions_blocked=component == "recovery",
+                )
+                for component in ("backup", "recovery", "notifications")
+            ),
         )
         command_views: dict[str, ScreenView] = {
             "portfolio": portfolio,
@@ -1175,6 +1332,10 @@ class Gateway:
                     reason = "Unlock failed."
         except (OSError, ValueError, ValidationError):
             reason = "Authentication failed."
+        if success:
+            success = self._record_authenticated_client(session.client_id, True)
+            if not success:
+                reason = "Authentication failed."
         session._authenticated = success
         if not success:
             self._lease.release(session.client_id)
@@ -1189,6 +1350,33 @@ class Gateway:
                 reason=reason,
             ),
         )
+
+    def _record_authenticated_client(self, client_id: str, authenticated: bool) -> bool:
+        with self._presence_lock:
+            if self._presence_closed:
+                return False
+            before = bool(self._authenticated_clients)
+            if authenticated:
+                self._authenticated_clients.add(client_id)
+            else:
+                self._authenticated_clients.discard(client_id)
+            after = bool(self._authenticated_clients)
+            if before == after:
+                return True
+            try:
+                self._session_presence.set_authenticated(after)
+            except Exception:
+                if authenticated:
+                    self._authenticated_clients.discard(client_id)
+                else:
+                    try:
+                        self._session_presence.set_authenticated(False)
+                    except Exception:
+                        self._authenticated_clients.add(client_id)
+                        return False
+                    return True
+                return False
+            return True
 
     def _load_cached_snapshot_after_unlock(self) -> None:
         cache = self._snapshot_cache

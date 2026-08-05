@@ -1,7 +1,7 @@
 use crate::confirm::ConfirmationState;
 use crate::contract::{
-    CapabilityState, CapabilityView, CommandSpecView, CommandType, ConfirmationLevel,
-    ConsoleSnapshot, Sha256Hex,
+    AlertSeverity, CapabilityState, CapabilityView, CommandSpecView, CommandType,
+    ConfirmationLevel, ConsoleSnapshot, Sha256Hex, UtcTimestamp,
 };
 use crate::screens::DetailKind;
 use crate::state::{AccessState, Screen};
@@ -26,6 +26,10 @@ pub struct ControlButton {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlContext {
+    Alert {
+        alert_id: String,
+        created_at_utc: UtcTimestamp,
+    },
     Note {
         target_type: &'static str,
         target_id: String,
@@ -60,10 +64,13 @@ pub enum LocalControl {
     LockTui,
     ToggleAccountPrivacy,
     OpenCandidateDetail,
+    GrowPrimaryPanel,
+    ShrinkPrimaryPanel,
+    ToggleTableColumns,
 }
 
 pub fn local_controls(access: AccessState, screen: Screen) -> Vec<LocalControl> {
-    let mut controls = Vec::with_capacity(3);
+    let mut controls = Vec::with_capacity(6);
     if access == AccessState::Viewer {
         controls.push(LocalControl::TakeControl);
     }
@@ -73,6 +80,13 @@ pub fn local_controls(access: AccessState, screen: Screen) -> Vec<LocalControl> 
     }
     if screen == Screen::ModelsRegime {
         controls.push(LocalControl::OpenCandidateDetail);
+    }
+    if matches!(screen, Screen::Impact | Screen::Portfolio) {
+        controls.extend([
+            LocalControl::GrowPrimaryPanel,
+            LocalControl::ShrinkPrimaryPanel,
+            LocalControl::ToggleTableColumns,
+        ]);
     }
     controls
 }
@@ -276,6 +290,14 @@ pub fn build_control_menu(
                 selected_kind,
                 selected_id,
             );
+            if definition.command_type == CommandType::AlertDismiss
+                && button.state == ButtonState::Enabled
+                && button.context.is_none()
+            {
+                button.state = ButtonState::Disabled {
+                    reason: "Only a resolved alert can be dismissed.".to_owned(),
+                };
+            }
             if definition.command_type == CommandType::AgentStop
                 && button.state == ButtonState::Enabled
             {
@@ -323,6 +345,30 @@ fn control_context(
     selected_kind: Option<DetailKind>,
     selected_id: Option<&str>,
 ) -> Option<ControlContext> {
+    if command_type == CommandType::AlertDismiss {
+        let alert = if selected_kind == Some(DetailKind::Alert) {
+            let selected = selected_id?;
+            snapshot
+                .risk
+                .alerts
+                .iter()
+                .find(|row| row.alert_id.as_str() == selected)?
+        } else {
+            snapshot
+                .shell
+                .alerts
+                .as_ref()
+                .and_then(|alerts| alerts.first())
+                .or_else(|| snapshot.risk.alerts.first())?
+        };
+        if alert.severity != AlertSeverity::Resolved {
+            return None;
+        }
+        return Some(ControlContext::Alert {
+            alert_id: alert.alert_id.as_str().to_owned(),
+            created_at_utc: alert.created_at_utc.clone(),
+        });
+    }
     let selected_id = selected_id?;
     if command_type == CommandType::NoteAdd {
         let target_type = match selected_kind? {
@@ -383,6 +429,9 @@ fn local_control_label(control: LocalControl) -> &'static str {
         LocalControl::LockTui => "Lock TUI",
         LocalControl::ToggleAccountPrivacy => "Account Privacy",
         LocalControl::OpenCandidateDetail => "Candidate Detail",
+        LocalControl::GrowPrimaryPanel => "Grow Primary Panel",
+        LocalControl::ShrinkPrimaryPanel => "Shrink Primary Panel",
+        LocalControl::ToggleTableColumns => "Toggle Table Columns",
     }
 }
 
@@ -538,24 +587,12 @@ pub fn server_button(
 }
 
 pub fn control_definitions_for_screen(screen: Screen) -> impl Iterator<Item = ControlDefinition> {
-    let definitions = match screen {
-        Screen::Impact => vec![
-            definition(
-                CommandType::NoteAdd,
-                "Add Note",
-                ControlRelevance::NoteTarget,
-            ),
-            definition(
-                CommandType::AlertDismiss,
-                "Dismiss Alert",
-                ControlRelevance::Global,
-            ),
-            definition(
-                CommandType::LayoutReset,
-                "Reset Layout",
-                ControlRelevance::Global,
-            ),
-        ],
+    let mut definitions = match screen {
+        Screen::Impact => vec![definition(
+            CommandType::NoteAdd,
+            "Add Note",
+            ControlRelevance::NoteTarget,
+        )],
         Screen::Portfolio | Screen::Orders | Screen::Timeline => vec![definition(
             CommandType::NoteAdd,
             "Add Note",
@@ -716,6 +753,18 @@ pub fn control_definitions_for_screen(screen: Screen) -> impl Iterator<Item = Co
             ),
         ],
     };
+    definitions.extend([
+        definition(
+            CommandType::AlertDismiss,
+            "Dismiss Alert",
+            ControlRelevance::Global,
+        ),
+        definition(
+            CommandType::LayoutReset,
+            "Reset Layout",
+            ControlRelevance::Global,
+        ),
+    ]);
     definitions.into_iter()
 }
 

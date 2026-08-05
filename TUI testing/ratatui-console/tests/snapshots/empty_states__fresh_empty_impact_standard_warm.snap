@@ -41,8 +41,8 @@ expression: render_text(&state)
 │                                                                                                      ││                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 ┌CONTROLS - click or : menu────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ [x] Add Note              [x] Dismiss Alert         [x] Reset Layout          [ ] Lock TUI                                                                   │
-│                                                                                                                                                              │
+│ [x] Add Note              [x] Dismiss Alert         [x] Reset Layout          [ ] Lock TUI              [ ] Grow Primary Panel    [ ] Shrink Primary Panel   │
+│ [ ] Toggle Table Columns                                                                                                                                     │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 │                                                                                                                                                              │

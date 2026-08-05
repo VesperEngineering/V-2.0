@@ -1,6 +1,7 @@
 use crate::contract::{
-    Freshness, MetricRow, OrderSide, ReadinessGate, ReadinessState, RepositoryRow, ServiceState,
-    SystemView,
+    Freshness, MetricRow, OrderSide, QwenState, ReadinessGate, ReadinessState,
+    RepositoryCheckState, RepositoryRow, ServiceState, SystemHealthCheckState,
+    SystemHealthComponent, SystemHealthState, SystemView,
 };
 use crate::screens::{DetailKind, ScreenState};
 use crate::ui::format_eastern_time;
@@ -61,37 +62,38 @@ fn render_services(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            let lines = view
-                .services
-                .iter()
-                .skip(if focused {
-                    service_offset(view, state)
-                } else {
-                    0
-                })
-                .map(|row| {
-                    let (badge, style) = service_status(row.state, state);
-                    let reason = row
-                        .health_reason
-                        .as_deref()
-                        .map(|value| format!(" | {}", sanitize(value)))
-                        .unwrap_or_default();
-                    Line::from(vec![
-                        Span::raw(marker(state, row.service_id.as_str(), DetailKind::Service)),
-                        Span::styled(badge, style),
-                        Span::raw(format!(
-                            " {} | {}{reason}",
-                            row.service_id.as_str(),
-                            format_eastern_time(&row.observed_at_utc)
-                        )),
-                    ])
-                })
-                .collect::<Vec<_>>();
-            if lines.is_empty() {
-                vec![Line::from("No services reported.")]
-            } else {
-                lines
+            let mut lines = qwen_lines(view);
+            lines.extend(
+                view.services
+                    .iter()
+                    .skip(if focused {
+                        service_offset(view, state)
+                    } else {
+                        0
+                    })
+                    .map(|row| {
+                        let (badge, style) = service_status(row.state, state);
+                        let reason = row
+                            .health_reason
+                            .as_deref()
+                            .map(|value| format!(" | {}", sanitize(value)))
+                            .unwrap_or_default();
+                        Line::from(vec![
+                            Span::raw(marker(state, row.service_id.as_str(), DetailKind::Service)),
+                            Span::styled(badge, style),
+                            Span::raw(format!(
+                                " {} | {}{reason}",
+                                row.service_id.as_str(),
+                                format_eastern_time(&row.observed_at_utc)
+                            )),
+                        ])
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if view.services.is_empty() {
+                lines.push(Line::from("No services reported."));
             }
+            lines
         },
         |message| vec![Line::from(message)],
     );
@@ -108,21 +110,23 @@ fn render_metrics(
 ) {
     let lines = source_message(view.freshness, view.error.as_deref()).map_or_else(
         || {
-            let lines = view
-                .metrics
-                .iter()
-                .skip(if focused {
-                    metric_offset(view, state)
-                } else {
-                    0
-                })
-                .map(|row| metric_line(row, state))
-                .collect::<Vec<_>>();
-            if lines.is_empty() {
-                vec![Line::from("No system metrics reported.")]
+            let mut lines = vec![Line::from("METRICS")];
+            if view.metrics.is_empty() {
+                lines.push(Line::from("No system metrics reported."));
             } else {
-                lines
+                lines.extend(
+                    view.metrics
+                        .iter()
+                        .skip(if focused {
+                            metric_offset(view, state)
+                        } else {
+                            0
+                        })
+                        .map(|row| metric_line(row, state)),
+                );
             }
+            lines.extend(health_lines(view));
+            lines
         },
         |message| vec![Line::from(message)],
     );
@@ -147,7 +151,7 @@ fn render_repositories(
                 } else {
                     0
                 })
-                .map(|row| repository_line(row, state))
+                .flat_map(|row| repository_lines(row, state))
                 .collect::<Vec<_>>();
             if lines.is_empty() {
                 vec![Line::from("No repositories reported.")]
@@ -339,10 +343,10 @@ fn metric_line(row: &MetricRow, state: &ScreenState) -> Line<'static> {
     ])
 }
 
-fn repository_line(row: &RepositoryRow, state: &ScreenState) -> Line<'static> {
+fn repository_lines(row: &RepositoryRow, state: &ScreenState) -> Vec<Line<'static>> {
     let (badge, style) = freshness_status(row.freshness, state);
     if matches!(row.freshness, Freshness::Loading | Freshness::Unavailable) {
-        return Line::from(vec![
+        return vec![Line::from(vec![
             Span::raw(marker(
                 state,
                 row.repository_id.as_str(),
@@ -357,7 +361,7 @@ fn repository_line(row: &RepositoryRow, state: &ScreenState) -> Line<'static> {
                     .map(sanitize)
                     .unwrap_or_else(|| "Waiting for controller source.".to_owned())
             )),
-        ]);
+        ])];
     }
     let branch = row.branch.as_ref().map_or_else(
         || "UNAVAILABLE".to_owned(),
@@ -393,7 +397,7 @@ fn repository_line(row: &RepositoryRow, state: &ScreenState) -> Line<'static> {
         .as_deref()
         .map(|value| format!(" | {}", sanitize(value)))
         .unwrap_or_default();
-    Line::from(vec![
+    let mut lines = vec![Line::from(vec![
         Span::raw(marker(
             state,
             row.repository_id.as_str(),
@@ -405,7 +409,152 @@ fn repository_line(row: &RepositoryRow, state: &ScreenState) -> Line<'static> {
             row.repository_id.as_str(),
             sanitize(row.source.as_str())
         )),
-    ])
+    ])];
+    if row.checks.is_empty() {
+        lines.push(Line::from("CHECKS [?] UNAVAILABLE"));
+    } else {
+        for check in &row.checks {
+            let reason = check
+                .reason
+                .as_ref()
+                .map_or_else(|| "NONE".to_owned(), |value| sanitize(value.as_str()));
+            let observed = check
+                .observed_at_utc
+                .as_ref()
+                .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time);
+            lines.push(Line::from(format!(
+                "{} | {} | {} | REASON {}",
+                check.check_id.as_str(),
+                repository_check_state(check.state),
+                observed,
+                reason
+            )));
+        }
+    }
+    lines
+}
+
+fn qwen_lines(view: &SystemView) -> Vec<Line<'static>> {
+    let qwen = &view.qwen;
+    let model = qwen.loaded_model.as_ref().map_or_else(
+        || "UNAVAILABLE".to_owned(),
+        |value| sanitize(value.as_str()),
+    );
+    let observed = qwen
+        .observed_at_utc
+        .as_ref()
+        .map_or_else(|| "UNAVAILABLE".to_owned(), format_eastern_time);
+    let current_agent = qwen
+        .current_agent
+        .as_ref()
+        .map_or("UNAVAILABLE", |value| value.as_str());
+    let queue = qwen
+        .queue_length
+        .map_or_else(|| "UNAVAILABLE".to_owned(), |value| value.to_string());
+    let context = qwen
+        .context_percent
+        .map_or_else(|| "UNAVAILABLE".to_owned(), |value| format!("{value:.1}%"));
+    let inference = qwen
+        .last_inference_ms
+        .map_or_else(|| "UNAVAILABLE".to_owned(), |value| format!("{value:.1}ms"));
+    let error = qwen
+        .error
+        .as_ref()
+        .map_or_else(|| "NONE".to_owned(), |value| sanitize(value.as_str()));
+    vec![
+        Line::from(format!(
+            "QWEN: {} | MODEL {model} | {observed}",
+            qwen_state(qwen.state)
+        )),
+        Line::from(format!(
+            "CURRENT AGENT {current_agent} | QUEUE {queue} | CONTEXT {context} | LAST INFERENCE {inference}"
+        )),
+        Line::from(format!("ERROR {error}")),
+        Line::from("SERVICES"),
+    ]
+}
+
+fn health_lines(view: &SystemView) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("BACKUP / RECOVERY / NOTIFICATIONS")];
+    for row in &view.health {
+        let reason = row
+            .reason
+            .as_ref()
+            .map_or_else(|| "NONE".to_owned(), |value| sanitize(value.as_str()));
+        lines.push(Line::from(format!(
+            "{}: {} | BROKER ACTIONS BLOCKED: {}",
+            health_component(row.component),
+            health_state(row.state),
+            if row.broker_actions_blocked {
+                "YES"
+            } else {
+                "NO"
+            }
+        )));
+        lines.push(Line::from(format!("REASON {reason}")));
+        if row.checks.is_empty() {
+            lines.push(Line::from("CHECKS [?] UNAVAILABLE"));
+        } else {
+            for check in &row.checks {
+                let reason = check
+                    .reason
+                    .as_ref()
+                    .map_or_else(|| "NONE".to_owned(), |value| sanitize(value.as_str()));
+                lines.push(Line::from(format!(
+                    "{} | {} | REASON {}",
+                    check.check_id.as_str(),
+                    health_check_state(check.state),
+                    reason
+                )));
+            }
+        }
+    }
+    lines
+}
+
+fn qwen_state(state: QwenState) -> &'static str {
+    match state {
+        QwenState::Loading => "LOADING",
+        QwenState::Ready => "READY",
+        QwenState::Busy => "BUSY",
+        QwenState::Quiet => "QUIET",
+        QwenState::Stopped => "STOPPED",
+        QwenState::Unavailable => "UNAVAILABLE",
+    }
+}
+
+fn repository_check_state(state: RepositoryCheckState) -> &'static str {
+    match state {
+        RepositoryCheckState::Pass => "PASS",
+        RepositoryCheckState::Fail => "FAIL",
+        RepositoryCheckState::Running => "RUNNING",
+        RepositoryCheckState::Unavailable => "UNAVAILABLE",
+    }
+}
+
+fn health_component(component: SystemHealthComponent) -> &'static str {
+    match component {
+        SystemHealthComponent::Backup => "BACKUP",
+        SystemHealthComponent::Recovery => "RECOVERY",
+        SystemHealthComponent::Notifications => "NOTIFICATIONS",
+    }
+}
+
+fn health_state(state: SystemHealthState) -> &'static str {
+    match state {
+        SystemHealthState::Healthy => "HEALTHY",
+        SystemHealthState::Degraded => "DEGRADED",
+        SystemHealthState::Blocked => "BLOCKED",
+        SystemHealthState::Unavailable => "UNAVAILABLE",
+    }
+}
+
+fn health_check_state(state: SystemHealthCheckState) -> &'static str {
+    match state {
+        SystemHealthCheckState::Pass => "PASS",
+        SystemHealthCheckState::Fail => "FAIL",
+        SystemHealthCheckState::Unavailable => "UNAVAILABLE",
+    }
 }
 
 fn service_status(status: ServiceState, state: &ScreenState) -> (&'static str, Style) {

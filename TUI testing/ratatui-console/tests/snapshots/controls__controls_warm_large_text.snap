@@ -134,12 +134,12 @@ THEME WarmWhite | MODE LargeText
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
 │> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
+│SYMBOLS AAPL                                                                                      │
+│AAPL 10.0% -> 11.0%                                                                               │
+│RISKS Concentration increases.                                                                    │
+│CONSEQUENCES AAPL allocation rises.                                                               │
+│BASIS cccccccccccc                                                                                │
+│STALE REASON NONE                                                                                 │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -165,12 +165,12 @@ THEME WarmWhite | MODE LargeText
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
 │> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
+│SYMBOLS AAPL                                                                                      │
+│AAPL 10.0% -> 11.0%                                                                               │
+│RISKS Concentration increases.                                                                    │
+│CONSEQUENCES AAPL allocation rises.                                                               │
+│BASIS cccccccccccc                                                                                │
+│STALE REASON NONE                                                                                 │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -196,12 +196,12 @@ THEME WarmWhite | MODE LargeText
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
 │> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
+│SYMBOLS AAPL                                                                                      │
+│AAPL 10.0% -> 11.0%                                                                               │
+│RISKS Concentration increases.                                                                    │
+│CONSEQUENCES AAPL allocation rises.                                                               │
+│BASIS cccccccccccc                                                                                │
+│STALE REASON NONE                                                                                 │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -227,12 +227,12 @@ THEME WarmWhite | MODE LargeText
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌> APPROVALS - PANEL 2/4───────────────────────────────────────────────────────────────────────────┐
 │> [~] PENDING approval:1 | 2026-08-02 20:00:00 EDT | Review required | Evidence evidence:1        │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
+│SYMBOLS AAPL                                                                                      │
+│AAPL 10.0% -> 11.0%                                                                               │
+│RISKS Concentration increases.                                                                    │
+│CONSEQUENCES AAPL allocation rises.                                                               │
+│BASIS cccccccccccc                                                                                │
+│STALE REASON NONE                                                                                 │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -256,19 +256,19 @@ THEME WarmWhite | MODE LargeText
 ┌ALERTS────────────────────────────────────────────────────────────────────────────────────────────┐
 │[OK] HEALTHY - No active alerts.                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌HOLDINGS───────────────────────────────────────────────────────┐┌IMPACT FEED──────────────────────┐
-│  Symbol          Current        Proposed        Approved      ││[>] ACTIVE 2026-08-02 20:00:00   │
-│                                                               ││EDT  AAPL review started         │
-│  AAPL            10.00%         11.00%          -             ││                                 │
-│                                                               ││                                 │
-│                                                               ││                                 │
-│                                                               ││                                 │
-│                                                               │└─────────────────────────────────┘
-│                                                               │┌AGENT WORK───────────────────────┐
-│                                                               ││Agent    Task         Stage   P  │
-│                                                               ││                                 │
-│                                                               ││[ ] port Review AAPL  RUNNING 10 │
-└───────────────────────────────────────────────────────────────┘└─────────────────────────────────┘
+┌HOLDINGS - PANEL 1/3──────────────────────────────────────────────────────────────────────────────┐
+│  Symbol                   Current                 Proposed                Approved               │
+│                                                                                                  │
+│  AAPL                     10.00%                  11.00%                  -                      │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌KEYS & STATUS─────────────────────────────────────────────────────────────────────────────────────┐
-│: Actions | Up/Down Holdings | o Open | q Close | f Filter                                        │
+│: Actions | [ Prev | ] Next | Up/Down | o Open | f Filter | q Close                               │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘

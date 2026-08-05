@@ -7,6 +7,7 @@ import pytest
 
 from vesper.platform.tui.event_store import EventInput, EventStore
 from vesper.platform.tui.notes import NoteStore, NoteTarget, NoteVisibility
+from vesper.platform.tui.projections.managed_memory import ManagedMemoryProjection
 from vesper.platform.tui.search import (
     GlobalSearchService,
     SearchFilters,
@@ -17,6 +18,11 @@ from vesper.platform.tui.search import (
 )
 from vesper.platform.tui.sqlite_ledger import TuiLedger
 from vesper.platform.tui.views import ConsoleSnapshot
+from vesper.platform.tui.working_memory import (
+    MemoryCandidate,
+    MemoryValueScore,
+    WorkingMemoryStore,
+)
 
 
 FIXTURE = Path("TUI testing/contracts/v1/console_snapshot_empty_command_specs.json")
@@ -34,9 +40,10 @@ def _event(index: int, *, summary: str, event_id: str | None = None) -> EventInp
         symbol="AAPL",
         model_id=None,
         approval_id=None,
-        order_id=None,
-        evidence_ids=(),
-        source="controller",
+            order_id=None,
+            evidence_ids=(),
+            work_id=None,
+            source="controller",
     )
 
 
@@ -119,9 +126,7 @@ def test_search_covers_every_supported_record_type_and_routes_to_its_owner(
 
     for query, kind, record_type, record_id, screen in cases:
         results = search.search(query, SearchFilters(kinds=(kind,)), 10)
-        assert [
-            (item.kind, item.record_type, item.record_id, item.screen) for item in results
-        ] == [
+        assert [(item.kind, item.record_type, item.record_id, item.screen) for item in results] == [
             (kind, record_type, record_id, screen)
         ]
 
@@ -192,9 +197,7 @@ def test_search_deduplicates_entities_repeated_across_screen_views(
 
 def test_search_preserves_same_broad_kind_and_id_for_distinct_record_types() -> None:
     snapshot = ConsoleSnapshot.model_validate_json(FIXTURE.read_text(encoding="utf-8"))
-    candidate = snapshot.models.candidates[0].model_copy(
-        update={"candidate_id": "model:active"}
-    )
+    candidate = snapshot.models.candidates[0].model_copy(update={"candidate_id": "model:active"})
     repository = snapshot.system.repositories[0].model_copy(
         update={"repository_id": "source:massive"}
     )
@@ -219,15 +222,11 @@ def test_search_preserves_same_broad_kind_and_id_for_distinct_record_types() -> 
     finally:
         service.close()
 
-    assert {
-        (item.record_type, item.record_id) for item in model_results
-    } == {
+    assert {(item.record_type, item.record_id) for item in model_results} == {
         (SearchRecordType.MODEL_OPINION_ROW, "model:active"),
         (SearchRecordType.CANDIDATE_ROW, "model:active"),
     }
-    assert {
-        (item.record_type, item.record_id) for item in source_results
-    } == {
+    assert {(item.record_type, item.record_id) for item in source_results} == {
         (SearchRecordType.SOURCE_ROW, "source:massive"),
         (SearchRecordType.REPOSITORY_ROW, "source:massive"),
     }
@@ -367,9 +366,9 @@ def test_global_search_finds_oldest_event_outside_snapshot_window_after_restart(
 
     snapshot = ConsoleSnapshot.model_validate_json(FIXTURE.read_text(encoding="utf-8"))
     service = GlobalSearchService(snapshot, events, notes)
-    assert [item.record_id for item in service.search("oldest sent", SearchFilters(), 10).results] == [
-        "history:00000"
-    ]
+    assert [
+        item.record_id for item in service.search("oldest sent", SearchFilters(), 10).results
+    ] == ["history:00000"]
     service.close()
     events.close()
     notes.close()
@@ -389,6 +388,71 @@ def test_global_search_finds_oldest_event_outside_snapshot_window_after_restart(
         reopened_events.close()
         reopened_notes.close()
         reopened_ledger.close()
+
+
+def test_global_search_matches_full_archived_memory_beyond_snapshot_summary(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    score = lambda value: MemoryValueScore(value, value, value, value, value, value)
+    with WorkingMemoryStore(
+        vault,
+        clock=lambda: NOW,
+        id_factory=lambda: "change:archive-search",
+        candidate_validator=lambda _candidate: True,
+    ) as store:
+        store.propose(
+            MemoryCandidate(
+                memory_id="memory:deep-archive",
+                content=("ordinary archive context " * 240) + "deeparchivesentinel",
+                scope="v20",
+                category="durable-lesson",
+                supported=True,
+                evidence_ids=("evidence:archive",),
+                reason="Verified archived detail.",
+                score=score(10),
+            )
+        )
+        store.propose(
+            MemoryCandidate(
+                memory_id="memory:core-winner",
+                content="high value core context " * 400,
+                scope="v20",
+                category="durable-lesson",
+                supported=True,
+                evidence_ids=("evidence:core",),
+                reason="Higher-value Core memory.",
+                score=score(20),
+            )
+        )
+        store.curate("validated-work")
+
+    snapshot = ConsoleSnapshot.model_validate_json(FIXTURE.read_text(encoding="utf-8"))
+    projection = ManagedMemoryProjection(vault, clock=lambda: NOW)
+    before = {path.name: path.read_bytes() for path in vault.iterdir() if path.is_file()}
+    service = GlobalSearchService(
+        snapshot,
+        None,
+        None,
+        memory_archive=projection,
+    )
+    try:
+        page = service.search(
+            "deeparchivesentinel",
+            SearchFilters(
+                kinds=(SearchKind.MEMORY,),
+                screens=(SearchScreen.MEMORY,),
+            ),
+            10,
+        )
+    finally:
+        service.close()
+
+    assert [(row.record_id, row.summary, row.source) for row in page.results] == [
+        ("memory:deep-archive", "archived", "managed V20 working memory")
+    ]
+    assert page.error is None
+    assert {path.name: path.read_bytes() for path in vault.iterdir() if path.is_file()} == before
 
 
 def test_global_search_is_bounded_fts_safe_and_reports_store_errors_without_leaks(

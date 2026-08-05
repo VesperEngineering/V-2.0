@@ -54,6 +54,21 @@ fn presentation(snapshot: &Value) -> Value {
         "system": screen_meta("system"),
         "portfolio_rank_source": snapshot["portfolio"]["rank_source"].clone(),
         "timeline_hidden_event_count": snapshot["timeline"]["hidden_event_count"].clone(),
+        "model_active_model_id": snapshot["models"]["active_model_id"].clone(),
+        "model_rollback_model_id": snapshot["models"]["rollback_model_id"].clone(),
+        "model_approved_family": snapshot["models"]["approved_family"].clone(),
+        "model_approved_strategy": snapshot["models"]["approved_strategy"].clone(),
+        "model_approved_feature_set_id": snapshot["models"]["approved_feature_set_id"].clone(),
+        "model_final_regime": snapshot["models"]["final_regime"].clone(),
+        "model_final_regime_confidence": snapshot["models"]["final_regime_confidence"].clone(),
+        "model_regime_state": snapshot["models"]["regime_state"].clone(),
+        "model_automatic_changes_blocked": snapshot["models"]["automatic_changes_blocked"].clone(),
+        "model_block_reason": snapshot["models"]["block_reason"].clone(),
+        "model_gates": snapshot["models"]["gates"].clone(),
+        "risk_blocked_actions": snapshot["risk"]["blocked_actions"].clone(),
+        "risk_circuit_breaker": snapshot["risk"]["circuit_breaker"].clone(),
+        "system_qwen": snapshot["system"]["qwen"].clone(),
+        "system_health": snapshot["system"]["health"].clone(),
     })
 }
 
@@ -665,6 +680,114 @@ fn event_presentation_keeps_stale_reason_visible() {
     assert_eq!(
         reducer.state().snapshot.portfolio.error.as_deref(),
         Some("Position read-back is delayed.")
+    );
+}
+
+#[test]
+fn event_presentation_replaces_direct_model_risk_and_system_summaries() {
+    let base = snapshot_value();
+    let mut direct = presentation(&base);
+    direct["model_active_model_id"] = json!("model:next");
+    direct["model_rollback_model_id"] = json!("model:active");
+    direct["model_approved_family"] = json!("approved-family-v2");
+    direct["model_approved_strategy"] = json!("ml_model");
+    direct["model_approved_feature_set_id"] = json!("features:v2");
+    direct["model_final_regime"] = Value::Null;
+    direct["model_final_regime_confidence"] = Value::Null;
+    direct["model_regime_state"] = json!("uncertain");
+    direct["model_automatic_changes_blocked"] = json!(true);
+    direct["model_block_reason"] = json!("Regime votes disagree.");
+    direct["model_gates"] = json!([]);
+    direct["risk_blocked_actions"] = json!([{
+        "action_id": "action:rebalance",
+        "action": "Submit rebalance orders",
+        "reason": "Regime is uncertain.",
+        "affected_symbols": ["AAPL"],
+        "created_at_utc": "2026-08-03T00:00:01Z"
+    }]);
+    direct["risk_circuit_breaker"] = json!({
+        "state": "tripped",
+        "reason": "Automatic changes are blocked.",
+        "observed_at_utc": "2026-08-03T00:00:01Z"
+    });
+    direct["system_qwen"] = json!({
+        "state": "quiet",
+        "loaded_model": "qwen:64k",
+        "current_agent": null,
+        "queue_length": 0,
+        "context_percent": 30.0,
+        "last_inference_ms": 240.0,
+        "observed_at_utc": "2026-08-03T00:00:01Z",
+        "error": null
+    });
+    direct["system_health"] = json!([
+        {
+            "component": "backup",
+            "state": "healthy",
+            "reason": null,
+            "observed_at_utc": "2026-08-03T00:00:01Z",
+            "checks": [{"check_id": "check:backup", "state": "pass", "reason": null}],
+            "broker_actions_blocked": false
+        },
+        {
+            "component": "recovery",
+            "state": "degraded",
+            "reason": "Recovery drill is overdue.",
+            "observed_at_utc": "2026-08-03T00:00:01Z",
+            "checks": [{
+                "check_id": "check:recovery",
+                "state": "fail",
+                "reason": "Recovery drill is overdue."
+            }],
+            "broker_actions_blocked": true
+        },
+        {
+            "component": "notifications",
+            "state": "healthy",
+            "reason": null,
+            "observed_at_utc": "2026-08-03T00:00:01Z",
+            "checks": [{
+                "check_id": "check:notifications",
+                "state": "pass",
+                "reason": null
+            }],
+            "broker_actions_blocked": false
+        }
+    ]);
+
+    let mut reducer = SnapshotReducer::default();
+    reducer.apply_snapshot(snapshot(base.clone(), 1));
+    reducer
+        .apply_event(event(
+            &base,
+            1,
+            2,
+            "upsert",
+            base["portfolio"]["rows"][0].clone(),
+            &["portfolio.rows"],
+            direct,
+        ))
+        .unwrap();
+
+    let reduced = serde_json::to_value(&reducer.state().snapshot).unwrap();
+    assert_eq!(reduced["models"]["active_model_id"], json!("model:next"));
+    assert_eq!(reduced["models"]["final_regime"], Value::Null);
+    assert_eq!(reduced["models"]["regime_state"], json!("uncertain"));
+    assert_eq!(reduced["models"]["gates"], json!([]));
+    assert_eq!(
+        reduced["risk"]["blocked_actions"][0]["action_id"],
+        json!("action:rebalance")
+    );
+    assert_eq!(
+        reduced["risk"]["circuit_breaker"]["state"],
+        json!("tripped")
+    );
+    assert_eq!(reduced["system"]["qwen"]["state"], json!("quiet"));
+    assert_eq!(reduced["system"]["health"][1]["state"], json!("degraded"));
+    assert_eq!(
+        reduced["models"]["opinions"][0]["regime"],
+        json!("risk-on"),
+        "opinions remain evidence and must not infer the direct final regime"
     );
 }
 

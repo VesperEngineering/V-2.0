@@ -56,9 +56,7 @@ _EXPECTED_COLUMNS = {
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _WORD_RE = re.compile(r"\b\w+(?:['’]\w+)*\b", re.UNICODE)
 _SECRET_PATTERNS = (
-    re.compile(
-        r"(?i)\b(?:api[ _-]?key|secret|password|access[ _-]?token|bearer)\b\s*[:=]\s*\S+"
-    ),
+    re.compile(r"(?i)\b(?:api[ _-]?key|secret|password|access[ _-]?token|bearer)\b\s*[:=]\s*\S+"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
@@ -315,9 +313,7 @@ def _receipt_from_json(value: str) -> MemoryChangeReceipt:
             evidence_ids=tuple(str(item) for item in raw["evidence_ids"]),
             before_hash=str(raw["before_hash"]),
             after_hash=str(raw["after_hash"]),
-            restored_hash=(
-                None if raw["restored_hash"] is None else str(raw["restored_hash"])
-            ),
+            restored_hash=(None if raw["restored_hash"] is None else str(raw["restored_hash"])),
             added_ids=tuple(str(item) for item in raw["added_ids"]),
             removed_ids=tuple(str(item) for item in raw["removed_ids"]),
             created_at_utc=_parse_utc(str(raw["created_at_utc"])),
@@ -367,9 +363,7 @@ def _exclusive_writer_lock(path: Path) -> Iterator[None]:
                 acquired = True
             except OSError as exc:
                 if time.monotonic() >= deadline:
-                    raise WorkingMemoryError(
-                        "working memory writer lock is already held"
-                    ) from exc
+                    raise WorkingMemoryError("working memory writer lock is already held") from exc
                 time.sleep(_LOCK_POLL_SECONDS)
         try:
             yield
@@ -588,9 +582,7 @@ class WorkingMemoryStore:
         target_state = self._decode_state(str(row[0]))
         target_receipt = _receipt_from_json(str(row[1]))
         all_ids = {candidate.memory_id for candidate, _accepted_at in self._all_candidates()}
-        after_state: dict[str, MemoryStatus] = {
-            memory_id: "archived" for memory_id in all_ids
-        }
+        after_state: dict[str, MemoryStatus] = {memory_id: "archived" for memory_id in all_ids}
         after_state.update(target_state)
         core_image = self._connection.execute(
             """
@@ -696,9 +688,7 @@ class WorkingMemoryStore:
                     self._connection.execute("ROLLBACK")
                 raise
         self._validate_schema()
-        if tuple(str(row[0]) for row in self._connection.execute("PRAGMA quick_check")) != (
-            "ok",
-        ):
+        if tuple(str(row[0]) for row in self._connection.execute("PRAGMA quick_check")) != ("ok",):
             raise WorkingMemoryError("working memory ledger failed integrity checking")
 
     def _validate_schema(self) -> None:
@@ -712,8 +702,7 @@ class WorkingMemoryStore:
             raise WorkingMemoryError("working memory ledger schema is incomplete or changed")
         for table, expected in _EXPECTED_COLUMNS.items():
             actual = tuple(
-                str(row[1])
-                for row in self._connection.execute(f"PRAGMA table_info({table})")
+                str(row[1]) for row in self._connection.execute(f"PRAGMA table_info({table})")
             )
             if actual != expected:
                 raise WorkingMemoryError("working memory ledger schema columns are invalid")
@@ -760,9 +749,7 @@ class WorkingMemoryStore:
             created_at_utc=now,
         )
         writes = self._state_writes(after_state, receipt, core_override)
-        before_images = {
-            path: path.read_bytes() if path.is_file() else None for path in writes
-        }
+        before_images = {path: path.read_bytes() if path.is_file() else None for path in writes}
         with self._transaction() as connection:
             connection.execute(
                 """
@@ -814,18 +801,25 @@ class WorkingMemoryStore:
             with self._transaction() as connection:
                 for memory_id, status in after_state.items():
                     accepted_at = proposed_at[memory_id]
+                    updated_at = max(now, accepted_at)
                     connection.execute(
                         """
                         INSERT INTO memory_items (
                             memory_id, status, created_at_utc, updated_at_utc
                         ) VALUES (?, ?, ?, ?)
-                        ON CONFLICT(memory_id) DO UPDATE SET status = excluded.status
+                        ON CONFLICT(memory_id) DO UPDATE SET
+                            status = excluded.status,
+                            updated_at_utc = CASE
+                                WHEN memory_items.status != excluded.status
+                                THEN max(memory_items.updated_at_utc, excluded.updated_at_utc)
+                                ELSE memory_items.updated_at_utc
+                            END
                         """,
                         (
                             memory_id,
                             status,
                             _utc_text(accepted_at),
-                            _utc_text(accepted_at),
+                            _utc_text(updated_at),
                         ),
                     )
                 connection.execute(
@@ -848,7 +842,7 @@ class WorkingMemoryStore:
         receipt: MemoryChangeReceipt,
         core_override: tuple[bool, bytes | None] | None,
     ) -> dict[Path, bytes | None]:
-        items = self._items_for_state(state)
+        items = self._items_for_state(state, receipt.created_at_utc)
         core_items = tuple(item for item in items if item.status == "core")
         writes: dict[Path, bytes | None] = {}
         core_path = self._ledger_path("Core Memory.md")
@@ -858,15 +852,9 @@ class WorkingMemoryStore:
             exists, payload = core_override
             writes[core_path] = payload if exists else None
         for item in items:
-            archive_path = self._ledger_path(
-                f"Archive/{_safe_file_stem(item.memory_id)}.md"
-            )
-            writes[archive_path] = (
-                self._render_archive(item) if item.status == "archived" else None
-            )
-        history_path = self._ledger_path(
-            f"History/{_safe_file_stem(receipt.change_id)}.md"
-        )
+            archive_path = self._ledger_path(f"Archive/{_safe_file_stem(item.memory_id)}.md")
+            writes[archive_path] = self._render_archive(item) if item.status == "archived" else None
+        history_path = self._ledger_path(f"History/{_safe_file_stem(receipt.change_id)}.md")
         writes[history_path] = self._render_history(receipt)
         return writes
 
@@ -896,9 +884,7 @@ class WorkingMemoryStore:
                 {evidence_id for item in items for evidence_id in item.evidence_ids}
             ),
             "score_components": score_components,
-            "supersedes": sorted(
-                {memory_id for item in items for memory_id in item.supersedes}
-            ),
+            "supersedes": sorted({memory_id for item in items for memory_id in item.supersedes}),
             "word_count": word_count(list(items)),
             "word_limit": CORE_WORD_LIMIT,
             "content_sha256": _sha256(body.encode("utf-8")),
@@ -955,7 +941,7 @@ class WorkingMemoryStore:
     def _items(self, status: MemoryStatus) -> tuple[MemoryItem, ...]:
         rows = self._connection.execute(
             """
-            SELECT p.candidate_json, p.proposed_at_utc, i.status
+            SELECT p.candidate_json, i.status, i.created_at_utc, i.updated_at_utc
             FROM memory_items AS i
             JOIN memory_proposals AS p USING(memory_id)
             WHERE i.status = ?
@@ -963,24 +949,67 @@ class WorkingMemoryStore:
             (status,),
         ).fetchall()
         items = tuple(
-            self._item_from_row(str(row[0]), str(row[1]), row[2]) for row in rows
+            self._item_from_row(
+                str(row[0]),
+                row[1],
+                str(row[2]),
+                str(row[3]),
+            )
+            for row in rows
         )
         return tuple(sorted(items, key=lambda item: (-item.score.total, item.memory_id)))
 
-    def _items_for_state(self, state: dict[str, MemoryStatus]) -> tuple[MemoryItem, ...]:
+    def _items_for_state(
+        self,
+        state: dict[str, MemoryStatus],
+        changed_at: datetime,
+    ) -> tuple[MemoryItem, ...]:
         candidates = {
             candidate.memory_id: (candidate, accepted_at)
             for candidate, accepted_at in self._all_candidates()
         }
-        items = tuple(
-            self._item_from_candidate(candidates[memory_id], status)
-            for memory_id, status in state.items()
-        )
+        current = {
+            str(row[0]): (
+                row[1],
+                _parse_utc(str(row[2])),
+                _parse_utc(str(row[3])),
+            )
+            for row in self._connection.execute(
+                """
+                SELECT memory_id, status, created_at_utc, updated_at_utc
+                FROM memory_items
+                """
+            )
+        }
+        items: list[MemoryItem] = []
+        for memory_id, status in state.items():
+            candidate, accepted_at = candidates[memory_id]
+            existing = current.get(memory_id)
+            if existing is None:
+                created_at = accepted_at
+                updated_at = max(changed_at, accepted_at)
+            else:
+                old_status, created_at, prior_updated_at = existing
+                updated_at = (
+                    max(prior_updated_at, changed_at) if old_status != status else prior_updated_at
+                )
+            items.append(
+                self._item_from_candidate(
+                    (candidate, accepted_at),
+                    status,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                )
+            )
         return tuple(sorted(items, key=lambda item: (-item.score.total, item.memory_id)))
 
     @staticmethod
     def _item_from_candidate(
-        value: tuple[MemoryCandidate, datetime], status: MemoryStatus
+        value: tuple[MemoryCandidate, datetime],
+        status: MemoryStatus,
+        *,
+        created_at: datetime | None = None,
+        updated_at: datetime | None = None,
     ) -> MemoryItem:
         candidate, accepted_at = value
         return MemoryItem(
@@ -993,19 +1022,25 @@ class WorkingMemoryStore:
             reason=candidate.reason,
             score=candidate.score,
             supersedes=candidate.supersedes,
-            created_at_utc=accepted_at,
-            updated_at_utc=accepted_at,
+            created_at_utc=created_at or accepted_at,
+            updated_at_utc=updated_at or accepted_at,
             content_hash=_sha256(candidate.content.encode("utf-8")),
         )
 
     def _item_from_row(
-        self, candidate_json: str, proposed_at_utc: str, status: object
+        self,
+        candidate_json: str,
+        status: object,
+        created_at_utc: str,
+        updated_at_utc: str,
     ) -> MemoryItem:
         if status not in {"core", "archived"}:
             raise WorkingMemoryError("stored memory status is invalid")
         return self._item_from_candidate(
-            (self._candidate_from_json(candidate_json), _parse_utc(proposed_at_utc)),
+            (self._candidate_from_json(candidate_json), _parse_utc(created_at_utc)),
             status,
+            created_at=_parse_utc(created_at_utc),
+            updated_at=_parse_utc(updated_at_utc),
         )
 
     def _all_candidates(self) -> tuple[tuple[MemoryCandidate, datetime], ...]:
@@ -1013,8 +1048,7 @@ class WorkingMemoryStore:
             "SELECT candidate_json, proposed_at_utc FROM memory_proposals ORDER BY memory_id"
         ).fetchall()
         return tuple(
-            (self._candidate_from_json(str(row[0])), _parse_utc(str(row[1])))
-            for row in rows
+            (self._candidate_from_json(str(row[0])), _parse_utc(str(row[1]))) for row in rows
         )
 
     def _candidate_from_json(self, value: str) -> MemoryCandidate:
@@ -1073,9 +1107,11 @@ class WorkingMemoryStore:
 
     @staticmethod
     def _deterministic_selection(
-        candidates: tuple[tuple[MemoryCandidate, datetime], ...]
+        candidates: tuple[tuple[MemoryCandidate, datetime], ...],
     ) -> frozenset[str]:
-        ordered = sorted((candidate for candidate, _at in candidates), key=lambda item: item.memory_id)
+        ordered = sorted(
+            (candidate for candidate, _at in candidates), key=lambda item: item.memory_id
+        )
         states: list[tuple[int, tuple[str, ...]] | None] = [None] * (CORE_WORD_LIMIT + 1)
         states[0] = (0, ())
         for candidate in ordered:
@@ -1091,8 +1127,10 @@ class WorkingMemoryStore:
                     (*previous[1], candidate.memory_id),
                 )
                 current = states[capacity]
-                if current is None or proposed[0] > current[0] or (
-                    proposed[0] == current[0] and proposed[1] < current[1]
+                if (
+                    current is None
+                    or proposed[0] > current[0]
+                    or (proposed[0] == current[0] and proposed[1] < current[1])
                 ):
                     states[capacity] = proposed
         valid = (state for state in states if state is not None)
@@ -1110,9 +1148,7 @@ class WorkingMemoryStore:
             """,
             (change_id,),
         ).fetchall()
-        return {
-            self._ledger_path(str(row[0])): row[2] if bool(row[1]) else None for row in rows
-        }
+        return {self._ledger_path(str(row[0])): row[2] if bool(row[1]) else None for row in rows}
 
     def _ledger_path(self, relative_path: str) -> Path:
         pure = PurePosixPath(relative_path)
@@ -1189,7 +1225,10 @@ class WorkingMemoryStore:
             raise WorkingMemoryRejected("candidate is a temporary blocker")
         if _UNSUPPORTED_CLAIM_RE.search(candidate.content):
             raise WorkingMemoryRejected("candidate is an unsupported claim")
-        if not isinstance(candidate.evidence_ids, tuple) or not 1 <= len(candidate.evidence_ids) <= 32:
+        if (
+            not isinstance(candidate.evidence_ids, tuple)
+            or not 1 <= len(candidate.evidence_ids) <= 32
+        ):
             raise WorkingMemoryRejected("candidate requires evidence IDs")
         if len(set(candidate.evidence_ids)) != len(candidate.evidence_ids):
             raise WorkingMemoryRejected("candidate evidence IDs must be unique")

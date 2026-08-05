@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import socket
 import struct
 import sys
 import threading
@@ -82,6 +83,33 @@ def test_same_user_round_trips_two_framed_messages_and_stops_cleanly() -> None:
     assert server.active_handle_count == 0
     assert server.active_worker_count == 0
     assert server.pending_cancellation_count == 0
+
+
+def test_named_pipe_round_trip_opens_no_network_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_network_socket(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the TUI gateway must not open a TCP or UDP socket")
+
+    monkeypatch.setattr(socket, "socket", reject_network_socket)
+    name = pipe_name(current_logon_sid())
+    server = WindowsPipeServer(name)
+    stop = threading.Event()
+    thread = threading.Thread(target=server.serve, args=(lambda body: body, stop))
+    thread.start()
+    assert server.ready_event.wait(5)
+    client = _connect(name)
+    try:
+        _write_frame(client, b"named-pipe-only")
+        assert _read_frame(client) == b"named-pipe-only"
+    finally:
+        win32file.CloseHandle(client)
+        stop.set()
+        server.stop()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert server.active_handle_count == 0
 
 
 def test_create_parameters_are_explicit_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

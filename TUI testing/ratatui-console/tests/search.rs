@@ -81,6 +81,34 @@ fn search_results_envelope(
     .expect("search results envelope")
 }
 
+fn memory_content_result_envelope(
+    sequence: u64,
+    request_id: u64,
+    memory_id: &str,
+    reviewed_updated_at_utc: &str,
+    status: &str,
+    content: Option<&str>,
+    error: Option<&str>,
+) -> Envelope {
+    serde_json::from_value(json!({
+        "schema_version": 1,
+        "message_id": format!("server:{sequence}"),
+        "sequence": sequence,
+        "state_version": 0,
+        "timestamp_utc": "2026-08-03T00:00:00Z",
+        "message_type": "memory-content-result",
+        "payload": {
+            "request_id": request_id,
+            "memory_id": memory_id,
+            "reviewed_updated_at_utc": reviewed_updated_at_utc,
+            "status": status,
+            "content": content,
+            "error": error,
+        },
+    }))
+    .expect("memory content result envelope")
+}
+
 fn issued_search_request_id(actions: &[ClientAction]) -> u64 {
     let [ClientAction::Search(request)] = actions else {
         panic!("expected one search action, got {actions:?}");
@@ -344,6 +372,186 @@ fn rendered_text(state: &AppState, width: u16, height: u16) -> String {
 }
 
 #[test]
+fn memory_search_opens_only_exact_authenticated_full_content_and_returns_to_summary() {
+    let mut state = AppState::controller();
+    state
+        .reduce(snapshot_envelope(1, 0, snapshot_value()))
+        .unwrap();
+    state.handle(InputEvent::Char('/'));
+    for character in "deep archive".chars() {
+        state.handle(InputEvent::Char(character));
+    }
+    let search_id = issued_search_request_id(&state.handle(InputEvent::Tick(SEARCH_DEBOUNCE)));
+    state
+        .reduce(search_results_envelope(
+            2,
+            0,
+            search_id,
+            vec![json!({
+                "kind": "memory",
+                "record_type": "memory-row",
+                "record_id": "memory:deep-archive",
+                "label": "Deep archive",
+                "summary": "Safe bounded summary only.",
+                "occurred_at_utc": "2026-08-02T14:30:00Z",
+                "source": "managed-memory",
+                "screen": "memory",
+                "context_only": null,
+            })],
+        ))
+        .unwrap();
+
+    let actions = state.handle(InputEvent::Char('o'));
+    let [ClientAction::MemoryContent(request)] = actions.as_slice() else {
+        panic!("expected one exact memory content request, got {actions:?}");
+    };
+    assert_eq!(request.request_id.get(), 1);
+    assert_eq!(request.memory_id.as_str(), "memory:deep-archive");
+    assert_eq!(
+        request.reviewed_updated_at_utc.as_str(),
+        "2026-08-02T14:30:00Z"
+    );
+    let loading = rendered_text(&state, 120, 36);
+    assert!(loading.contains("MEMORY CONTENT"), "{loading}");
+    assert!(loading.contains("Loading current content"), "{loading}");
+    assert!(
+        !loading.contains("Full private current content"),
+        "{loading}"
+    );
+
+    state
+        .reduce(memory_content_result_envelope(
+            3,
+            1,
+            "memory:deep-archive",
+            "2026-08-02T14:30:00Z",
+            "success",
+            Some("Full private current content.\nSecond reviewed line."),
+            None,
+        ))
+        .unwrap();
+    let ready = rendered_text(&state, 120, 36);
+    assert!(ready.contains("Full private current content."), "{ready}");
+    assert!(ready.contains("Second reviewed line."), "{ready}");
+
+    state.handle(InputEvent::Escape);
+    let summary = rendered_text(&state, 120, 36);
+    assert_eq!(state.mode, LocalMode::Search);
+    assert!(summary.contains("SEARCH ALL V20"), "{summary}");
+    assert!(summary.contains("Safe bounded summary only."), "{summary}");
+    assert!(
+        !summary.contains("Full private current content."),
+        "{summary}"
+    );
+}
+
+#[test]
+fn direct_memory_rows_request_core_and_archive_bindings_and_show_safe_errors() {
+    let mut value = snapshot_value();
+    value["memory"]["rows"].as_array_mut().unwrap().push(json!({
+        "memory_id": "memory:archive",
+        "status": "archived",
+        "summary": "Archived bounded summary.",
+        "evidence_ids": [],
+        "updated_at_utc": "2026-07-01T12:00:00Z",
+        "used_by_agents": [],
+        "change_reason": null
+    }));
+    let mut state = AppState::controller();
+    state.reduce(snapshot_envelope(1, 0, value)).unwrap();
+    state.handle(InputEvent::Char('9'));
+
+    let core = state.handle(InputEvent::Char('o'));
+    let [ClientAction::MemoryContent(core)] = core.as_slice() else {
+        panic!("core row must issue exact content request: {core:?}");
+    };
+    assert_eq!(core.request_id.get(), 1);
+    assert_eq!(core.memory_id.as_str(), "memory:1");
+    assert_eq!(
+        core.reviewed_updated_at_utc.as_str(),
+        "2026-08-03T00:00:00Z"
+    );
+    state
+        .reduce(memory_content_result_envelope(
+            2,
+            1,
+            "memory:1",
+            "2026-08-03T00:00:00Z",
+            "error",
+            None,
+            Some("Memory changed. Search again."),
+        ))
+        .unwrap();
+    let unavailable = rendered_text(&state, 120, 36);
+    assert!(
+        unavailable.contains("Memory changed. Search again."),
+        "{unavailable}"
+    );
+
+    state.handle(InputEvent::Escape);
+    state.handle(InputEvent::Right);
+    let archived = state.handle(InputEvent::Char('o'));
+    let [ClientAction::MemoryContent(archived)] = archived.as_slice() else {
+        panic!("archived row must issue exact content request: {archived:?}");
+    };
+    assert_eq!(archived.request_id.get(), 2);
+    assert_eq!(archived.memory_id.as_str(), "memory:archive");
+    assert_eq!(
+        archived.reviewed_updated_at_utc.as_str(),
+        "2026-07-01T12:00:00Z"
+    );
+}
+
+#[test]
+fn memory_content_ignores_superseded_results_and_fails_closed_on_binding_mismatch() {
+    let mut state = AppState::controller();
+    state
+        .reduce(snapshot_envelope(1, 0, snapshot_value()))
+        .unwrap();
+    state.handle(InputEvent::Char('9'));
+    assert!(matches!(
+        state.handle(InputEvent::Char('o')).as_slice(),
+        [ClientAction::MemoryContent(_)]
+    ));
+    state.handle(InputEvent::Escape);
+    assert!(matches!(
+        state.handle(InputEvent::Char('o')).as_slice(),
+        [ClientAction::MemoryContent(_)]
+    ));
+
+    assert_eq!(
+        state.reduce(memory_content_result_envelope(
+            2,
+            1,
+            "memory:1",
+            "2026-08-03T00:00:00Z",
+            "success",
+            Some("Old result"),
+            None,
+        )),
+        Ok(vesper_ratatui_console::state::ReduceOutcome::Ignored)
+    );
+    assert!(!rendered_text(&state, 120, 36).contains("Old result"));
+
+    let error = state
+        .reduce(memory_content_result_envelope(
+            3,
+            2,
+            "memory:wrong",
+            "2026-08-03T00:00:00Z",
+            "success",
+            Some("Wrong binding"),
+            None,
+        ))
+        .unwrap_err();
+    assert_eq!(error.code, "memory-content");
+    assert_eq!(
+        state.access,
+        vesper_ratatui_console::state::AccessState::ProtocolLockout
+    );
+}
+
+#[test]
 fn indexes_all_supported_kinds_once_and_routes_to_the_owning_entity() {
     let index = SearchIndex::from_snapshot(&snapshot(snapshot_value()));
     for (query, kind, screen, entity_id) in [
@@ -405,6 +613,109 @@ fn indexes_all_supported_kinds_once_and_routes_to_the_owning_entity() {
 }
 
 #[test]
+fn local_index_searches_every_deep_field_and_evidence_link_facet() {
+    let mut value = snapshot_value();
+    let agent = &mut value["agents"]["rows"][0];
+    agent["session_id"] = json!("session:sessionneedle");
+    agent["plan_steps"] = json!(["planneedle approved input"]);
+    agent["activity"][0]["summary"] = json!("activityneedle controller stage");
+    agent["activity"][0]["evidence_ids"] = json!(["evidence:activityneedle"]);
+    agent["evidence_ids"] = json!(["evidence:agentneedle"]);
+    agent["chat_agent_id"] = json!("agent:chatneedle");
+    agent["detail_next_cursor"] = json!("cursor:agentcursor");
+
+    let candidate = &mut value["models"]["candidates"][0];
+    candidate["feature_set_id"] = json!("features:featureneedle");
+    candidate["data_identity"] =
+        json!("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    candidate["evaluation_contract"] =
+        json!("fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321");
+    candidate["status_reason"] = json!("statusneedle evaluation reason");
+
+    let evidence = &mut value["data"]["evidence"][0];
+    evidence["symbols"] = json!(["EVIDSYM"]);
+    evidence["agent_ids"] = json!(["agent:evidenceagent"]);
+    evidence["model_ids"] = json!(["model:evidencemodel"]);
+    evidence["order_ids"] = json!(["order:evidenceorder"]);
+    evidence["approval_ids"] = json!(["approval:evidenceapproval"]);
+    evidence["source_ids"] = json!(["source:evidencesource"]);
+    evidence["raw_log_id"] = json!("log:evidencelog");
+    evidence["raw_log_excerpt"] = json!(["rawexcerptneedle controller line"]);
+    evidence["raw_log_truncated"] = json!(true);
+    evidence["raw_log_next_cursor"] = json!("cursor:evidencecursor");
+
+    value["memory"]["rows"][0]["used_by_agents"] = json!(["agent:memoryuserneedle"]);
+    value["memory"]["rows"][0]["change_reason"] = json!("memoryreasonneedle retained");
+    value["data"]["sources"][0]["dependencies"] = json!(["dependencyneedle calendar"]);
+    value["system"]["repositories"][0]["checks"][0]["check_id"] = json!("check:repocheckneedle");
+    value["system"]["repositories"][0]["checks"][0]["reason"] = json!("reporeasonneedle verified");
+
+    let index = SearchIndex::from_snapshot(&snapshot(value));
+    for (query, kind, entity_id) in [
+        ("sessionneedle", SearchKind::Agent, "work:1"),
+        ("planneedle", SearchKind::Agent, "work:1"),
+        ("activityneedle", SearchKind::Agent, "work:1"),
+        ("agentneedle", SearchKind::Agent, "work:1"),
+        ("chatneedle", SearchKind::Agent, "work:1"),
+        ("agentcursor", SearchKind::Agent, "work:1"),
+        ("featureneedle", SearchKind::Model, "candidate:1"),
+        ("1234567890abcdef", SearchKind::Model, "candidate:1"),
+        ("fedcba0987654321", SearchKind::Model, "candidate:1"),
+        ("statusneedle", SearchKind::Model, "candidate:1"),
+        ("memoryuserneedle", SearchKind::Memory, "memory:1"),
+        ("memoryreasonneedle", SearchKind::Memory, "memory:1"),
+        ("dependencyneedle", SearchKind::Source, "source:massive"),
+        ("repocheckneedle", SearchKind::Source, "repository:v20"),
+        ("reporeasonneedle", SearchKind::Source, "repository:v20"),
+    ] {
+        let rows = index
+            .search(
+                query,
+                &SearchFilters {
+                    kinds: vec![kind],
+                    ..SearchFilters::default()
+                },
+                20,
+            )
+            .unwrap();
+        assert!(
+            rows.iter().any(|row| row.entity_id == entity_id),
+            "{query} did not find {entity_id}: {rows:?}"
+        );
+    }
+
+    for query in [
+        "EVIDSYM",
+        "evidenceagent",
+        "evidencemodel",
+        "evidenceorder",
+        "evidenceapproval",
+        "evidencesource",
+        "evidencelog",
+        "rawexcerptneedle",
+        "evidencecursor",
+    ] {
+        let rows = index
+            .search(
+                query,
+                &SearchFilters {
+                    kinds: vec![SearchKind::Evidence],
+                    ..SearchFilters::default()
+                },
+                20,
+            )
+            .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.entity_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evidence:1"],
+            "evidence facet {query}"
+        );
+    }
+}
+
+#[test]
 fn ranks_exact_symbol_before_exact_id_then_prefix_then_text() {
     let mut value = snapshot_value();
     value["agents"]["rows"][0]["work_id"] = json!("AAPL");
@@ -412,6 +723,9 @@ fn ranks_exact_symbol_before_exact_id_then_prefix_then_text() {
     value["orders"]["reconciliation_agents"] = json!([]);
     value["memory"]["rows"][0]["memory_id"] = json!("AAPL-memory");
     value["risk"]["approvals"][0]["reason"] = json!("Investigate AAPL exposure");
+    value["risk"]["approvals"][0]["affected_symbols"] = json!(["NVDA"]);
+    value["risk"]["approvals"][0]["weight_changes"][0]["symbol"] = json!("NVDA");
+    value["risk"]["approvals"][0]["expected_consequences"] = json!(["NVDA allocation rises."]);
 
     let rows = SearchIndex::from_snapshot(&snapshot(value))
         .search("aapl", &SearchFilters::default(), 100)

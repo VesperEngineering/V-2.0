@@ -24,6 +24,8 @@ from vesper.platform.tui.contracts import (
     Freshness,
     HeaderView,
     LeaseRequestPayload,
+    MemoryContentRequestPayload,
+    MemoryContentResultPayload,
     MessageType,
     OperatingMode,
     SearchRequestPayload,
@@ -427,6 +429,85 @@ def test_search_wire_payloads_are_strict_bounded_and_echo_the_request() -> None:
             )
 
 
+def test_memory_content_wire_is_exact_bounded_and_has_success_error_invariants() -> None:
+    reviewed_at = "2026-08-04T14:30:00Z"
+    request = decode_payload(
+        _envelope(
+            message_type=MessageType.MEMORY_CONTENT_REQUEST,
+            payload={
+                "request_id": 9,
+                "memory_id": "memory:deep-archive",
+                "reviewed_updated_at_utc": reviewed_at,
+            },
+        )
+    )
+    assert request == MemoryContentRequestPayload(
+        request_id=9,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc=reviewed_at,
+    )
+
+    content = "x" * 100_000
+    success = MemoryContentResultPayload(
+        request_id=9,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc=reviewed_at,
+        status="success",
+        content=content,
+        error=None,
+    )
+    decoded = decode_payload(
+        _envelope(
+            message_type=MessageType.MEMORY_CONTENT_RESULT,
+            payload=success.model_dump(mode="json"),
+        )
+    )
+    assert decoded == success
+    assert (
+        len(
+            encode_frame(
+                _envelope(
+                    message_type=MessageType.MEMORY_CONTENT_RESULT,
+                    payload=success.model_dump(mode="json"),
+                )
+            )
+        )
+        - 4
+        <= MAX_FRAME_BYTES
+    )
+
+    error = MemoryContentResultPayload(
+        request_id=9,
+        memory_id="memory:deep-archive",
+        reviewed_updated_at_utc=reviewed_at,
+        status="error",
+        content=None,
+        error="Memory changed. Search again.",
+    )
+    assert error.error == "Memory changed. Search again."
+
+    request_payload = request.model_dump(mode="json")
+    result_payload = success.model_dump(mode="json")
+    for invalid in (
+        {**request_payload, "unknown": "forbidden"},
+        {**request_payload, "request_id": 0},
+        {**request_payload, "memory_id": ""},
+        {**request_payload, "reviewed_updated_at_utc": "2026-08-04T10:30:00-04:00"},
+    ):
+        with pytest.raises(ValidationError):
+            MemoryContentRequestPayload.model_validate(invalid)
+    for invalid in (
+        {**result_payload, "unknown": "forbidden"},
+        {**result_payload, "content": "x" * 100_001},
+        {**result_payload, "status": "success", "content": None, "error": None},
+        {**result_payload, "status": "success", "error": "Not allowed."},
+        {**result_payload, "status": "error", "content": content, "error": "Failed."},
+        {**result_payload, "status": "error", "content": None, "error": None},
+    ):
+        with pytest.raises(ValidationError):
+            MemoryContentResultPayload.model_validate(invalid)
+
+
 def test_untrusted_diagnostic_scrubs_retained_references_and_cannot_serialize() -> None:
     wire = (
         b'{"schema_version":1,"message_id":"server:1","sequence":1,'
@@ -481,7 +562,9 @@ def test_retained_unknown_field_view_is_empty_after_callback() -> None:
     retained_views: list[object] = []
 
     with pytest.raises(ValidationError):
-        decode_envelope_json(wire, lambda diagnostic: retained_views.append(diagnostic.unknown_fields))
+        decode_envelope_json(
+            wire, lambda diagnostic: retained_views.append(diagnostic.unknown_fields)
+        )
 
     assert retained_views == [{}]
 
@@ -568,22 +651,22 @@ def test_nested_unknown_fields_are_reported_without_decoding_the_message() -> No
                         "state_version": 0,
                         "generated_at_utc": "2026-08-03T00:00:00Z",
                         "header": {
-                        "operating_mode": "unknown",
-                        "operating_mode_freshness": "loading",
-                        "operating_mode_reason": None,
-                        "data_freshness": "loading",
-                        "data_age_seconds": None,
-                        "regime_label": "unknown",
-                        "regime_confidence": None,
-                        "portfolio_value": None,
-                        "next_rebalance_at_utc": None,
-                        "rebalance_blockers": [],
-                        "active_agent": None,
-                        "agent_queue_length": 0,
-                        "qwen_state": "stopped",
-                        "qwen_context_percent": None,
-                        "current_time_utc": "2026-08-03T00:00:00Z",
-                        "market_session": "closed",
+                            "operating_mode": "unknown",
+                            "operating_mode_freshness": "loading",
+                            "operating_mode_reason": None,
+                            "data_freshness": "loading",
+                            "data_age_seconds": None,
+                            "regime_label": "unknown",
+                            "regime_confidence": None,
+                            "portfolio_value": None,
+                            "next_rebalance_at_utc": None,
+                            "rebalance_blockers": [],
+                            "active_agent": None,
+                            "agent_queue_length": 0,
+                            "qwen_state": "stopped",
+                            "qwen_context_percent": None,
+                            "current_time_utc": "2026-08-03T00:00:00Z",
+                            "market_session": "closed",
                             "secret": "x",
                         },
                         "alerts": [],
@@ -639,13 +722,13 @@ def test_canonical_fixture_and_schema_receipt_have_exact_bytes_and_hashes() -> N
     ).encode("utf-8")
     assert (
         WIRE_SCHEMA_RECEIPT_SHA256
-        == "db14610b3d3724c029dd56eab065fa2cca784b89622cd2409c140b221e1bc24c"
+        == "57c48547644cab9499199b31eaf902aa48344d854b565307652afb746744d3ba"
     )
     assert hashlib.sha256(WIRE_SCHEMA_RECEIPT).hexdigest() == WIRE_SCHEMA_RECEIPT_SHA256
 
 
 def test_all_message_fixtures_and_language_neutral_descriptor_are_canonical() -> None:
-    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 22
+    assert len(CANONICAL_WIRE_FIXTURES) == len(MessageType) == 24
     assert {decode_envelope_json(frame).message_type for frame in CANONICAL_WIRE_FIXTURES} == set(
         MessageType
     )

@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
-use vesper_ratatui_console::contract::{ConsoleSnapshot, Envelope, MessageType};
+use vesper_ratatui_console::contract::{
+    AgentCard, ConsoleSnapshot, Envelope, EvidenceRow, MemoryRow, MessageType, ModelsView,
+    RiskView, SourceRow, SystemView, TimelineRow,
+};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,6 +55,21 @@ fn event_presentation() -> Value {
         "system": screen_meta("system"),
         "portfolio_rank_source": snapshot["portfolio"]["rank_source"].clone(),
         "timeline_hidden_event_count": snapshot["timeline"]["hidden_event_count"].clone(),
+        "model_active_model_id": snapshot["models"]["active_model_id"].clone(),
+        "model_rollback_model_id": snapshot["models"]["rollback_model_id"].clone(),
+        "model_approved_family": snapshot["models"]["approved_family"].clone(),
+        "model_approved_strategy": snapshot["models"]["approved_strategy"].clone(),
+        "model_approved_feature_set_id": snapshot["models"]["approved_feature_set_id"].clone(),
+        "model_final_regime": snapshot["models"]["final_regime"].clone(),
+        "model_final_regime_confidence": snapshot["models"]["final_regime_confidence"].clone(),
+        "model_regime_state": snapshot["models"]["regime_state"].clone(),
+        "model_automatic_changes_blocked": snapshot["models"]["automatic_changes_blocked"].clone(),
+        "model_block_reason": snapshot["models"]["block_reason"].clone(),
+        "model_gates": snapshot["models"]["gates"].clone(),
+        "risk_blocked_actions": snapshot["risk"]["blocked_actions"].clone(),
+        "risk_circuit_breaker": snapshot["risk"]["circuit_breaker"].clone(),
+        "system_qwen": snapshot["system"]["qwen"].clone(),
+        "system_health": snapshot["system"]["health"].clone(),
     })
 }
 
@@ -82,6 +100,456 @@ fn consumes_shared_console_snapshot_fixture_byte_for_byte() {
     assert!(snapshot.command_specs.is_empty());
     assert_eq!(serde_json::to_vec(&snapshot).unwrap(), fixture);
     assert!(fixture.len() < 1_048_576);
+}
+
+#[test]
+fn agent_detail_and_timeline_links_are_strict_and_percentage_bounded() {
+    let card = serde_json::json!({
+        "work_id": "work:deep",
+        "agent": "portfolio-research",
+        "title": "Review exposure",
+        "stage": "running",
+        "priority": 90,
+        "urgent": true,
+        "elapsed_seconds": 12.5,
+        "model": "qwen:64k",
+        "affected_areas": ["portfolio", "risk"],
+        "session_id": "session:deep",
+        "plan_steps": ["Inspect positions", "Write evidence"],
+        "activity": [{
+            "activity_id": "activity:1",
+            "kind": "tool",
+            "summary": "Read current positions.",
+            "occurred_at_utc": "2026-08-04T12:00:00Z",
+            "evidence_ids": ["evidence:1"]
+        }],
+        "evidence_ids": ["evidence:1"],
+        "context_percent": 80.0,
+        "chat_agent_id": "agent:portfolio",
+        "detail_next_cursor": "cursor:2"
+    });
+    let parsed: AgentCard = serde_json::from_value(card.clone()).expect("deep agent card");
+    assert_eq!(parsed.session_id.unwrap().as_str(), "session:deep");
+    assert_eq!(parsed.activity.len(), 1);
+    assert_eq!(parsed.context_percent, Some(80.0));
+
+    for invalid_percent in [-0.1, 100.1] {
+        let mut invalid = card.clone();
+        invalid["context_percent"] = serde_json::json!(invalid_percent);
+        assert!(serde_json::from_value::<AgentCard>(invalid).is_err());
+    }
+    let mut unknown_activity_field = card.clone();
+    unknown_activity_field["activity"][0]["private_reasoning"] = serde_json::json!("hidden");
+    assert!(serde_json::from_value::<AgentCard>(unknown_activity_field).is_err());
+
+    let timeline: TimelineRow = serde_json::from_value(serde_json::json!({
+        "event_id": "event:deep",
+        "occurred_at_utc": "2026-08-04T12:00:00Z",
+        "impact": true,
+        "severity": "active",
+        "summary": "Work affected the portfolio.",
+        "agent_id": "agent:portfolio",
+        "symbol": "AAPL",
+        "model_id": null,
+        "approval_id": null,
+        "order_id": null,
+        "work_id": "work:deep",
+        "evidence_ids": ["evidence:1"]
+    }))
+    .expect("timeline work link");
+    assert_eq!(timeline.work_id.unwrap().as_str(), "work:deep");
+}
+
+#[test]
+fn model_summary_candidates_and_gates_are_direct_strict_contract_fields() {
+    let models = serde_json::json!({
+        "freshness": "fresh",
+        "as_of_utc": "2026-08-04T12:00:00Z",
+        "source": "controller",
+        "error": null,
+        "active_model_id": "model:active",
+        "rollback_model_id": "model:rollback",
+        "approved_family": "approved-family",
+        "approved_strategy": "ml_model",
+        "approved_feature_set_id": "features:approved",
+        "final_regime": "risk-on",
+        "final_regime_confidence": 0.75,
+        "regime_state": "decided",
+        "automatic_changes_blocked": false,
+        "block_reason": null,
+        "opinions": [],
+        "candidates": [{
+            "candidate_id": "candidate:1",
+            "family": "approved-family",
+            "strategy": "ml_model",
+            "status": "evaluating",
+            "evidence_ids": ["evidence:1"],
+            "created_at_utc": "2026-08-04T11:00:00Z",
+            "feature_set_id": "features:approved",
+            "data_identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "evaluation_contract": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "status_reason": "Evaluation is running.",
+            "status_at_utc": "2026-08-04T12:00:00Z"
+        }],
+        "gates": [{
+            "gate_id": "gate:1",
+            "candidate_id": "candidate:1",
+            "metric_id": "metric:sharpe",
+            "candidate_value": 1.2,
+            "baseline_value": 1.0,
+            "comparison": "gte",
+            "threshold": 1.1,
+            "evaluation_window": "2025-01-01 through 2025-12-31",
+            "state": "pass",
+            "reason": "Candidate cleared the threshold.",
+            "evidence_ids": ["evidence:1"]
+        }],
+        "metrics": [],
+        "evidence": []
+    });
+    let parsed: ModelsView = serde_json::from_value(models.clone()).expect("deep model view");
+    assert_eq!(parsed.final_regime.unwrap().as_str(), "risk-on");
+    assert_eq!(parsed.gates.len(), 1);
+
+    let mut invalid_confidence = models.clone();
+    invalid_confidence["final_regime_confidence"] = serde_json::json!(1.01);
+    assert!(serde_json::from_value::<ModelsView>(invalid_confidence).is_err());
+
+    for missing in ["final_regime", "final_regime_confidence"] {
+        let mut invalid_decided = models.clone();
+        invalid_decided[missing] = Value::Null;
+        assert!(serde_json::from_value::<ModelsView>(invalid_decided).is_err());
+    }
+    for blocked_state in ["uncertain", "unavailable"] {
+        let mut invalid_block = models.clone();
+        invalid_block["regime_state"] = serde_json::json!(blocked_state);
+        invalid_block["automatic_changes_blocked"] = serde_json::json!(false);
+        invalid_block["block_reason"] = Value::Null;
+        assert!(serde_json::from_value::<ModelsView>(invalid_block).is_err());
+    }
+    let mut unknown_gate_field = models;
+    unknown_gate_field["gates"][0]["inferred"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<ModelsView>(unknown_gate_field).is_err());
+}
+
+#[test]
+fn risk_data_evidence_and_memory_deep_fields_are_closed_contracts() {
+    let risk = serde_json::json!({
+        "freshness": "fresh",
+        "as_of_utc": "2026-08-04T12:00:00Z",
+        "source": "controller",
+        "error": null,
+        "limits": [{
+            "limit_id": "limit:concentration",
+            "current_value": "0.10",
+            "proposed_value": "0.08",
+            "status": "pending",
+            "proposal_reason": "Reduce concentration.",
+            "review_state": "pending",
+            "evidence_ids": ["evidence:1"]
+        }],
+        "approvals": [{
+            "approval_id": "approval:1",
+            "run_id": "run:1",
+            "checkpoint_id": "checkpoint:1",
+            "state": "pending",
+            "reason": "Review required.",
+            "evidence_ids": ["evidence:1"],
+            "requested_at_utc": "2026-08-04T12:00:00Z",
+            "affected_symbols": ["AAPL"],
+            "weight_changes": [{
+                "symbol": "AAPL",
+                "current_weight": 0.10,
+                "proposed_weight": 0.08
+            }],
+            "risks": ["Concentration remains elevated."],
+            "expected_consequences": ["Future risk is lower."],
+            "basis_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "stale_reason": null
+        }],
+        "alerts": [],
+        "metrics": [],
+        "blocked_actions": [{
+            "action_id": "action:1",
+            "action": "Submit rebalance",
+            "reason": "Approval is pending.",
+            "affected_symbols": ["AAPL"],
+            "created_at_utc": "2026-08-04T12:00:00Z"
+        }],
+        "circuit_breaker": {
+            "state": "armed",
+            "reason": "No trip condition is active.",
+            "observed_at_utc": "2026-08-04T12:00:00Z"
+        }
+    });
+    let parsed: RiskView = serde_json::from_value(risk.clone()).expect("deep risk view");
+    assert_eq!(parsed.blocked_actions.len(), 1);
+    assert_eq!(parsed.approvals[0].weight_changes.len(), 1);
+    let mut stale_without_reason = risk;
+    stale_without_reason["approvals"][0]["state"] = serde_json::json!("stale");
+    stale_without_reason["approvals"][0]["stale_reason"] = Value::Null;
+    assert!(serde_json::from_value::<RiskView>(stale_without_reason).is_err());
+
+    let source: SourceRow = serde_json::from_value(serde_json::json!({
+        "source_id": "source:massive",
+        "freshness": "fresh",
+        "as_of_utc": "2026-08-04T12:00:00Z",
+        "age_seconds": 1.0,
+        "coverage": "S&P 500",
+        "error": null,
+        "consumers": ["ml_model"],
+        "dependencies": ["Massive SQLite snapshot"]
+    }))
+    .expect("source dependencies");
+    assert_eq!(source.dependencies.len(), 1);
+
+    let evidence_value = serde_json::json!({
+        "evidence_id": "evidence:1",
+        "evidence_type": "receipt",
+        "source": "controller",
+        "created_at_utc": "2026-08-04T12:00:00Z",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "symbols": ["AAPL"],
+        "agent_ids": ["agent:portfolio"],
+        "model_ids": ["model:active"],
+        "order_ids": ["order:1"],
+        "approval_ids": ["approval:1"],
+        "source_ids": ["source:massive"],
+        "raw_log_id": "log:1",
+        "raw_log_excerpt": ["Validated row 1."],
+        "raw_log_truncated": true,
+        "raw_log_next_cursor": "cursor:2"
+    });
+    let evidence: EvidenceRow =
+        serde_json::from_value(evidence_value.clone()).expect("linked evidence");
+    assert_eq!(evidence.symbols.len(), 1);
+    assert!(evidence.raw_log_truncated);
+    let mut too_many_excerpt_lines = serde_json::to_value(&evidence).unwrap();
+    too_many_excerpt_lines["raw_log_excerpt"] = serde_json::json!(
+        (0..51)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(serde_json::from_value::<EvidenceRow>(too_many_excerpt_lines).is_err());
+    for metadata_field in [
+        "raw_log_excerpt",
+        "raw_log_truncated",
+        "raw_log_next_cursor",
+    ] {
+        let mut orphaned_metadata = evidence_value.clone();
+        orphaned_metadata["raw_log_id"] = Value::Null;
+        orphaned_metadata["raw_log_excerpt"] = serde_json::json!([]);
+        orphaned_metadata["raw_log_truncated"] = serde_json::json!(false);
+        orphaned_metadata["raw_log_next_cursor"] = Value::Null;
+        if metadata_field == "raw_log_excerpt" {
+            orphaned_metadata["raw_log_excerpt"] = serde_json::json!(["orphaned"]);
+        } else if metadata_field == "raw_log_truncated" {
+            orphaned_metadata["raw_log_truncated"] = serde_json::json!(true);
+        } else {
+            orphaned_metadata["raw_log_next_cursor"] = serde_json::json!("cursor:orphaned");
+        }
+        assert!(
+            serde_json::from_value::<EvidenceRow>(orphaned_metadata).is_err(),
+            "{metadata_field} requires raw_log_id"
+        );
+    }
+
+    let memory: MemoryRow = serde_json::from_value(serde_json::json!({
+        "memory_id": "memory:1",
+        "status": "core",
+        "summary": "Use controller truth.",
+        "evidence_ids": ["evidence:1"],
+        "updated_at_utc": "2026-08-04T12:00:00Z",
+        "used_by_agents": ["agent:portfolio"],
+        "change_reason": "Repeatedly useful evidence."
+    }))
+    .expect("memory usage and reason");
+    assert_eq!(memory.used_by_agents.len(), 1);
+}
+
+#[test]
+fn system_qwen_repository_and_health_fields_are_strict_and_percentage_bounded() {
+    let mut snapshot: Value = serde_json::from_slice(&shared_snapshot_fixture()).unwrap();
+    snapshot["system"]["qwen"] = serde_json::json!({
+        "state": "busy",
+        "loaded_model": "qwen:64k",
+        "current_agent": "agent:portfolio",
+        "queue_length": 2,
+        "context_percent": 80.0,
+        "last_inference_ms": 125.0,
+        "observed_at_utc": "2026-08-04T12:00:00Z",
+        "error": null
+    });
+    snapshot["system"]["health"] = serde_json::json!([
+        {
+            "component": "backup",
+            "state": "healthy",
+            "reason": "Latest backup verified.",
+            "observed_at_utc": "2026-08-04T12:00:00Z",
+            "checks": [{
+                "check_id": "check:backup",
+                "state": "pass",
+                "reason": "Manifest matched."
+            }],
+            "broker_actions_blocked": false
+        },
+        {
+            "component": "recovery",
+            "state": "healthy",
+            "reason": "Recovery evidence is current.",
+            "observed_at_utc": "2026-08-04T12:00:00Z",
+            "checks": [],
+            "broker_actions_blocked": false
+        },
+        {
+            "component": "notifications",
+            "state": "degraded",
+            "reason": "Phone delivery is not configured.",
+            "observed_at_utc": null,
+            "checks": [],
+            "broker_actions_blocked": false
+        }
+    ]);
+    snapshot["system"]["repositories"][0]["checks"] = serde_json::json!([{
+        "check_id": "check:tests",
+        "state": "running",
+        "reason": "Focused tests are running.",
+        "observed_at_utc": null
+    }]);
+    let parsed: SystemView =
+        serde_json::from_value(snapshot["system"].clone()).expect("deep system view");
+    assert_eq!(parsed.qwen.context_percent, Some(80.0));
+    assert_eq!(parsed.health.len(), 3);
+    assert_eq!(parsed.repositories[0].checks.len(), 1);
+
+    for invalid_percent in [-0.1, 100.1] {
+        let mut invalid = snapshot["system"].clone();
+        invalid["qwen"]["context_percent"] = serde_json::json!(invalid_percent);
+        assert!(serde_json::from_value::<SystemView>(invalid).is_err());
+    }
+    let mut negative_latency = snapshot["system"].clone();
+    negative_latency["qwen"]["last_inference_ms"] = serde_json::json!(-1.0);
+    assert!(serde_json::from_value::<SystemView>(negative_latency).is_err());
+
+    let mut unavailable_without_error = snapshot["system"].clone();
+    unavailable_without_error["qwen"]["state"] = serde_json::json!("unavailable");
+    unavailable_without_error["qwen"]["error"] = Value::Null;
+    assert!(serde_json::from_value::<SystemView>(unavailable_without_error).is_err());
+
+    let mut active_without_observation = snapshot["system"].clone();
+    active_without_observation["qwen"]["state"] = serde_json::json!("ready");
+    active_without_observation["qwen"]["observed_at_utc"] = Value::Null;
+    assert!(serde_json::from_value::<SystemView>(active_without_observation).is_err());
+
+    let mut missing_health_component = snapshot["system"].clone();
+    missing_health_component["health"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert!(serde_json::from_value::<SystemView>(missing_health_component).is_err());
+
+    let mut duplicate_health_component = snapshot["system"].clone();
+    duplicate_health_component["health"][2]["component"] = serde_json::json!("backup");
+    assert!(serde_json::from_value::<SystemView>(duplicate_health_component).is_err());
+}
+
+#[test]
+fn managed_memory_content_wire_is_closed_bounded_and_result_exclusive() {
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "message_id": "client:2",
+        "sequence": 2,
+        "state_version": 7,
+        "timestamp_utc": "2026-08-04T14:30:00Z",
+        "message_type": "memory-content-request",
+        "payload": {
+            "request_id": 9,
+            "memory_id": "memory:deep-archive",
+            "reviewed_updated_at_utc": "2026-08-04T14:30:00Z"
+        }
+    });
+    let parsed: Envelope = serde_json::from_value(request.clone()).expect("strict request");
+    assert_eq!(parsed.message_type(), MessageType::MemoryContentRequest);
+
+    let content = "x".repeat(100_000);
+    let success = serde_json::json!({
+        "schema_version": 1,
+        "message_id": "server:2",
+        "sequence": 2,
+        "state_version": 7,
+        "timestamp_utc": "2026-08-04T14:30:00Z",
+        "message_type": "memory-content-result",
+        "payload": {
+            "request_id": 9,
+            "memory_id": "memory:deep-archive",
+            "reviewed_updated_at_utc": "2026-08-04T14:30:00Z",
+            "status": "success",
+            "content": content,
+            "error": null
+        }
+    });
+    let parsed: Envelope = serde_json::from_value(success.clone()).expect("strict success");
+    assert_eq!(parsed.message_type(), MessageType::MemoryContentResult);
+    assert!(serde_json::to_vec(&parsed).unwrap().len() < 1_048_576);
+
+    let mut error = success.clone();
+    error["payload"]["status"] = serde_json::json!("error");
+    error["payload"]["content"] = serde_json::Value::Null;
+    error["payload"]["error"] = serde_json::json!("Memory changed. Search again.");
+    assert!(serde_json::from_value::<Envelope>(error).is_ok());
+
+    let invalid = [
+        {
+            let mut value = request.clone();
+            value["payload"]["unknown"] = serde_json::json!(true);
+            value
+        },
+        {
+            let mut value = success.clone();
+            value["payload"]["content"] = serde_json::json!("x".repeat(100_001));
+            value
+        },
+        {
+            let mut value = success.clone();
+            value["payload"]["content"] = serde_json::Value::Null;
+            value
+        },
+        {
+            let mut value = success.clone();
+            value["payload"]["error"] = serde_json::json!("Not allowed.");
+            value
+        },
+        {
+            let mut value = success;
+            value["payload"]["status"] = serde_json::json!("error");
+            value["payload"]["error"] = serde_json::json!("Failed.");
+            value
+        },
+    ];
+    for value in invalid {
+        assert!(serde_json::from_value::<Envelope>(value).is_err());
+    }
+}
+
+#[test]
+fn memory_agent_usage_reason_is_required_and_rejects_unknown_counts() {
+    const REASON: &str = "No trusted memory-use source is configured.";
+    let mut value: Value = serde_json::from_slice(&shared_snapshot_fixture()).unwrap();
+    value["memory"]["agent_usage_error"] = serde_json::json!(REASON);
+
+    let snapshot: ConsoleSnapshot =
+        serde_json::from_value(value.clone()).expect("trusted-use reason is valid");
+    assert_eq!(snapshot.memory.agent_usage_error.as_str(), REASON);
+
+    let mut missing = value.clone();
+    missing["memory"]
+        .as_object_mut()
+        .unwrap()
+        .remove("agent_usage_error");
+    assert!(serde_json::from_value::<ConsoleSnapshot>(missing).is_err());
+
+    value["memory"]["agent_usage_count"] = serde_json::json!(9);
+    assert!(serde_json::from_value::<ConsoleSnapshot>(value).is_err());
 }
 
 #[test]
@@ -460,6 +928,66 @@ fn event_targets_presentation_metrics_and_omissions_are_strict() {
 }
 
 #[test]
+fn event_presentation_model_regime_rules_match_snapshot_rules() {
+    let snapshot: Value = serde_json::from_slice(&shared_snapshot_fixture()).unwrap();
+    let base = event_envelope(
+        "portfolio-row",
+        "AAPL",
+        snapshot["portfolio"]["rows"][0].clone(),
+        &["portfolio.rows"],
+    );
+
+    for required_field in ["model_final_regime", "model_final_regime_confidence"] {
+        let mut invalid = base.clone();
+        invalid["payload"]["presentation"][required_field] = Value::Null;
+        assert!(
+            serde_json::from_value::<Envelope>(invalid).is_err(),
+            "decided event presentation accepted null {required_field}"
+        );
+    }
+
+    for regime_state in ["uncertain", "unavailable"] {
+        let prepare = || {
+            let mut candidate = base.clone();
+            let presentation = &mut candidate["payload"]["presentation"];
+            presentation["model_regime_state"] = serde_json::json!(regime_state);
+            presentation["model_final_regime"] = Value::Null;
+            presentation["model_final_regime_confidence"] = Value::Null;
+            candidate
+        };
+
+        let mut automatic_changes_allowed = prepare();
+        automatic_changes_allowed["payload"]["presentation"]["model_automatic_changes_blocked"] =
+            serde_json::json!(false);
+        automatic_changes_allowed["payload"]["presentation"]["model_block_reason"] =
+            serde_json::json!("Regime is not decided.");
+        assert!(
+            serde_json::from_value::<Envelope>(automatic_changes_allowed).is_err(),
+            "{regime_state} event presentation allowed automatic changes"
+        );
+
+        let mut missing_reason = prepare();
+        missing_reason["payload"]["presentation"]["model_automatic_changes_blocked"] =
+            serde_json::json!(true);
+        missing_reason["payload"]["presentation"]["model_block_reason"] = Value::Null;
+        assert!(
+            serde_json::from_value::<Envelope>(missing_reason).is_err(),
+            "{regime_state} event presentation accepted no block reason"
+        );
+
+        let mut valid = prepare();
+        valid["payload"]["presentation"]["model_automatic_changes_blocked"] =
+            serde_json::json!(true);
+        valid["payload"]["presentation"]["model_block_reason"] =
+            serde_json::json!("Regime is not decided.");
+        assert!(
+            serde_json::from_value::<Envelope>(valid).is_ok(),
+            "valid {regime_state} event presentation was rejected"
+        );
+    }
+}
+
+#[test]
 fn decimal_and_nullable_fields_match_python_strictness() {
     let base = serde_json::json!({
         "schema_version": 1,
@@ -581,7 +1109,13 @@ fn repository_event_is_typed_keyed_and_freshness_checked() {
                 "revision": "0123456789abcdef",
                 "clean": true,
                 "worktrees": ["C:/Users/bgonn/Desktop/v20"],
-                "unpushed_commit_count": 0
+                "unpushed_commit_count": 0,
+                "checks": [{
+                    "check_id": "check:tests",
+                    "state": "pass",
+                    "reason": null,
+                    "observed_at_utc": "2026-08-03T00:00:00Z"
+                }]
             },
             "targets": ["system.repositories"],
             "presentation": event_presentation()
@@ -673,7 +1207,7 @@ fn decode_base64(value: &str) -> Vec<u8> {
 #[test]
 fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     let bundle = python_contract_bundle();
-    assert_eq!(bundle.fixtures.len(), 22);
+    assert_eq!(bundle.fixtures.len(), 24);
     let mut seen = Vec::new();
     for fixture in bundle.fixtures {
         let envelope: Envelope =
@@ -683,7 +1217,7 @@ fn consumes_all_python_fixtures_and_contract_descriptor_byte_for_byte() {
     }
     seen.sort_by_key(|value| value.to_string());
     seen.dedup();
-    assert_eq!(seen.len(), 22);
+    assert_eq!(seen.len(), 24);
     assert_eq!(rust_contract_descriptor(), bundle.descriptor);
 }
 
@@ -693,7 +1227,7 @@ fn rust_contract_descriptor() -> Vec<u8> {
         "field_catalog_scope": [
             "envelope", "payloads", "shell", "snapshot-observability-metadata",
             "event-presentation-metadata", "repository-status", "governed-command-contracts",
-            "live-readiness", "agent-chat"
+            "live-readiness", "agent-chat", "managed-memory-content"
         ],
         "integer_fields": [
             "envelope.sequence",
@@ -732,6 +1266,8 @@ fn rust_contract_descriptor() -> Vec<u8> {
             "lease-result": ["status", "reason"],
             "lock-request": ["action"],
             "lock-result": ["locked"],
+            "memory-content-request": ["request_id", "memory_id", "reviewed_updated_at_utc"],
+            "memory-content-result": ["request_id", "memory_id", "reviewed_updated_at_utc", "status", "content", "error"],
             "ping": ["nonce"],
             "pong": ["nonce"],
             "protocol-error": ["code", "safe_message"],
@@ -745,6 +1281,8 @@ fn rust_contract_descriptor() -> Vec<u8> {
             "auth-result.reason", "lease-result.reason", "search-results.error",
             "search-results.results[].occurred_at_utc",
             "search-results.results[].context_only",
+            "memory-content-result.content",
+            "memory-content-result.error",
             "chat-history-request.cursor",
             "chat-history-result.next_cursor",
             "chat-event.chunk_sequence",
@@ -1101,7 +1639,7 @@ fn rejects_wrong_schema_negative_versions_and_invalid_ids() {
 }
 
 #[test]
-fn parses_all_twenty_two_strict_payloads() {
+fn parses_all_twenty_four_strict_payloads() {
     let snapshot = String::from_utf8(shared_snapshot_fixture()).unwrap();
     let event = serde_json::to_string(&serde_json::json!({
         "entity_type": "alert-row",
@@ -1146,6 +1684,14 @@ fn parses_all_twenty_two_strict_payloads() {
         (
             "search-results",
             r#"{"request_id":1,"indexed_state_version":0,"results":[{"kind":"note","record_type":"note","record_id":"note:1","label":"AAPL note","summary":"Review concentration risk.","occurred_at_utc":"2026-08-03T00:00:00Z","source":"operator","screen":"portfolio","context_only":true}],"error":null}"#.to_owned(),
+        ),
+        (
+            "memory-content-request",
+            r#"{"request_id":1,"memory_id":"memory:1","reviewed_updated_at_utc":"2026-08-03T00:00:00Z"}"#.to_owned(),
+        ),
+        (
+            "memory-content-result",
+            r#"{"request_id":1,"memory_id":"memory:1","reviewed_updated_at_utc":"2026-08-03T00:00:00Z","status":"success","content":"Full current content.","error":null}"#.to_owned(),
         ),
         (
             "chat-history-request",

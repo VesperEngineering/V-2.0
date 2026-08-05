@@ -148,6 +148,21 @@ impl ReducedState {
             system,
             portfolio_rank_source,
             timeline_hidden_event_count,
+            model_active_model_id,
+            model_rollback_model_id,
+            model_approved_family,
+            model_approved_strategy,
+            model_approved_feature_set_id,
+            model_final_regime,
+            model_final_regime_confidence,
+            model_regime_state,
+            model_automatic_changes_blocked,
+            model_block_reason,
+            model_gates,
+            risk_blocked_actions,
+            risk_circuit_breaker,
+            system_qwen,
+            system_health,
         } = presentation;
         self.snapshot.shell.state_version = state_version;
         self.snapshot.shell.generated_at_utc = generated_at_utc;
@@ -176,6 +191,21 @@ impl ReducedState {
         replace_meta!(self.snapshot.system, system);
         self.snapshot.portfolio.rank_source = portfolio_rank_source;
         self.snapshot.timeline.hidden_event_count = timeline_hidden_event_count;
+        self.snapshot.models.active_model_id = model_active_model_id;
+        self.snapshot.models.rollback_model_id = model_rollback_model_id;
+        self.snapshot.models.approved_family = model_approved_family;
+        self.snapshot.models.approved_strategy = model_approved_strategy;
+        self.snapshot.models.approved_feature_set_id = model_approved_feature_set_id;
+        self.snapshot.models.final_regime = model_final_regime;
+        self.snapshot.models.final_regime_confidence = model_final_regime_confidence;
+        self.snapshot.models.regime_state = model_regime_state;
+        self.snapshot.models.automatic_changes_blocked = model_automatic_changes_blocked;
+        self.snapshot.models.block_reason = model_block_reason;
+        self.snapshot.models.gates = model_gates;
+        self.snapshot.risk.blocked_actions = risk_blocked_actions;
+        self.snapshot.risk.circuit_breaker = risk_circuit_breaker;
+        self.snapshot.system.qwen = system_qwen;
+        self.snapshot.system.health = system_health;
     }
 
     fn apply_target(

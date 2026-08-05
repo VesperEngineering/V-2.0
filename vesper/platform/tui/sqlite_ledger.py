@@ -16,7 +16,7 @@ from typing import Iterator
 
 
 APPLICATION_ID = 0x56323054
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _COMMAND_STATUS_MESSAGES = {
     "accepted": ("accepted", "Command accepted."),
@@ -488,15 +488,80 @@ _OPERATOR_DECISION_SCHEMA_STATEMENTS = (
     """,
 )
 
-_OPERATOR_DECISION_SCHEMA = ";\n".join(
-    statement.strip() for statement in _OPERATOR_DECISION_SCHEMA_STATEMENTS
-) + ";\n"
+_OPERATOR_DECISION_SCHEMA = (
+    ";\n".join(statement.strip() for statement in _OPERATOR_DECISION_SCHEMA_STATEMENTS) + ";\n"
+)
+
+_ALERT_DISMISSAL_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE alert_dismissal_bindings (
+        command_id TEXT PRIMARY KEY,
+        alert_id TEXT NOT NULL,
+        alert_created_at_utc TEXT NOT NULL,
+        FOREIGN KEY(command_id) REFERENCES commands(command_id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE alert_dismissals (
+        dismissal_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        command_id TEXT NOT NULL UNIQUE,
+        alert_id TEXT NOT NULL,
+        alert_created_at_utc TEXT NOT NULL,
+        dismissed_at_utc TEXT NOT NULL,
+        FOREIGN KEY(command_id)
+            REFERENCES alert_dismissal_bindings(command_id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX alert_dismissals_occurrence
+    ON alert_dismissals(alert_id, alert_created_at_utc)
+    """,
+    """
+    CREATE TRIGGER alert_dismissal_bindings_no_update
+    BEFORE UPDATE ON alert_dismissal_bindings
+    BEGIN
+        SELECT RAISE(ABORT, 'alert dismissal bindings are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER alert_dismissal_bindings_no_delete
+    BEFORE DELETE ON alert_dismissal_bindings
+    BEGIN
+        SELECT RAISE(ABORT, 'alert dismissal bindings are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER alert_dismissals_no_update
+    BEFORE UPDATE ON alert_dismissals
+    BEGIN
+        SELECT RAISE(ABORT, 'alert dismissals are immutable');
+    END
+    """,
+    """
+    CREATE TRIGGER alert_dismissals_no_delete
+    BEFORE DELETE ON alert_dismissals
+    BEGIN
+        SELECT RAISE(ABORT, 'alert dismissals are immutable');
+    END
+    """,
+)
+
+_ALERT_DISMISSAL_SCHEMA = (
+    ";\n".join(statement.strip() for statement in _ALERT_DISMISSAL_SCHEMA_STATEMENTS) + ";\n"
+)
 
 _SCHEMAS = {
     1: _SCHEMA_V1,
     2: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA,
     3: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA + _COMMAND_SCHEMA,
     4: _SCHEMA_V1 + _NOTE_SEARCH_SCHEMA + _COMMAND_SCHEMA + _OPERATOR_DECISION_SCHEMA,
+    5: (
+        _SCHEMA_V1
+        + _NOTE_SEARCH_SCHEMA
+        + _COMMAND_SCHEMA
+        + _OPERATOR_DECISION_SCHEMA
+        + _ALERT_DISMISSAL_SCHEMA
+    ),
 }
 _REQUIRED_COLUMNS = {
     1: _REQUIRED_COLUMNS_V1,
@@ -613,6 +678,22 @@ _REQUIRED_COLUMNS = {
     },
 }
 
+_REQUIRED_COLUMNS[5] = {
+    **_REQUIRED_COLUMNS[4],
+    "alert_dismissal_bindings": (
+        "command_id",
+        "alert_id",
+        "alert_created_at_utc",
+    ),
+    "alert_dismissals": (
+        "dismissal_sequence",
+        "command_id",
+        "alert_id",
+        "alert_created_at_utc",
+        "dismissed_at_utc",
+    ),
+}
+
 
 def _normalize_schema_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", sql.strip().rstrip(";")).casefold()
@@ -649,6 +730,10 @@ def _invalid_command_content() -> LedgerCorruptionError:
 
 def _invalid_operator_decision_content() -> LedgerCorruptionError:
     return LedgerCorruptionError("TUI ledger operator decision content is invalid")
+
+
+def _invalid_alert_dismissal_content() -> LedgerCorruptionError:
+    return LedgerCorruptionError("TUI ledger alert dismissal content is invalid")
 
 
 def _is_safe_id(value: object) -> bool:
@@ -835,9 +920,7 @@ class TuiLedger:
                 raise LedgerTransactionError(
                     "public reads are not allowed during an active transaction"
                 )
-            previous_query_only = int(
-                connection.execute("PRAGMA query_only").fetchone()[0]
-            )
+            previous_query_only = int(connection.execute("PRAGMA query_only").fetchone()[0])
             connection.execute("PRAGMA query_only = ON")
             try:
                 yield connection
@@ -881,9 +964,7 @@ class TuiLedger:
                 or self._transaction_owner != threading.get_ident()
                 or not current.in_transaction
             ):
-                raise LedgerTransactionError(
-                    "operation requires this ledger's active transaction"
-                )
+                raise LedgerTransactionError("operation requires this ledger's active transaction")
 
     def close(self) -> None:
         """Close the owned connection; repeated closes are harmless."""
@@ -956,7 +1037,7 @@ class TuiLedger:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection, version: int) -> None:
-        if version not in (1, 2, 3):
+        if version not in (1, 2, 3, 4):
             raise LedgerSchemaError("unsupported TUI ledger schema version")
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -979,11 +1060,16 @@ class TuiLedger:
                 for statement in _COMMAND_SCHEMA_STATEMENTS:
                     connection.execute(statement)
             TuiLedger._validate_command_content(connection)
-            TuiLedger._validate_legacy_command_terminal_messages(connection)
-            for statement in _OPERATOR_DECISION_SCHEMA_STATEMENTS:
+            if version <= 3:
+                TuiLedger._validate_legacy_command_terminal_messages(connection)
+            if version < 4:
+                for statement in _OPERATOR_DECISION_SCHEMA_STATEMENTS:
+                    connection.execute(statement)
+            for statement in _ALERT_DISMISSAL_SCHEMA_STATEMENTS:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             TuiLedger._validate_operator_decision_content(connection)
+            TuiLedger._validate_alert_dismissal_content(connection)
             TuiLedger._validate_owned_schema(
                 connection,
                 expected_version=SCHEMA_VERSION,
@@ -1022,9 +1108,7 @@ class TuiLedger:
             )
 
         history: dict[str, list[tuple[int, str, dict[str, object]]]] = {}
-        for row in connection.execute(
-            "SELECT * FROM note_history ORDER BY note_id, revision"
-        ):
+        for row in connection.execute("SELECT * FROM note_history ORDER BY note_id, revision"):
             payload = _decode_note_payload(row["payload_json"])
             expected = {
                 "note_id": payload["note_id"],
@@ -1042,9 +1126,7 @@ class TuiLedger:
             raise _invalid_note_content()
         for note_id, (current_revision, current_json, current_payload) in current.items():
             revisions = history[note_id]
-            if [revision for revision, _, _ in revisions] != list(
-                range(1, current_revision + 1)
-            ):
+            if [revision for revision, _, _ in revisions] != list(range(1, current_revision + 1)):
                 raise _invalid_note_content()
             latest_revision, latest_json, _ = revisions[-1]
             if (latest_revision, latest_json) != (current_revision, current_json):
@@ -1068,9 +1150,7 @@ class TuiLedger:
         check_index: bool,
     ) -> None:
         note_count = int(connection.execute("SELECT COUNT(*) FROM notes").fetchone()[0])
-        search_count = int(
-            connection.execute("SELECT COUNT(*) FROM note_search").fetchone()[0]
-        )
+        search_count = int(connection.execute("SELECT COUNT(*) FROM note_search").fetchone()[0])
         parity_count = int(
             connection.execute(
                 """
@@ -1141,10 +1221,7 @@ class TuiLedger:
                 or type(row["safe_message"]) is not str
                 or not 1 <= len(row["safe_message"].strip()) <= 512
                 or admitted_at is None
-                or (
-                    row["claim_worker_id"] is not None
-                    and not _is_safe_id(row["claim_worker_id"])
-                )
+                or (row["claim_worker_id"] is not None and not _is_safe_id(row["claim_worker_id"]))
                 or (
                     row["claim_token_sha256"] is not None
                     and not _is_sha256(row["claim_token_sha256"])
@@ -1154,10 +1231,14 @@ class TuiLedger:
             status = row["status"]
             request_json = row["accepted_request_json"]
             result_json = row["result_json"]
-            if status in {"accepted", "running"} and (
-                row["code"],
-                row["safe_message"],
-            ) != _COMMAND_STATUS_MESSAGES[status]:
+            if (
+                status in {"accepted", "running"}
+                and (
+                    row["code"],
+                    row["safe_message"],
+                )
+                != _COMMAND_STATUS_MESSAGES[status]
+            ):
                 raise _invalid_command_content()
             if request_json is not None:
                 request = _decode_canonical_object(request_json)
@@ -1191,8 +1272,7 @@ class TuiLedger:
                     or request["reviewed_control_version"] != int(control_version)
                     or request["reviewed_control_hash"] != control_hash
                     or typed_canonical != request_json
-                    or hashlib.sha256(request_json.encode("utf-8")).hexdigest()
-                    != request_sha256
+                    or hashlib.sha256(request_json.encode("utf-8")).hexdigest() != request_sha256
                 ):
                     raise _invalid_command_content()
             if result_json is not None:
@@ -1275,20 +1355,28 @@ class TuiLedger:
             ):
                 raise _invalid_command_content()
             if (
-                row["status"] in {"accepted", "rejected"}
-                and (row["worker_id"] is not None or row["result_json"] is not None)
-            ) or (
-                row["status"] == "running"
-                and (row["worker_id"] is None or row["result_json"] is not None)
-            ) or (
-                row["status"] in {"completed", "failed", "cancelled"}
-                and row["worker_id"] is None
+                (
+                    row["status"] in {"accepted", "rejected"}
+                    and (row["worker_id"] is not None or row["result_json"] is not None)
+                )
+                or (
+                    row["status"] == "running"
+                    and (row["worker_id"] is None or row["result_json"] is not None)
+                )
+                or (
+                    row["status"] in {"completed", "failed", "cancelled"}
+                    and row["worker_id"] is None
+                )
             ):
                 raise _invalid_command_content()
-            if row["status"] in {"accepted", "running"} and (
-                row["code"],
-                row["safe_message"],
-            ) != _COMMAND_STATUS_MESSAGES[row["status"]]:
+            if (
+                row["status"] in {"accepted", "running"}
+                and (
+                    row["code"],
+                    row["safe_message"],
+                )
+                != _COMMAND_STATUS_MESSAGES[row["status"]]
+            ):
                 raise _invalid_command_content()
 
             if row["result_json"] is not None:
@@ -1317,22 +1405,17 @@ class TuiLedger:
         for command_id, command_events in events.items():
             statuses = [str(event["status"]) for event in command_events]
             event_times = [
-                _parse_canonical_utc(event["occurred_at_utc"])
-                for event in command_events
+                _parse_canonical_utc(event["occurred_at_utc"]) for event in command_events
             ]
             previous_event_time: datetime | None = None
             previous_running_time: datetime | None = None
             for event_status, event_time in zip(statuses, event_times, strict=True):
                 if event_time is None or (
-                    previous_event_time is not None
-                    and event_time < previous_event_time
+                    previous_event_time is not None and event_time < previous_event_time
                 ):
                     raise _invalid_command_content()
                 if event_status == "running":
-                    if (
-                        previous_running_time is not None
-                        and event_time <= previous_running_time
-                    ):
+                    if previous_running_time is not None and event_time <= previous_running_time:
                         raise _invalid_command_content()
                     previous_running_time = event_time
                 previous_event_time = event_time
@@ -1357,13 +1440,8 @@ class TuiLedger:
             current = commands[command_id]
             latest = command_events[-1]
             first_event = command_events[0]
-            running_events = [
-                event for event in command_events if event["status"] == "running"
-            ]
-            if (
-                first == "accepted"
-                and first_event["occurred_at_utc"] != current["accepted_at_utc"]
-            ):
+            running_events = [event for event in command_events if event["status"] == "running"]
+            if first == "accepted" and first_event["occurred_at_utc"] != current["accepted_at_utc"]:
                 raise _invalid_command_content()
             if running_events:
                 latest_running = running_events[-1]
@@ -1396,13 +1474,15 @@ class TuiLedger:
     ) -> None:
         terminal = {"completed", "failed", "cancelled"}
         for table in ("commands", "command_receipt_events"):
-            for row in connection.execute(
-                f"SELECT status, code, safe_message FROM {table}"
-            ):
-                if row["status"] in terminal and (
-                    row["code"],
-                    row["safe_message"],
-                ) != _COMMAND_STATUS_MESSAGES[row["status"]]:
+            for row in connection.execute(f"SELECT status, code, safe_message FROM {table}"):
+                if (
+                    row["status"] in terminal
+                    and (
+                        row["code"],
+                        row["safe_message"],
+                    )
+                    != _COMMAND_STATUS_MESSAGES[row["status"]]
+                ):
                     raise _invalid_command_content()
 
     @staticmethod
@@ -1420,9 +1500,9 @@ class TuiLedger:
                 )
             except (TypeError, ValueError) as exc:
                 raise _invalid_operator_decision_content() from exc
-            expected_id = "tui-decision:" + hashlib.sha256(
-                decision.command_id.encode("utf-8")
-            ).hexdigest()
+            expected_id = (
+                "tui-decision:" + hashlib.sha256(decision.command_id.encode("utf-8")).hexdigest()
+            )
             if (
                 decision.decision_id != expected_id
                 or canonical_decision_json(decision) != row["content_json"]
@@ -1433,8 +1513,7 @@ class TuiLedger:
                 or row["operator_id"] != decision.operator_id
                 or row["reason"] != decision.reason
                 or row["decision"] != "hold"
-                or row["decided_at_utc"]
-                != decision.model_dump(mode="json")["decided_at_utc"]
+                or row["decided_at_utc"] != decision.model_dump(mode="json")["decided_at_utc"]
             ):
                 raise _invalid_operator_decision_content()
             command = connection.execute(
@@ -1487,6 +1566,117 @@ class TuiLedger:
         ).fetchone()
         if missing is not None:
             raise _invalid_operator_decision_content()
+
+    @staticmethod
+    def _validate_alert_dismissal_content(connection: sqlite3.Connection) -> None:
+        from .command_contracts import AlertDismissPayload, CommandRequest
+
+        bindings: dict[str, sqlite3.Row] = {}
+        for row in connection.execute("SELECT * FROM alert_dismissal_bindings ORDER BY command_id"):
+            command_id = row["command_id"]
+            created_at = _parse_canonical_utc(row["alert_created_at_utc"])
+            if (
+                not _is_safe_id(command_id)
+                or not _is_safe_id(row["alert_id"])
+                or created_at is None
+            ):
+                raise _invalid_alert_dismissal_content()
+            command = connection.execute(
+                "SELECT * FROM commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            if command is None or command["accepted_request_json"] is None:
+                raise _invalid_alert_dismissal_content()
+            try:
+                request = CommandRequest.model_validate_json(
+                    command["accepted_request_json"],
+                    strict=True,
+                )
+            except (TypeError, ValueError) as exc:
+                raise _invalid_alert_dismissal_content() from exc
+            if (
+                request.command_type != "alert.dismiss"
+                or type(request.payload) is not AlertDismissPayload
+                or request.payload.alert_id != row["alert_id"]
+                or request.payload.created_at_utc != created_at
+                or command["handler_key"] != "alert.dismiss"
+                or command["status"] == "rejected"
+            ):
+                raise _invalid_alert_dismissal_content()
+            bindings[str(command_id)] = row
+
+        dismissals: set[str] = set()
+        for row in connection.execute("SELECT * FROM alert_dismissals ORDER BY dismissal_sequence"):
+            command_id = row["command_id"]
+            created_at = _parse_canonical_utc(row["alert_created_at_utc"])
+            dismissed_at = _parse_canonical_utc(row["dismissed_at_utc"])
+            binding = bindings.get(str(command_id))
+            if (
+                binding is None
+                or command_id in dismissals
+                or not _is_safe_id(row["alert_id"])
+                or created_at is None
+                or dismissed_at is None
+                or dismissed_at < created_at
+                or binding["alert_id"] != row["alert_id"]
+                or binding["alert_created_at_utc"] != row["alert_created_at_utc"]
+            ):
+                raise _invalid_alert_dismissal_content()
+            command = connection.execute(
+                "SELECT * FROM commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            expected_result = json.dumps(
+                {
+                    "alert_id": row["alert_id"],
+                    "created_at_utc": row["alert_created_at_utc"],
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if (
+                command is None
+                or command["status"] != "completed"
+                or command["code"] != "completed"
+                or command["safe_message"] != "Alert dismissed."
+                or command["finished_at_utc"] != row["dismissed_at_utc"]
+                or command["result_json"] != expected_result
+            ):
+                raise _invalid_alert_dismissal_content()
+            dismissals.add(str(command_id))
+
+        missing_binding = connection.execute(
+            """
+            SELECT command_id
+            FROM commands
+            WHERE command_type = 'alert.dismiss'
+              AND status != 'rejected'
+              AND command_id NOT IN (SELECT command_id FROM alert_dismissal_bindings)
+            LIMIT 1
+            """
+        ).fetchone()
+        missing_effect = connection.execute(
+            """
+            SELECT command_id
+            FROM commands
+            WHERE command_type = 'alert.dismiss'
+              AND status = 'completed'
+              AND command_id NOT IN (SELECT command_id FROM alert_dismissals)
+            LIMIT 1
+            """
+        ).fetchone()
+        unexpected_effect = connection.execute(
+            """
+            SELECT command_id
+            FROM alert_dismissals
+            WHERE command_id NOT IN (
+                SELECT command_id FROM commands WHERE status = 'completed'
+            )
+            LIMIT 1
+            """
+        ).fetchone()
+        if any(row is not None for row in (missing_binding, missing_effect, unexpected_effect)):
+            raise _invalid_alert_dismissal_content()
 
     @staticmethod
     def _is_unclaimed_empty(connection: sqlite3.Connection) -> bool:
@@ -1547,9 +1737,9 @@ class TuiLedger:
             TuiLedger._validate_legacy_command_terminal_messages(connection)
         if version >= 4:
             TuiLedger._validate_operator_decision_content(connection)
-        quick_check = tuple(
-            str(row[0]) for row in connection.execute("PRAGMA quick_check")
-        )
+        if version >= 5:
+            TuiLedger._validate_alert_dismissal_content(connection)
+        quick_check = tuple(str(row[0]) for row in connection.execute("PRAGMA quick_check"))
         if quick_check != ("ok",):
             raise LedgerCorruptionError("TUI ledger failed SQLite integrity checking")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:

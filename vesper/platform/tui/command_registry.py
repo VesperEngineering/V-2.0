@@ -14,10 +14,17 @@ from pydantic import TypeAdapter
 
 from vesper.platform.contracts import AgentRole
 
+from .alert_dismissals import (
+    AlertDismissalStore,
+    AlertDismissalUnavailable,
+    AlertOccurrenceNotResolved,
+    AlertOccurrenceUnavailable,
+)
 from .command_contracts import (
     COMMAND_SPECS,
     MAX_COMMAND_PAYLOAD_BYTES,
     AgentEnqueuePayload,
+    AlertDismissPayload,
     ApprovalPayload,
     BackupCreatePayload,
     BackupRestorePayload,
@@ -26,11 +33,12 @@ from .command_contracts import (
     CommandRequest,
     CommandType,
     CompressMemoryPayload,
-    SourceControlPushPayload,
+    LayoutResetPayload,
     NoteAddPayload,
     ReceiptStatus,
     RuntimeStartPayload,
     ServicePayload,
+    SourceControlPushPayload,
 )
 from .command_policy import (
     AuthorizationDecision,
@@ -65,6 +73,8 @@ from .views import CapabilityState, CapabilityView, CommandSpecView, UtcDateTime
 _HANDLER_KEYS: Mapping[CommandType, str] = MappingProxyType(
     {
         "note.add": "note.add",
+        "alert.dismiss": "alert.dismiss",
+        "layout.reset": "layout.reset",
         "approval.approve": "approval.approve",
         "approval.hold": "approval.hold",
         "approval.reject": "approval.reject",
@@ -106,8 +116,10 @@ _RUNTIME_HANDLERS = frozenset(
 _SERVICE_HANDLERS = frozenset({"service.pause", "service.restart"})
 _BACKUP_HANDLERS = frozenset({"backup.create", "backup.restore"})
 _SOURCE_CONTROL_HANDLERS = frozenset({"source-control.push"})
+_LOCAL_RECOVERY_HANDLERS = frozenset({"note.add", "alert.dismiss", "layout.reset", "approval.hold"})
 _RECOVERY_STATES = {"not-started", "completed", "failed", "unknown"}
 _MANUAL_INTERVENTION_MESSAGE = "Downstream command state is unknown; inspect it before any retry."
+_ONLY_RESOLVED_ALERT_REASON = "Only a resolved alert can be dismissed."
 _UTC = TypeAdapter(UtcDateTime)
 
 
@@ -171,6 +183,7 @@ class CommandRegistry:
         service_port: ServiceCommandPort | None = None,
         backup_port: BackupCommandPort | None = None,
         source_control_port: SourceControlCommandPort | None = None,
+        alert_store: AlertDismissalStore | None = None,
         policy: CommandPolicy | None = None,
         specs: tuple[CommandSpecView, ...] = COMMAND_SPECS,
         clock: Callable[[], datetime] = _utc_now,
@@ -195,6 +208,7 @@ class CommandRegistry:
         self._service_port = service_port
         self._backup_port = backup_port
         self._source_control_port = source_control_port
+        self._alert_store = alert_store
         self._policy = CommandPolicy() if policy is None else policy
         if type(self._policy) is not CommandPolicy:
             raise TypeError("policy must be CommandPolicy")
@@ -245,6 +259,8 @@ class CommandRegistry:
             return
         self._notes.close()
         self._decisions.close()
+        if self._alert_store is not None:
+            self._alert_store.close()
         self._store.close()
         if self._owns_ledger:
             self._ledger.close()
@@ -269,7 +285,7 @@ class CommandRegistry:
             strict=True,
         )
         request = CommandRequest.model_validate(
-            request.model_dump(mode="python", warnings=False),
+            request.model_dump(mode="json", warnings=False),
             strict=True,
         )
         if request.command_type == "memory.compress-now":
@@ -292,12 +308,16 @@ class CommandRegistry:
             )
         else:
             decision = self._policy.authorize(context, request, spec)
-        if decision.allowed and not self._handler_enabled(request.command_type):
-            decision = AuthorizationDecision(
-                allowed=False,
-                code="capability-disabled",
-                safe_message=DISABLED_COMMAND_REASONS[request.command_type],
-            )
+        if decision.allowed:
+            handler_capability = self._handler_capability(request.command_type)
+            if handler_capability.state is not CapabilityState.ENABLED:
+                decision = AuthorizationDecision(
+                    allowed=False,
+                    code="capability-disabled",
+                    safe_message=(
+                        handler_capability.reason or DISABLED_COMMAND_REASONS[request.command_type]
+                    ),
+                )
         now = self._now()
         if not decision.allowed:
             return self._store.reject(
@@ -314,7 +334,15 @@ class CommandRegistry:
                 now,
             )
         handler_key = _HANDLER_KEYS[request.command_type]
-        receipt = self._store.accept(request, context, handler_key, now)
+        if request.command_type == "alert.dismiss":
+            receipt = self._accept_alert_dismissal(
+                request,
+                context,
+                handler_key,
+                now,
+            )
+        else:
+            receipt = self._store.accept(request, context, handler_key, now)
         if receipt.status is not ReceiptStatus.ACCEPTED:
             return receipt
         claim = self._store.claim(
@@ -330,7 +358,122 @@ class CommandRegistry:
             return current
         return self._execute_claimed(request, context, claim)
 
+    def _accept_alert_dismissal(
+        self,
+        request: CommandRequest,
+        context: CommandContext,
+        handler_key: str,
+        now: datetime,
+    ) -> CommandReceipt:
+        alert_store = self._alert_store
+        if alert_store is None:
+            raise LedgerCorruptionError("enabled alert dismissal store disappeared")
+        payload = cast(AlertDismissPayload, request.payload)
+        try:
+            occurrence = alert_store.current_occurrence(payload.alert_id)
+        except AlertOccurrenceNotResolved:
+            return self._store.reject(
+                canonical_request_sha256(request),
+                SafeRequestMetadata(
+                    command_id=request.command_id,
+                    command_type=request.command_type,
+                    operator_id=context.operator_id,
+                    client_id=context.client_id,
+                    reviewed_control_version=request.reviewed_control_version,
+                    reviewed_control_hash=request.reviewed_control_hash,
+                ),
+                AuthorizationDecision(
+                    allowed=False,
+                    code="prerequisite-failed",
+                    safe_message=_ONLY_RESOLVED_ALERT_REASON,
+                ),
+                now,
+            )
+        except AlertOccurrenceUnavailable:
+            return self._store.reject(
+                canonical_request_sha256(request),
+                SafeRequestMetadata(
+                    command_id=request.command_id,
+                    command_type=request.command_type,
+                    operator_id=context.operator_id,
+                    client_id=context.client_id,
+                    reviewed_control_version=request.reviewed_control_version,
+                    reviewed_control_hash=request.reviewed_control_hash,
+                ),
+                AuthorizationDecision(
+                    allowed=False,
+                    code="prerequisite-failed",
+                    safe_message="Current alert state is unavailable.",
+                ),
+                now,
+            )
+        if occurrence.created_at_utc != payload.created_at_utc:
+            return self._store.reject(
+                canonical_request_sha256(request),
+                SafeRequestMetadata(
+                    command_id=request.command_id,
+                    command_type=request.command_type,
+                    operator_id=context.operator_id,
+                    client_id=context.client_id,
+                    reviewed_control_version=request.reviewed_control_version,
+                    reviewed_control_hash=request.reviewed_control_hash,
+                ),
+                AuthorizationDecision(
+                    allowed=False,
+                    code="prerequisite-failed",
+                    safe_message="Selected alert occurrence is no longer current.",
+                ),
+                now,
+            )
+        try:
+            with self._ledger.transaction() as connection:
+                receipt = self._store.accept_in_transaction(
+                    connection,
+                    request,
+                    context,
+                    handler_key,
+                    now,
+                )
+                if receipt.status is ReceiptStatus.ACCEPTED:
+                    alert_store.bind_for_command_in_transaction(
+                        connection,
+                        request.command_id,
+                        occurrence,
+                    )
+                return receipt
+        except AlertDismissalUnavailable:
+            return self._store.reject(
+                canonical_request_sha256(request),
+                SafeRequestMetadata(
+                    command_id=request.command_id,
+                    command_type=request.command_type,
+                    operator_id=context.operator_id,
+                    client_id=context.client_id,
+                    reviewed_control_version=request.reviewed_control_version,
+                    reviewed_control_hash=request.reviewed_control_hash,
+                ),
+                AuthorizationDecision(
+                    allowed=False,
+                    code="prerequisite-failed",
+                    safe_message="Current alert state is unavailable.",
+                ),
+                now,
+            )
+
     def recover_running(self, now_utc: datetime) -> tuple[CommandReceipt, ...]:
+        return self._recover_running(now_utc, local_only=False)
+
+    def recover_local_running(self, now_utc: datetime) -> tuple[CommandReceipt, ...]:
+        """Recover only TUI-owned effects without consulting runtime adapters."""
+
+        return self._recover_running(now_utc, local_only=True)
+
+    def _recover_running(
+        self,
+        now_utc: datetime,
+        *,
+        local_only: bool,
+    ) -> tuple[CommandReceipt, ...]:
         self._require_open()
         now = _UTC.validate_python(now_utc, strict=True)
         recovered: list[CommandReceipt] = []
@@ -342,14 +485,29 @@ class CommandRegistry:
             expected_handler = _HANDLER_KEYS.get(request.command_type)
             if expected_handler is None or accepted.handler_key != expected_handler:
                 raise LedgerCorruptionError("recoverable command handler binding is invalid")
+            if local_only and request.command_type not in _LOCAL_RECOVERY_HANDLERS:
+                continue
             context = self._recovery_context(accepted)
-            if request.command_type in {"note.add", "approval.hold"}:
+            if request.command_type in _LOCAL_RECOVERY_HANDLERS:
                 claim = self._claim_for_recovery(
                     request.command_id,
                     max(now, self._now()),
                 )
                 if claim is None:
                     recovered.append(self._current_receipt(request.command_id))
+                    continue
+                if request.command_type == "alert.dismiss" and not self._alert_store_healthy():
+                    recovered.append(
+                        self._store.finish(
+                            request.command_id,
+                            claim.claim_token,
+                            ReceiptStatus.FAILED,
+                            None,
+                            max(now, self._now()),
+                            code="manual-intervention-required",
+                            safe_message=_MANUAL_INTERVENTION_MESSAGE,
+                        )
+                    )
                     continue
                 recovered.append(self._execute_claimed(request, context, claim))
                 continue
@@ -503,6 +661,63 @@ class CommandRegistry:
                     {"note_id": note.note_id},
                     finished_at,
                 )
+        if request.command_type == "alert.dismiss":
+            alert_store = self._alert_store
+            if alert_store is None:
+                raise LedgerCorruptionError("alert dismissal store is unavailable")
+            try:
+                with self._ledger.transaction() as connection:
+                    binding = alert_store.binding_for_command_in_transaction(
+                        connection,
+                        request.command_id,
+                    )
+                    if binding is None:
+                        raise AlertDismissalUnavailable("Alert dismissal binding is unavailable.")
+                    finished_at = max(
+                        self._now(),
+                        claim.claimed_at_utc,
+                        binding.created_at_utc,
+                    )
+                    dismissal = alert_store.dismiss_for_command_in_transaction(
+                        connection,
+                        request.command_id,
+                        finished_at,
+                    )
+                    occurrence = dismissal.model_dump(mode="json")
+                    return self._store.finish_in_transaction(
+                        connection,
+                        request.command_id,
+                        claim.claim_token,
+                        ReceiptStatus.COMPLETED,
+                        {
+                            "alert_id": occurrence["alert_id"],
+                            "created_at_utc": occurrence["created_at_utc"],
+                        },
+                        finished_at,
+                        code="completed",
+                        safe_message="Alert dismissed.",
+                    )
+            except AlertDismissalUnavailable:
+                return self._store.finish(
+                    request.command_id,
+                    claim.claim_token,
+                    ReceiptStatus.FAILED,
+                    None,
+                    max(self._now(), claim.claimed_at_utc),
+                    code="manual-intervention-required",
+                    safe_message=_MANUAL_INTERVENTION_MESSAGE,
+                )
+        if request.command_type == "layout.reset":
+            _ = cast(LayoutResetPayload, request.payload)
+            return self._store.finish(
+                request.command_id,
+                claim.claim_token,
+                ReceiptStatus.COMPLETED,
+                None,
+                self._now(),
+                code="completed",
+                safe_message="Layout reset approved.",
+            )
         if request.command_type == "approval.hold":
             _ = cast(ApprovalPayload, request.payload)
             _, receipt = self._decisions.hold(
@@ -833,6 +1048,22 @@ class CommandRegistry:
         return self._handler_capability(command_type).state is CapabilityState.ENABLED
 
     def _handler_capability(self, command_type: CommandType) -> CapabilityView:
+        if command_type == "alert.dismiss":
+            healthy = self._alert_store_healthy()
+            enabled = healthy and cast(AlertDismissalStore, self._alert_store).dismissible
+            return CapabilityView(
+                capability_id=command_type,
+                state=CapabilityState.ENABLED if enabled else CapabilityState.DISABLED,
+                reason=(
+                    None
+                    if enabled
+                    else (
+                        _ONLY_RESOLVED_ALERT_REASON
+                        if healthy
+                        else DISABLED_COMMAND_REASONS[command_type]
+                    )
+                ),
+            )
         if command_type == "memory.compress-now":
             enabled = self._memory_port_healthy()
             return CapabilityView(
@@ -897,6 +1128,15 @@ class CommandRegistry:
             and callable(compress_now)
             and callable(lookup_receipt)
         )
+
+    def _alert_store_healthy(self) -> bool:
+        if self._alert_store is None:
+            return False
+        try:
+            healthy = self._alert_store.healthy
+        except Exception:
+            return False
+        return type(healthy) is bool and healthy
 
     def _recovery_context(self, accepted) -> CommandContext:
         request = accepted.request
