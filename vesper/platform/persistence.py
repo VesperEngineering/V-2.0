@@ -12,6 +12,7 @@ from typing import Callable, Iterator, Mapping, Sequence
 
 from .evidence import FilesystemEvidenceStore
 from .knowledge import SqliteKnowledgeIndex
+from .paths import default_platform_root
 from .runtime_env import enforce_offline_runtime_environment
 
 enforce_offline_runtime_environment()
@@ -45,6 +46,12 @@ class PlatformPaths:
 class AtomicCreatePlan:
     value: Mapping[str, object]
     linked_items: Sequence[tuple[tuple[str, ...], str, Mapping[str, object]]] = ()
+
+
+def default_platform_paths() -> PlatformPaths:
+    """Return canonical local platform paths without creating them."""
+
+    return PlatformPaths.below(default_platform_root())
 
 
 class LangGraphStoreAdapter:

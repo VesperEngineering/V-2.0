@@ -1,0 +1,28 @@
+---
+source: tests/snapshots.rs
+expression: "normalized_render(80, 24, & state)"
+---
+┌RUNTIME & MARKET - CONTROLLER─────────────────────────────────────────────────┐
+│MODE UNKNOWN / UNAVAILABLE | DATA UNAVAILABLE | AGE UNAVAILABLE               │
+│TIME 2026-01-15 07:34:56 EST | MARKET Closed                                  │
+│REGIME UNAVAILABLE | CONFIDENCE UNAVAILABLE | PORTFOLIO UNAVAILABLE           │
+│REBALANCE UNAVAILABLE | BLOCKERS UNAVAILABLE                                  │
+│ALERTS URGENT 1 / OPEN 1 | AGENT UNAVAILABLE | QWEN UNAVAILABLE               │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌NAVIGATION────────────────────────────────────────────────────────────────────┐
+│[1 Imp] | 2 Port | 3 Ord | 4 Agt | 5 Mod | 6 Time | 7 Risk | 8 Data | 9 Mem | │
+│0 Sys                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ALERTS────────────────────────────────────────────────────────────────────────┐
+│[!] URGENT - Immediate review required.                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌HOLDINGS - PANEL 1/3──────────────────────────────────────────────────────────┐
+│  Symbol             Current             Proposed           Approved          │
+│  AAPL               10.00%              11.00%             -                 │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+CONTROLS: click or : menu | 7 actions
+┌KEYS & STATUS─────────────────────────────────────────────────────────────────┐
+│[ Prev | ] Next | Up/Down | o Open | f Filter | q Close                       │
+└──────────────────────────────────────────────────────────────────────────────┘

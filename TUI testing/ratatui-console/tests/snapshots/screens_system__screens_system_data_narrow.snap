@@ -1,0 +1,26 @@
+---
+source: tests/screens_system.rs
+expression: "|_, _| { render_data_narrow(&fixture().data, 0) } (78, 22)"
+---
+┌SOURCE STATUS───────────────────────────────────────────────────────────────┐
+│[~] STALE - Refresh delayed?retrying                                        │
+└────────────────────────────────────────────────────────────────────────────┘
+┌> DATA SOURCES - PANEL 1/2──────────────────────────────────────────────────┐
+│[~] STALE source:massive | Age 12.5s | Coverage S&P 500 | Consumers         │
+│ml_model, momentum | 2026-07-15 08:34:56 EDT | Late sample                  │
+│Dependencies massive-db, exchange-calendar                                  │
+│[?] UNAVAILABLE source:missing | No reviewed adapter                        │
+│Dependencies NONE                                                           │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘

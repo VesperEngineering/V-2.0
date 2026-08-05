@@ -1,0 +1,89 @@
+---
+source: tests/screens_agents.rs
+expression: "composite_snapshot(76, Theme::Charcoal, DisplayMode::LargeText)"
+---
+AGENTS
+┌WAITING - PANEL 3/5───────────────────────────────────────────────────────┐
+│TASK waiting task                                                         │
+│STATUS [ ] WAITING                                                        │
+│AGENT agent:wait                                                          │
+│PRIORITY 30 | ELAPSED 1m 05s                                              │
+│MODEL qwen:64k                                                            │
+│AREA portfolio, evidence | ID work:waiting                                │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+MODELS & REGIME
+┌EVIDENCE & METRICS - PANEL 3/3────────────────────────────────────────────┐
+│GATES                                                                     │
+│gate:sharpe | PASS                                                        │
+│METRIC metric:sharpe >= 1.2000 | VALUE 1.2500 | BASELINE 1.1000           │
+│WINDOW 2024-01-01 through 2026-06-30                                      │
+│REASON Candidate cleared the approved threshold.                          │
+│EVIDENCE evidence:evaluating                                              │
+│METRICS                                                                   │
+│  metric:cpu | 12.5000 percent | FRESH | 2026-08-02 20:00:00 EDT | ERROR  │
+│NONE                                                                      │
+│                                                                          │
+│                                                                          │
+│EVIDENCE                                                                  │
+│  evidence:evaluating | evaluation-receipt | SOURCE controller            │
+│2026-08-02 20:00:00 EDT | SHA256                                          │
+│aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa          │
+│                                                                          │
+│                                                                          │
+│  evidence:failed | gate-receipt | SOURCE controller                      │
+│2026-08-02 20:00:00 EDT | SHA256                                          │
+│bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+TIMELINE
+┌TIMELINE - IMPACT ONLY────────────────────────────────────────────────────┐
+│EXCLUDED BY FILTER 1 | HIDDEN BY SOURCE 7                                 │
+│                                                                          │
+│[!] URGENT | 2026-08-02 20:00:00 EDT | Portfolio impact detected          │
+│ID event:impact | AGENT agent:queue | SYMBOL AAPL | MODEL model:macro |   │
+│ORDER order:1 | EVIDENCE evidence:impact                                  │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘

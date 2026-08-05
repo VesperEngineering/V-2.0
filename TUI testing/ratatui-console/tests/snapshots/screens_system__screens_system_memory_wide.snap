@@ -1,0 +1,32 @@
+---
+source: tests/screens_system.rs
+expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::default();\n    render_text(w, h, |frame|\n    { render_memory(frame, frame.area(), &snapshot.memory, &state) })\n} (120, 28)"
+---
+┌AGENT USE STATUS──────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[OK] AGENT MEMORY USE REPORTED                                                                                        │
+│See USED BY on each memory row.                                                                                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌> CORE MEMORY───────────────────────────┐┌ARCHIVE─────────────────────────────────┐┌CHANGE HISTORY────────────────────┐
+│V20 ONLY | 2,000-WORD CORE              ││SEARCHABLE | REVERSIBLE | NEVER DELETED ││[i] INFO 2026-07-15 08:34:56 EDT |│
+│CONTROLLER CURATED | NO PINS            ││[A] ARCHIVED memory:archive | Older     ││Memory archived?with review |     │
+│[OK] CORE memory:core | Use             ││reviewed note. | 2026-01-15 07:34:56 EST││Evidence evidence:1               │
+│controller?truth. | 2026-07-15 08:34:56 ││| Evidence NONE                         ││                                  │
+│EDT | Evidence evidence:1               ││USED BY NONE                            ││                                  │
+│USED BY agent:qwen, agent:risk          ││CHANGE REASON Archived for a stronger   ││                                  │
+│CHANGE REASON Promoted after reviewed   ││V20 rule.                               ││                                  │
+│evidence.                               ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+│                                        ││                                        ││                                  │
+└────────────────────────────────────────┘└────────────────────────────────────────┘└──────────────────────────────────┘

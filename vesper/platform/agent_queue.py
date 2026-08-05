@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .agent_profiles import AUTONOMOUS_AGENT_ROLES
 from .contracts import AgentRole, NonEmptyStr
 from .persistence import LangGraphStoreAdapter
 
@@ -18,11 +19,20 @@ class WorkQueueEmpty(RuntimeError):
     pass
 
 
+class WorkQueueConflict(RuntimeError):
+    pass
+
+
+class WorkQueueRoleError(RuntimeError):
+    pass
+
+
 class AgentWorkItem(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     work_id: NonEmptyStr
     role: AgentRole
     session_id: NonEmptyStr
+    title: NonEmptyStr
     objective: NonEmptyStr
     priority: int = Field(ge=0, le=100)
     created_at: datetime
@@ -33,7 +43,10 @@ class AgentWorkItem(BaseModel):
 
 
 def _load(raw) -> AgentWorkItem:
-    return AgentWorkItem.model_validate_json(json.dumps(raw))
+    persisted = dict(raw)
+    if "title" not in persisted:
+        persisted["title"] = persisted.get("objective")
+    return AgentWorkItem.model_validate_json(json.dumps(persisted))
 
 
 class AgentWorkQueue:
@@ -45,17 +58,40 @@ class AgentWorkQueue:
         work_id: str,
         role: AgentRole,
         session_id: str,
+        title: str,
         objective: str,
         priority: int,
         created_at: datetime,
     ) -> AgentWorkItem:
+        if role not in AUTONOMOUS_AGENT_ROLES:
+            raise WorkQueueRoleError("agent queue requires an approved autonomous quant role")
         existing = self.store.get(_NAMESPACE, work_id)
         if existing is not None:
-            return _load(existing)
+            item = _load(existing)
+            expected = (
+                role,
+                session_id,
+                title,
+                objective,
+                priority,
+                created_at,
+            )
+            actual = (
+                item.role,
+                item.session_id,
+                item.title,
+                item.objective,
+                item.priority,
+                item.created_at,
+            )
+            if actual != expected:
+                raise WorkQueueConflict(f"conflicting agent work: {work_id}")
+            return item
         item = AgentWorkItem(
             work_id=work_id,
             role=role,
             session_id=session_id,
+            title=title,
             objective=objective,
             priority=priority,
             created_at=created_at,
@@ -64,6 +100,10 @@ class AgentWorkQueue:
         )
         self.store.put(_NAMESPACE, work_id, item.model_dump(mode="json"))
         return item
+
+    def get(self, work_id: str) -> AgentWorkItem | None:
+        existing = self.store.get(_NAMESPACE, work_id)
+        return None if existing is None else _load(existing)
 
     def list(self) -> tuple[AgentWorkItem, ...]:
         return tuple(_load(raw) for raw in self.store.search(_NAMESPACE, limit=10_000))

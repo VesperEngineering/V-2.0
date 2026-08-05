@@ -1,0 +1,89 @@
+---
+source: tests/screens_agents.rs
+expression: "composite_snapshot(76, Theme::WarmWhite, DisplayMode::Standard)"
+---
+AGENTS
+┌RUNNING - PANEL 2/5───────────────────────────────────────────────────────┐
+│[!] URGENT | RUNNING | urgent running                                     │
+│agent:run | P5 | 1m 05s | work:running-urgent                             │
+│MODEL qwen:64k | AREA portfolio, evidence                                 │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+MODELS & REGIME
+┌CANDIDATES - PANEL 2/3────────────────────────────────────────────────────┐
+│  candidate:evaluating | FAMILY approved-family | STRATEGY ml_model       │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:evaluating                    │
+│STATUS EVALUATING | RETENTION POLICY UNAVAILABLE                          │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
+│                                                                          │
+│  candidate:failed | FAMILY approved-family | STRATEGY ml_model           │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:failed                        │
+│STATUS FAILED | RETENTION POLICY 30 DAYS                                  │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
+│                                                                          │
+│  candidate:passed | FAMILY approved-family | STRATEGY ml_model           │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:passed                        │
+│STATUS PASSED | RETENTION POLICY 90 DAYS                                  │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
+│                                                                          │
+│  candidate:active | FAMILY approved-family | STRATEGY ml_model           │
+│2026-08-02 20:00:00 EDT | EVIDENCE evidence:active                        │
+│STATUS ACTIVE | RETENTION POLICY PERMANENT                                │
+│FEATURE features:v20 | DATA cccccccccccc | EVALUATION dddddddddddd        │
+│STATUS DETAIL Controller evaluation is current.                           │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+TIMELINE
+┌TIMELINE - IMPACT ONLY────────────────────────────────────────────────────┐
+│EXCLUDED BY FILTER 1 | HIDDEN BY SOURCE 7                                 │
+│                                                                          │
+│[!] URGENT | 2026-08-02 20:00:00 EDT | Portfolio impact detected          │
+│ID event:impact | AGENT agent:queue | SYMBOL AAPL | MODEL model:macro |   │
+│ORDER order:1 | EVIDENCE evidence:impact                                  │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘

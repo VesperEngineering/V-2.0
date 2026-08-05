@@ -1,0 +1,89 @@
+---
+source: tests/screens_agents.rs
+expression: "composite_snapshot(150, Theme::WarmWhite, DisplayMode::Compact)"
+---
+AGENTS
+┌QUEUED <────────────────────────────┐┌RUNNING────────────────────────────┐┌WAITING─────────────────────────────┐┌DONE───────────────────────────────┐
+│[!] URGENT | QUEUED | urgent queued ││[!] URGENT | RUNNING | urgent      ││[ ] WAITING | waiting task |        ││! FAILED | failed task |           │
+│| agent:queue | P1 | 1m 05s |       ││running | agent:run | P5 | 1m 05s |││agent:wait | P30 | 1m 05s | qwen:64k││agent:failed | P100 | 1m 05s |     │
+│qwen:64k | portfolio, evidence |    ││qwen:64k | portfolio, evidence |   ││| portfolio, evidence | work:waiting││qwen:64k | portfolio, evidence |   │
+│work:queued-urgent                  ││work:running-urgent                ││                                    ││work:failed                        │
+│                                    ││                                   ││                                    ││                                   │
+│[ ] QUEUED | normal queued |        ││                                   ││                                    ││[ ] DONE | completed task |        │
+│agent:queue | P90 | 1m 05s |        ││                                   ││                                    ││agent:done | P20 | 1m 05s |        │
+│qwen:64k | portfolio, evidence |    ││                                   ││                                    ││qwen:64k | portfolio, evidence |   │
+│work:queued-normal                  ││                                   ││                                    ││work:done                          │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+│                                    ││                                   ││                                    ││                                   │
+└────────────────────────────────────┘└───────────────────────────────────┘└────────────────────────────────────┘└───────────────────────────────────┘
+┌BACKLOG─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│[ ] BACKLOG | backlog task | agent:backlog | P10 | 1m 05s | qwen:64k | portfolio, evidence | work:backlog                                           │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+MODELS & REGIME
+┌> MODEL OPINIONS / FINAL──────────────────────┐┌CANDIDATES─────────────────────────────────────────────────────┐┌EVIDENCE & METRICS─────────────────┐
+│FINAL REGIME: sideways | CONFIDENCE 73.0%     ││  candidate:evaluating | FAMILY approved-family | STRATEGY     ││GATES                              │
+│ACTIVE model:active                           ││ml_model                                                       ││gate:sharpe | PASS                 │
+│ROLLBACK model:rollback                       ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:evaluating         ││METRIC metric:sharpe >= 1.2000 |   │
+│FAMILY approved-family                        ││STATUS EVALUATING | RETENTION POLICY UNAVAILABLE               ││VALUE 1.2500 | BASELINE 1.1000     │
+│STRATEGY ml_model                             ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││WINDOW 2024-01-01 through          │
+│FEATURE SET features:v20                      ││dddddddddddd                                                   ││2026-06-30                         │
+│AUTOMATIC CHANGES: BLOCKED                    ││STATUS DETAIL Controller evaluation is current.                ││REASON Candidate cleared the       │
+│BLOCK REASON: Risk gate requires review.      ││  candidate:failed | FAMILY approved-family | STRATEGY ml_model││approved threshold.                │
+│MODEL OPINIONS                                ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:failed             ││EVIDENCE evidence:evaluating       │
+│  model:macro | risk-on | 80.0%               ││STATUS FAILED | RETENTION POLICY 30 DAYS                       ││METRICS                            │
+│2026-08-02 20:00:00 EDT                       ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││  metric:cpu | 12.5000 percent |   │
+│  model:micro | risk-off | 60.0%              ││dddddddddddd                                                   ││FRESH | 2026-08-02 20:00:00 EDT |  │
+│2026-08-02 20:00:00 EDT                       ││STATUS DETAIL Controller evaluation is current.                ││ERROR NONE                         │
+│                                              ││  candidate:passed | FAMILY approved-family | STRATEGY ml_model││EVIDENCE                           │
+│                                              ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:passed             ││  evidence:evaluating |            │
+│                                              ││STATUS PASSED | RETENTION POLICY 90 DAYS                       ││evaluation-receipt | SOURCE        │
+│                                              ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││controller                         │
+│                                              ││dddddddddddd                                                   ││2026-08-02 20:00:00 EDT | SHA256   │
+│                                              ││STATUS DETAIL Controller evaluation is current.                ││aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa│
+│                                              ││  candidate:active | FAMILY approved-family | STRATEGY ml_model││aaaaaaaaaaaaaaaaaaaaaaaaaaaaa      │
+│                                              ││2026-08-02 20:00:00 EDT | EVIDENCE evidence:active             ││  evidence:failed | gate-receipt | │
+│                                              ││STATUS ACTIVE | RETENTION POLICY PERMANENT                     ││SOURCE controller                  │
+│                                              ││FEATURE features:v20 | DATA cccccccccccc | EVALUATION          ││2026-08-02 20:00:00 EDT | SHA256   │
+│                                              ││dddddddddddd                                                   ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb│
+│                                              ││STATUS DETAIL Controller evaluation is current.                ││bbbbbbbbbbbbbbbbbbbbbbbbbbbbb      │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+│                                              ││                                                               ││                                   │
+└──────────────────────────────────────────────┘└───────────────────────────────────────────────────────────────┘└───────────────────────────────────┘
+
+TIMELINE
+┌TIMELINE - IMPACT ONLY──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│EXCLUDED BY FILTER 1 | HIDDEN BY SOURCE 7                                                                                                           │
+│                                                                                                                                                    │
+│[!] URGENT | 2026-08-02 20:00:00 EDT | Portfolio impact detected                                                                                    │
+│ID event:impact | AGENT agent:queue | SYMBOL AAPL | MODEL model:macro | ORDER order:1 | EVIDENCE evidence:impact                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+│                                                                                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

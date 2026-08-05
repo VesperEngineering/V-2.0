@@ -16,15 +16,21 @@ dependencies = [
     "openai-codex==0.144.4",
     "pandas>=2.2.0,<4",
     "pydantic>=2.13.4,<3",
+    "pywin32==312; sys_platform == 'win32'",
     "pyyaml>=6.0.1,<7",
     "scikit-learn>=1.4.0,<2",
     "typer>=0.27.0,<1",
+    "winrt-runtime==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.Data.Xml.Dom==3.2.1; sys_platform == 'win32'",
+    "winrt-Windows.UI.Notifications==3.2.1; sys_platform == 'win32'",
     "xgboost>=2.0.0,<4",
     "yfinance>=0.2.40,<2",
 ]
 
 [project.scripts]
 vesper-agent = "vesper.platform.cli:main"
+vesper-ops-daemon = "vesper.platform.ops.cli:main"
+vesper-tui-gateway = "vesper.platform.tui.cli:main"
 
 [dependency-groups]
 dev = [

@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.11.15, Pydantic 2, pywin32 312, Rust 1.97.0 edition 2024, Ratatui 0.30.2, Crossterm 0.29.0, Tokio 1.53.1, Serde, Insta.
 
+**Status:** Approved; preflight corrections incorporated.
+
 ## Global Constraints
 
 - Execute from an isolated worktree based on reviewed commit `9b958a5` or its reviewed descendant.
@@ -21,6 +23,9 @@
 - Allow the signed-in logon SID only in the pipe DACL. Do not use the default named-pipe security descriptor.
 - Frames are `4-byte unsigned big-endian length + UTF-8 JSON` with a 1,048,576-byte maximum payload.
 - Protocol schema version is integer `1`.
+- Wire and stored timestamps are canonical UTC with a zero offset. Rust renders
+  them in `America/New_York`; wire timestamps never carry local offsets. Every
+  wire/storage field is suffixed `_at_utc` or `_time_utc`.
 - IDs crossing the wire must match
   `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` and may not be `.` or `..`.
 - Store console state below `%LOCALAPPDATA%\Vesper\v20\tui`.
@@ -31,6 +36,11 @@
 - Password derivation uses `hashlib.scrypt` with a 16-byte random salt, `n=32768`, `r=8`, `p=1`, `dklen=32`, and `maxmem=67108864`.
 - Store only version, salt, scrypt parameters, and verifier. Never store or log the password.
 - Closing the TUI does not start, stop, pause, or change V20.
+- `WireEnvelope.sequence` is per client session. The gateway assigns it under
+  that session's lock immediately before enqueueing an outbound envelope.
+- Typed models reject unknown fields. A decoder may retain at most one frame's
+  raw unknown-field object in an in-memory `UntrustedProtocolDiagnostic`; it is
+  never rendered, logged, persisted, placed in a receipt, or passed to policy.
 - Use test-first changes and one Conventional Commit per task.
 
 ---
@@ -105,7 +115,7 @@ def test_tui_windows_transport_is_pinned() -> None:
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
-Run: `uv run --locked python -m pytest tests/platform/test_dependencies.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/test_dependencies.py -q`
 
 Expected: FAIL because pywin32 is absent.
 
@@ -121,13 +131,16 @@ Run: `uv lock`
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `uv run --locked python -m pytest tests/platform/test_dependencies.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/test_dependencies.py -q`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-Commit: `build(tui): pin Windows pipe support`
+```powershell
+git add -- 'pyproject.toml' 'uv.lock' 'tests/platform/test_dependencies.py'
+git commit -m "build(tui): pin Windows pipe support"
+```
 
 ### Task 2: Define strict wire and shell contracts
 
@@ -137,11 +150,16 @@ Commit: `build(tui): pin Windows pipe support`
 - Create: `tests/platform/tui/test_contracts.py`
 
 **Interfaces:**
-- Produces enum `MessageType`: `client-hello`, `server-hello`, `auth-setup`, `auth-unlock`, `auth-result`, `snapshot-request`, `snapshot`, `event`, `command`, `command-receipt`, `protocol-error`, `ping`, `pong`.
+- Produces enum `MessageType`: `client-hello`, `server-hello`, `auth-setup`,
+  `auth-unlock`, `auth-result`, `lease-request`, `lease-result`, `lock-request`,
+  `lock-result`, `snapshot-request`, `snapshot`, `protocol-error`, `ping`,
+  `pong`. Observability adds `event`; controls add `command` and
+  `command-receipt` with their exact payloads.
 - Produces enum `Freshness`: `loading`, `fresh`, `stale`, `unavailable`.
-- Produces enum `OperatingMode`: `stopped`, `shadow`, `paper`, `live`.
+- Produces enum `OperatingMode`: `unknown`, `stopped`, `shadow`, `paper`, `live`.
 - Produces enum `CapabilityState`: `enabled`, `read-only`, `disabled`.
-- Produces models `CapabilityView`, `HeaderView`, `AlertView`, `ShellSnapshot`, `WireEnvelope`, and the thirteen typed payload models.
+- Produces models `CapabilityView`, `HeaderView`, `AlertView`, `ShellSnapshot`,
+  `WireEnvelope`, and one exact typed payload model for every message type.
 - Every model uses `ConfigDict(extra="forbid", frozen=True, strict=True)`.
 
 - [ ] **Step 1: Write contract rejection and round-trip tests**
@@ -161,7 +179,7 @@ def test_envelope_round_trips_and_rejects_unknown_fields() -> None:
         message_id="server:1",
         sequence=1,
         state_version=0,
-        timestamp=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        timestamp_utc=datetime(2026, 8, 3, tzinfo=timezone.utc),
         message_type=MessageType.SERVER_HELLO,
         payload={"server_version": "0.1.0", "requires_setup": True},
     )
@@ -170,13 +188,17 @@ def test_envelope_round_trips_and_rejects_unknown_fields() -> None:
         WireEnvelope.model_validate({**value.model_dump(), "secret": "x"})
 ```
 
-Also test naive timestamps, timestamps whose UTC offset does not match
-America/New_York at that instant, blank IDs, negative sequences, schema versions
-other than `1`, invalid enum values, and secret-like unknown fields.
+Also test naive timestamps and non-zero UTC offsets are rejected, `Z` timestamps
+round-trip byte-identically across Python and Rust, blank IDs, negative
+sequences, schema versions other than `1`, invalid enum values, and secret-like
+unknown fields. Strict decoding rejects the unknown field while returning an
+ephemeral `UntrustedProtocolDiagnostic` that contains the raw unknown-field
+object and frame hash but is inaccessible to rendering, persistence, receipts,
+policy, and handlers. Destroy it after the diagnostic callback returns.
 
 - [ ] **Step 2: Run the contract test and verify RED**
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_contracts.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_contracts.py -q`
 
 Expected: FAIL because the package does not exist.
 
@@ -185,6 +207,11 @@ Expected: FAIL because the package does not exist.
 Use these field signatures:
 
 ```python
+JsonScalar = None | bool | int | float | str
+JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+
+
 class CapabilityView(StrictModel):
     capability_id: NonEmptyStr
     state: CapabilityState
@@ -193,24 +220,26 @@ class CapabilityView(StrictModel):
 
 class HeaderView(StrictModel):
     operating_mode: OperatingMode
+    operating_mode_freshness: Freshness
+    operating_mode_reason: NonEmptyStr | None
     data_freshness: Freshness
     data_age_seconds: float | None
     regime_label: str
     regime_confidence: float | None
     portfolio_value: float | None
-    next_rebalance_at: datetime | None
+    next_rebalance_at_utc: datetime | None
     rebalance_blockers: tuple[str, ...]
     active_agent: str | None
     agent_queue_length: int
     qwen_state: str
     qwen_context_percent: float | None
-    eastern_time: datetime
+    current_time_utc: datetime
     market_session: str
 
 
 class ShellSnapshot(StrictModel):
     state_version: int
-    generated_at: datetime
+    generated_at_utc: datetime
     header: HeaderView
     alerts: tuple[AlertView, ...]
     capabilities: tuple[CapabilityView, ...]
@@ -218,16 +247,76 @@ class ShellSnapshot(StrictModel):
 
 `WireEnvelope.payload` remains a JSON object. `decode_payload(envelope)` maps
 every `MessageType` to one exact Pydantic payload model and rejects mismatches.
+`LeaseRequestPayload` has only `action: Literal["take-control"]`.
+`LockRequestPayload` has only `action: Literal["lock"]`. The gateway derives the
+client and operator from the authenticated pipe session; neither payload carries
+an identity.
 
-- [ ] **Step 4: Run contract tests and export a schema receipt**
+```python
+class WireEnvelope(StrictModel):
+    schema_version: Literal[1]
+    message_id: SafeId
+    sequence: NonNegativeInt
+    state_version: NonNegativeInt
+    timestamp_utc: datetime
+    message_type: MessageType
+    payload: dict[str, JsonValue]
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_contracts.py -q`
+class ClientHelloPayload(StrictModel):
+    client_version: NonEmptyStr
+    supported_schema_versions: tuple[Literal[1], ...]
+class ServerHelloPayload(StrictModel):
+    server_version: NonEmptyStr
+    requires_setup: bool
+class AuthSetupPayload(StrictModel):
+    password: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+    confirmation: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+class AuthUnlockPayload(StrictModel):
+    password: Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+class AuthResultPayload(StrictModel):
+    success: bool
+    access_state: Literal["locked", "controller", "viewer"]
+    reason: str | None
+class LeaseRequestPayload(StrictModel): action: Literal["take-control"]
+class LeaseResultPayload(StrictModel):
+    status: Literal["controller", "viewer", "transferred", "lease-held"]
+    reason: str | None
+class LockRequestPayload(StrictModel): action: Literal["lock"]
+class LockResultPayload(StrictModel): locked: Literal[True]
+class SnapshotRequestPayload(StrictModel): pass
+class SnapshotPayload(StrictModel): snapshot: ShellSnapshot
+class ProtocolErrorPayload(StrictModel): code: SafeId; safe_message: NonEmptyStr
+class PingPayload(StrictModel): nonce: SafeId
+class PongPayload(StrictModel): nonce: SafeId
+
+StrictPayload = (
+    ClientHelloPayload | ServerHelloPayload | AuthSetupPayload |
+    AuthUnlockPayload | AuthResultPayload | LeaseRequestPayload |
+    LeaseResultPayload | LockRequestPayload | LockResultPayload |
+    SnapshotRequestPayload | SnapshotPayload | ProtocolErrorPayload |
+    PingPayload | PongPayload
+)
+
+
+def decode_payload(envelope: WireEnvelope) -> StrictPayload: ...
+```
+
+All datetime validators require timezone-aware `utcoffset() == timedelta(0)`;
+serialization emits `Z`. `StrictPayload` is the closed union of the exact
+payload model mapped to each `MessageType`; there is no generic fallback.
+
+- [ ] **Step 4: Run contract tests, verify GREEN, and export a schema receipt**
+
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_contracts.py -q`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-Commit: `feat(tui): define secure console contracts`
+```powershell
+git add -- 'vesper/platform/tui/__init__.py' 'vesper/platform/tui/contracts.py' 'tests/platform/tui/test_contracts.py'
+git commit -m "feat(tui): define secure console contracts"
+```
 
 ### Task 3: Implement bounded frame encoding
 
@@ -239,6 +328,7 @@ Commit: `feat(tui): define secure console contracts`
 - Produces: `encode_frame(envelope: WireEnvelope) -> bytes`.
 - Produces: `FrameDecoder.feed(chunk: bytes) -> tuple[WireEnvelope, ...]`.
 - Produces: `ProtocolViolation(code: str, safe_message: str)`.
+- Produces: `UntrustedProtocolDiagnostic(frame_sha256: Sha256Hex, unknown_fields: dict[str, JsonValue])`, passed only to a synchronous in-memory diagnostic callback and destroyed on return.
 
 - [ ] **Step 1: Write split, joined, malformed, and oversized frame tests**
 
@@ -256,7 +346,7 @@ wrong schema, and wrong payload produce safe codes without echoing input bytes.
 
 - [ ] **Step 2: Run the protocol tests and verify RED**
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_protocol.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_protocol.py -q`
 
 Expected: FAIL because framing is absent.
 
@@ -266,15 +356,42 @@ Use `struct.Struct(">I")`, retain incomplete bytes, decode complete frames in
 order, and clear the buffer after any fatal frame violation. Never allocate the
 declared body until its length passes the maximum check.
 
+```python
+DiagnosticCallback = Callable[[UntrustedProtocolDiagnostic], None]
+
+
+class FrameDecoder:
+    def __init__(self, on_untrusted: DiagnosticCallback | None = None) -> None: ...
+    def feed(self, chunk: bytes) -> tuple[WireEnvelope, ...]: ...
+
+
+def encode_frame(envelope: WireEnvelope) -> bytes: ...
+```
+
+On unknown fields, compute the frame hash, invoke `on_untrusted` synchronously
+with only the unknown-field object, clear all references after return, then raise
+`ProtocolViolation("unknown-field", "Message contains unsupported fields.")`.
+
+```python
+def encode_frame(envelope: WireEnvelope) -> bytes:
+    body = envelope.model_dump_json().encode("utf-8")
+    if not 0 < len(body) <= MAX_FRAME_BYTES:
+        raise ProtocolViolation("frame-size", "Frame size is invalid.")
+    return struct.pack(">I", len(body)) + body
+```
+
 - [ ] **Step 4: Run the tests and verify GREEN**
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_protocol.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_protocol.py -q`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-Commit: `feat(tui): add bounded wire framing`
+```powershell
+git add -- 'vesper/platform/tui/protocol.py' 'tests/platform/tui/test_protocol.py'
+git commit -m "feat(tui): add bounded wire framing"
+```
 
 ### Task 4: Add password setup, unlock, and control lease
 
@@ -288,6 +405,23 @@ Commit: `feat(tui): add bounded wire framing`
 - Produces: `ControlLease.acquire(client_id: str) -> LeaseStatus`.
 - Produces: `ControlLease.release(client_id: str) -> None`.
 - Produces lease statuses `controller`, `viewer`, and `transferred`.
+
+```python
+class LeaseStatus(StrEnum):
+    CONTROLLER = "controller"
+    VIEWER = "viewer"
+    TRANSFERRED = "transferred"
+
+
+class PasswordStore:
+    def setup(self, password: str, confirmation: str) -> None: ...
+    def verify(self, password: str) -> bool: ...
+
+
+class ControlLease:
+    def acquire(self, client_id: SafeId) -> LeaseStatus: ...
+    def release(self, client_id: SafeId) -> None: ...
+```
 
 - [ ] **Step 1: Write authentication and lease tests**
 
@@ -309,7 +443,7 @@ and password required after every close/reopen.
 
 - [ ] **Step 2: Run the tests and verify RED**
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_auth.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_auth.py -q`
 
 Expected: FAIL because auth is absent.
 
@@ -319,15 +453,25 @@ Use `os.urandom(16)`, `hashlib.scrypt`, `hmac.compare_digest`, Base64 for binary
 fields, `tempfile.mkstemp`, `fsync`, and `os.replace`. Reject passwords above
 1,024 UTF-8 bytes. Keep lease state in gateway memory only.
 
+```python
+def verify(self, password: str) -> bool:
+    record = self._read_record_fail_closed()
+    actual = hashlib.scrypt(password.encode("utf-8"), salt=record.salt, n=32768, r=8, p=1, dklen=32, maxmem=67108864)
+    return hmac.compare_digest(actual, record.verifier)
+```
+
 - [ ] **Step 4: Run the tests and verify GREEN**
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_auth.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_auth.py -q`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-Commit: `feat(tui): protect console access and ownership`
+```powershell
+git add -- 'vesper/platform/tui/auth.py' 'tests/platform/tui/test_auth.py'
+git commit -m "feat(tui): protect console access and ownership"
+```
 
 ### Task 5: Create the current-user Windows named pipe
 
@@ -343,6 +487,19 @@ Commit: `feat(tui): protect console access and ownership`
 - Produces: `current_user_security_attributes() -> pywintypes.SECURITY_ATTRIBUTES`.
 - Produces: `WindowsPipeServer.serve(handler, stop_event) -> None`.
 
+```python
+PipeHandler = Callable[[bytes], bytes | None]
+
+
+def current_logon_sid() -> str: ...
+def pipe_name(logon_sid: str) -> str: ...
+def current_user_security_attributes() -> pywintypes.SECURITY_ATTRIBUTES: ...
+
+
+class WindowsPipeServer:
+    def serve(self, handler: PipeHandler, stop_event: threading.Event) -> None: ...
+```
+
 - [ ] **Step 1: Write SID, DACL, isolation, and duplex tests**
 
 Test the SID hash deterministically. On Windows, inspect the created pipe DACL
@@ -352,9 +509,17 @@ extended-attribute, synchronization, and read-control rights but not
 allowed access. Connect a same-user client and round-trip two framed messages.
 Starting a second first-instance server must fail.
 
+```python
+def test_pipe_name_and_dacl_are_current_logon_only(logon_sid, pipe_factory) -> None:
+    assert pipe_name(logon_sid).startswith(r"\\.\pipe\vesper-v20-tui-")
+    pipe = pipe_factory(current_user_security_attributes())
+    assert allowed_sids(pipe) == {logon_sid}
+    assert FILE_CREATE_PIPE_INSTANCE not in allowed_rights(pipe, logon_sid)
+```
+
 - [ ] **Step 2: Run the tests and verify RED**
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_pipe_security.py tests/platform/tui/test_pipe_server.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_pipe_security.py tests/platform/tui/test_pipe_server.py -q`
 
 Expected: FAIL because pipe support is absent.
 
@@ -370,15 +535,24 @@ duplex byte mode, first-instance protection, four instances, and 1 MiB
 input/output buffers. Each accepted connection gets one worker thread; all V20
 calls remain outside those transport threads.
 
-- [ ] **Step 4: Run the Windows integration tests**
+```python
+def pipe_name(logon_sid: str) -> str:
+    suffix = hashlib.sha256(logon_sid.encode("utf-8")).hexdigest()[:16]
+    return rf"\\.\pipe\vesper-v20-tui-{suffix}"
+```
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_pipe_security.py tests/platform/tui/test_pipe_server.py -q`
+- [ ] **Step 4: Run the Windows integration tests and verify GREEN**
+
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_pipe_security.py tests/platform/tui/test_pipe_server.py -q`
 
 Expected: PASS with no remaining pipe handle.
 
 - [ ] **Step 5: Commit**
 
-Commit: `feat(tui): secure the local Windows pipe`
+```powershell
+git add -- 'vesper/platform/tui/pipe_security.py' 'vesper/platform/tui/pipe_server.py' 'tests/platform/tui/test_pipe_security.py' 'tests/platform/tui/test_pipe_server.py'
+git commit -m "feat(tui): secure the local Windows pipe"
+```
 
 ### Task 6: Coordinate gateway sessions
 
@@ -393,40 +567,82 @@ Commit: `feat(tui): secure the local Windows pipe`
 - Produces script: `vesper-tui-gateway`.
 - Produces: `Gateway.handle(client_id: str, envelope: WireEnvelope) -> tuple[WireEnvelope, ...]`.
 - Produces: `Gateway.snapshot() -> ShellSnapshot`.
-- Emits monotonically increasing server sequence and state version.
+- Produces: `GatewaySession.take_control() -> LeaseResult`; authentication is
+  required but the current control lease is not.
+- Produces: `GatewaySession.lock() -> None`; it releases the lease and destroys
+  server-side authentication for that pipe session.
+- Emits a monotonically increasing sequence per client session. `state_version`
+  is presentation state only; later phases add separate control authority fields.
+
+```python
+class Gateway:
+    def handle(self, client_id: SafeId, envelope: WireEnvelope) -> tuple[WireEnvelope, ...]: ...
+    def snapshot(self) -> ShellSnapshot: ...
+
+
+class GatewaySession:
+    def take_control(self) -> LeaseResultPayload: ...
+    def lock(self) -> None: ...
+```
 
 - [ ] **Step 1: Write the session state-machine tests**
 
 Assert this order: `client-hello -> server-hello -> auth-setup or auth-unlock ->
 auth-result -> snapshot-request -> snapshot`. Reject snapshot or command before
-unlock. Assert a viewer receives the same snapshot but cannot send commands.
-Assert ping works while locked and does not reveal state.
+unlock. Assert a viewer receives the same snapshot and may request Take Control
+only after the controller lease is released; while a controller exists the
+request returns `lease-held`. Every other viewer command returns `viewer` and
+calls no handler. Assert ping works while locked and does not reveal state.
+Assert `tui.lock` changes the gateway session back to locked, releases its lease,
+and rejects snapshot, lease, and command requests on the same pipe until a fresh
+successful unlock.
+
+```python
+def test_initial_snapshot_is_unknown_unavailable(gateway, unlocked_controller) -> None:
+    snapshot = gateway.snapshot()
+    assert snapshot.header.operating_mode is OperatingMode.UNKNOWN
+    assert snapshot.header.operating_mode_freshness is Freshness.UNAVAILABLE
+    assert snapshot.header.operating_mode_reason == "No reviewed runtime-status adapter is configured."
+```
 
 - [ ] **Step 2: Run the gateway tests and verify RED**
 
-Run: `uv run --locked python -m pytest tests/platform/tui/test_gateway.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui/test_gateway.py -q`
 
 Expected: FAIL because the gateway is absent.
 
 - [ ] **Step 3: Implement a control-only gateway**
 
-The phase-1 snapshot sets mode `stopped`, all data values unavailable, and every
-V20 action capability disabled with reason `Phase 1 provides the secure console
-shell only.` The serving CLI accepts only `--state-root`, `--pipe-name`, and
+The phase-1 snapshot sets mode `unknown` with mode freshness `unavailable` and
+reason `No reviewed runtime-status adapter is configured.` It sets all data
+values unavailable and every V20 action capability disabled with reason `Phase
+1 provides the secure console shell only.` It never guesses that V20 is stopped.
+The serving CLI accepts only `--state-root`, `--pipe-name`, and
 `--parent-pid`. An exclusive `--print-pipe-name` mode prints the current logon
 SID-derived pipe name and exits before opening state. It never constructs
 `TradingEngine` or `LocalPlatformService`. It exits after the parent is gone and
 no clients remain for 30 seconds.
 
-- [ ] **Step 4: Run gateway and dependency tests**
+```python
+def snapshot(self) -> ShellSnapshot:
+    return self._snapshot_factory.unavailable_shell(
+        mode=OperatingMode.UNKNOWN,
+        reason="No reviewed runtime-status adapter is configured.",
+    )
+```
 
-Run: `uv run --locked python -m pytest tests/platform/tui tests/platform/test_dependencies.py -q`
+- [ ] **Step 4: Run gateway and dependency tests and verify GREEN**
+
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui tests/platform/test_dependencies.py -q`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-Commit: `feat(tui): serve locked console sessions`
+```powershell
+git add -- 'vesper/platform/tui/gateway.py' 'vesper/platform/tui/cli.py' 'pyproject.toml' 'uv.lock' 'tests/platform/tui/test_gateway.py'
+git commit -m "feat(tui): serve locked console sessions"
+```
 
 ### Task 7: Build the Rust transport and gateway launcher
 
@@ -444,6 +660,18 @@ Commit: `feat(tui): serve locked console sessions`
 - Produces: `Envelope`, `MessageType`, `ShellSnapshot`, and matching Serde types.
 - Produces: `PipeTransport::connect(name, timeout)`, `send`, and `recv`.
 - Produces: `GatewayLauncher::connect_or_start(repo_root) -> PipeTransport`.
+
+```rust
+impl PipeTransport {
+    pub async fn connect(name: &str, timeout: Duration) -> io::Result<Self>;
+    pub async fn send(&mut self, envelope: &Envelope) -> Result<(), TransportError>;
+    pub async fn recv(&mut self) -> Result<Envelope, TransportError>;
+}
+
+impl GatewayLauncher {
+    pub async fn connect_or_start(repo_root: &Path) -> Result<PipeTransport, LaunchError>;
+}
+```
 
 - [ ] **Step 1: Create the manifest and failing cross-language fixture tests**
 
@@ -470,6 +698,14 @@ insta = "=1.48.0"
 
 Rust tests load JSON emitted by Python contract fixtures and assert unknown
 fields, wrong schema, negative versions, and oversized frames are rejected.
+
+```rust
+#[test]
+fn rejects_unknown_contract_field() {
+    let json = r#"{"schema_version":1,"unknown":true}"#;
+    assert!(serde_json::from_str::<Envelope>(json).is_err());
+}
+```
 
 - [ ] **Step 2: Run Cargo tests and verify RED**
 
@@ -504,7 +740,7 @@ fn start_gateway(
 Capture no password in argv or environment. Keep the child handle only when
 this TUI started it. Framing must match Python byte-for-byte.
 
-- [ ] **Step 4: Run format, lint, and transport tests**
+- [ ] **Step 4: Run format, lint, and transport tests and verify GREEN**
 
 Run: `cargo fmt --manifest-path "TUI testing/ratatui-console/Cargo.toml" -- --check`
 
@@ -516,7 +752,10 @@ Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-Commit: `feat(tui): connect Ratatui to the gateway`
+```powershell
+git add -- 'TUI testing/ratatui-console/Cargo.toml' 'TUI testing/ratatui-console/Cargo.lock' 'TUI testing/ratatui-console/src/lib.rs' 'TUI testing/ratatui-console/src/contract.rs' 'TUI testing/ratatui-console/src/transport.rs' 'TUI testing/ratatui-console/src/launcher.rs' 'TUI testing/ratatui-console/tests/contract.rs' 'TUI testing/ratatui-console/tests/transport.rs'
+git commit -m "feat(tui): connect Ratatui to the gateway"
+```
 
 ### Task 8: Build locked state and fixed navigation
 
@@ -533,13 +772,31 @@ Commit: `feat(tui): connect Ratatui to the gateway`
 - Produces enum `AccessState`: `Locked`, `FirstRun`, `Controller`, `Viewer`.
 - Produces `AppState::reduce(envelope)` and `AppState::handle(InputEvent)`.
 
+```rust
+impl AppState {
+    pub fn reduce(&mut self, envelope: Envelope) -> Result<ReduceOutcome, ProtocolError>;
+    pub fn handle(&mut self, event: InputEvent) -> Vec<ClientAction>;
+}
+```
+
 - [ ] **Step 1: Write reducer and input tests**
 
 ```rust
 #[test]
 fn number_keys_select_all_ten_screens_after_unlock() {
     let mut state = controller_state();
-    for (key, expected) in [('1', Screen::Impact), ('9', Screen::Memory), ('0', Screen::System)] {
+    for (key, expected) in [
+        ('1', Screen::Impact),
+        ('2', Screen::Portfolio),
+        ('3', Screen::Orders),
+        ('4', Screen::Agents),
+        ('5', Screen::ModelsRegime),
+        ('6', Screen::Timeline),
+        ('7', Screen::RiskApprovals),
+        ('8', Screen::DataEvidence),
+        ('9', Screen::Memory),
+        ('0', Screen::System),
+    ] {
         state.handle(InputEvent::Char(key));
         assert_eq!(state.screen, expected);
     }
@@ -549,7 +806,9 @@ fn number_keys_select_all_ten_screens_after_unlock() {
 Cover locked input isolation, masked password entry, first-run confirmation,
 `o`, `Esc`, `/`, `f`, `:`, `i`, `Enter`, `?`, `q`, viewer Take Control, state
 version replacement, sequence gap resnapshot, protocol error lockout, manual
-Lock TUI, and remaining unlocked across an arbitrarily long fake-clock idle.
+Lock TUI, same-pipe reauthentication after manual lock, and remaining unlocked
+across an arbitrarily long fake-clock idle. Take Control sends the foundation
+session lease request, not a governed V20 command.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -560,11 +819,22 @@ Expected: FAIL because app state is absent.
 - [ ] **Step 3: Implement one event loop and safe terminal restore**
 
 Use `ratatui::init()` and guarantee `ratatui::restore()` through a guard. Poll
-Crossterm every 50 ms, process only key-press events, enable mouse capture after
+Crossterm every 10 ms so polling consumes at most 20 percent of the 50 ms input
+budget, process only key-press events, enable mouse capture after
 unlock, and redraw only when input or state changes. `q` sends no runtime
 command.
 
-- [ ] **Step 4: Run focused tests**
+```rust
+pub fn handle(&mut self, event: InputEvent) -> Vec<ClientAction> {
+    match (self.access, event) {
+        (AccessState::Locked, InputEvent::Char(_)) => vec![],
+        (_, InputEvent::Char('q')) => vec![ClientAction::CloseTui],
+        _ => self.route_unlocked_input(event),
+    }
+}
+```
+
+- [ ] **Step 4: Run focused tests and verify GREEN**
 
 Run: `cargo test --manifest-path "TUI testing/ratatui-console/Cargo.toml" --test state --test input --locked`
 
@@ -572,7 +842,10 @@ Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
-Commit: `feat(tui): add locked console navigation`
+```powershell
+git add -- 'TUI testing/ratatui-console/src/state.rs' 'TUI testing/ratatui-console/src/app.rs' 'TUI testing/ratatui-console/src/input.rs' 'TUI testing/ratatui-console/src/main.rs' 'TUI testing/ratatui-console/tests/state.rs' 'TUI testing/ratatui-console/tests/input.rs'
+git commit -m "feat(tui): add locked console navigation"
+```
 
 ### Task 9: Render the accessible fixed shell
 
@@ -588,11 +861,25 @@ Commit: `feat(tui): add locked console navigation`
 - Produces display modes `Compact`, `Standard`, and `LargeText`.
 - Produces wide fixed grid and narrow one-panel focus layout.
 
+```rust
+pub fn render(frame: &mut Frame<'_>, state: &AppState);
+pub fn shell_layout(area: Rect, mode: DisplayMode) -> ShellLayout;
+```
+
 - [ ] **Step 1: Write buffer and accessibility snapshot tests**
 
 Use `TestBackend` at `160x48`, `120x36`, `100x30`, and `80x24`. Snapshot locked,
 first-run, controller, viewer, urgent, and resolved states in both themes and all
 three text modes. Assert every colored state also includes a word or symbol.
+
+```rust
+#[test]
+fn locked_shell_hides_all_dashboard_state() {
+    let buffer = render_at(80, 24, AppState::locked());
+    assert!(buffer.contains("LOCKED"));
+    assert!(!buffer.contains("Portfolio"));
+}
+```
 
 - [ ] **Step 2: Run snapshots and verify RED**
 
@@ -609,6 +896,18 @@ use blink or animation. Persist theme, text mode, visible columns, and panel
 sizes to `%LOCALAPPDATA%\Vesper\v20\tui\preferences.json` through atomic
 replacement.
 
+```rust
+pub fn render(frame: &mut Frame<'_>, state: &AppState) {
+    let layout = shell_layout(frame.area(), state.display_mode);
+    render_header(frame, layout.header, state);
+    render_navigation(frame, layout.navigation, state);
+    render_alerts(frame, layout.alerts, state);
+    render_screen(frame, layout.body, state);
+    render_agent_input(frame, layout.input, state);
+    render_footer(frame, layout.footer, state);
+}
+```
+
 - [ ] **Step 4: Inspect and approve snapshots**
 
 Run: `$env:INSTA_UPDATE='new'; cargo test --manifest-path "TUI testing/ratatui-console/Cargo.toml" --test snapshots --locked`
@@ -616,9 +915,9 @@ Run: `$env:INSTA_UPDATE='new'; cargo test --manifest-path "TUI testing/ratatui-c
 Inspect every `.snap`, rename `.snap.new` only after checking labels and
 alignment, clear `INSTA_UPDATE`, then rerun the test normally.
 
-- [ ] **Step 5: Run the complete phase gate**
+- [ ] **Step 5: Run the complete phase gate and verify GREEN**
 
-Run: `uv run --locked python -m pytest tests/platform/tui tests/platform/test_dependencies.py -q`
+Run: `$env:TEMP='C:\tmp\v20-tui-foundation-temp'; $env:TMP='C:\tmp\v20-tui-foundation-temp'; uv run --locked python -m pytest --basetemp 'C:\tmp\v20-tui-foundation-pytest' -o cache_dir='C:\tmp\v20-tui-foundation-cache' tests/platform/tui tests/platform/test_dependencies.py -q`
 
 Run: `cargo fmt --manifest-path "TUI testing/ratatui-console/Cargo.toml" -- --check`
 
@@ -626,11 +925,16 @@ Run: `cargo clippy --manifest-path "TUI testing/ratatui-console/Cargo.toml" --al
 
 Run: `cargo test --manifest-path "TUI testing/ratatui-console/Cargo.toml" --locked`
 
-Expected: all checks PASS; opening and closing the shell leaves V20 stopped.
+Expected: all checks PASS; opening and closing the shell makes no V20 runtime
+change and reports runtime mode unavailable unless a later reviewed adapter
+supplies it.
 
 - [ ] **Step 6: Commit**
 
-Commit: `feat(tui): render the accessible console shell`
+```powershell
+git add -- 'TUI testing/ratatui-console/src/layout.rs' 'TUI testing/ratatui-console/src/theme.rs' 'TUI testing/ratatui-console/src/ui.rs' 'TUI testing/ratatui-console/tests/snapshots.rs' 'TUI testing/ratatui-console/tests/snapshots/'
+git commit -m "feat(tui): render the accessible console shell"
+```
 
 ## Phase acceptance
 

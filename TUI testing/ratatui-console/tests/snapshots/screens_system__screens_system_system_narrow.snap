@@ -1,0 +1,26 @@
+---
+source: tests/screens_system.rs
+expression: "|_, _| { render_system_narrow(&fixture().system, 3) } (78, 22)"
+---
+┌> LIVE READINESS - PANEL 4/4────────────────────────────────────────────────┐
+│LIVE: [!] BLOCKED                                                           │
+│BROKER: [OK] READY | Reviewed broker connection.                            │
+│ACCOUNT: [OK] READY | Reviewed account identity.                            │
+│DATA: [OK] READY | Reviewed market data.                                    │
+│MODEL: [OK] READY | Reviewed active model.                                  │
+│STRATEGY: [OK] READY | Reviewed strategy.                                   │
+│RISK: [OK] READY | Reviewed risk limits.                                    │
+│RECONCILIATION: [OK] READY | Reviewed position match.                       │
+│INCIDENT: [OK] READY | No blocking incident.                                │
+│AUTHORITY: [!] BLOCKED | Live authority is not granted.                     │
+│Privacy: SHOWN [p hide] | Primary brokerage | ACCT-12345                    │
+│Funds | Balance 1000.25 | Capital 900                                       │
+│Transition portfolio:candidate | 2026-07-15 08:34:56 EDT | Orders 1         │
+│BUY NVDA 2.5 | APPROVAL REQUIRED                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘

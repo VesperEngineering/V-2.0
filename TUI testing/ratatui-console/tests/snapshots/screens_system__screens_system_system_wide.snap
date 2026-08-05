@@ -1,0 +1,36 @@
+---
+source: tests/screens_system.rs
+expression: "|w, h|\n{\n    let snapshot = fixture(); let state = ScreenState::default();\n    render_text(w, h, |frame|\n    { render_system(frame, frame.area(), &snapshot.system, &state) })\n} (120, 32)"
+---
+┌> SERVICES────────────────────────────────────────────────┐┌SYSTEM METRICS────────────────────────────────────────────┐
+│QWEN: BUSY | MODEL qwen:64k | 2026-07-15 08:34:56 EDT     ││METRICS                                                   │
+│CURRENT AGENT agent:qwen | QUEUE 2 | CONTEXT 62.5% | LAST ││[OK] FRESH metric:cpu | 12.50 percent | 2026-07-15        │
+│INFERENCE 145.0ms                                         ││08:34:56 EDT                                              │
+│ERROR NONE                                                ││[~] STALE metric:gpu | 42.00 percent | 2026-07-15 08:34:56│
+│SERVICES                                                  ││EDT | Sensor delayed                                      │
+│[>] RUNNING service:qwen | 2026-07-15 08:34:56 EDT        ││BACKUP / RECOVERY / NOTIFICATIONS                         │
+│[!] FAILED service:worker | 2026-01-15 07:34:56 EST |     ││BACKUP: HEALTHY | BROKER ACTIONS BLOCKED: NO              │
+│Worker?stopped                                            ││REASON NONE                                               │
+│                                                          ││check:backup | PASS | REASON NONE                         │
+│                                                          ││RECOVERY: BLOCKED | BROKER ACTIONS BLOCKED: YES           │
+│                                                          ││REASON Restore verification failed.                       │
+│                                                          ││check:restore | FAIL | REASON Restore checksum mismatch.  │
+│                                                          ││NOTIFICATIONS: DEGRADED | BROKER ACTIONS BLOCKED: NO      │
+│                                                          ││REASON Phone delivery is not configured.                  │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+┌SOURCE CONTROL──────────────────────────────────────┐┌LIVE READINESS──────────────────────────────────────────────────┐
+│[OK] FRESH repository:v20 | Source git | Branch     ││LIVE: [!] BLOCKED                                               │
+│codex/vesper/ratatui-console | Revision             ││BROKER: [OK] READY | Reviewed broker connection.                │
+│0123456789abcdef | [!] DIRTY | Worktrees            ││ACCOUNT: [OK] READY | Reviewed account identity.                │
+│C:/Users/bgonn/Desktop/v20, C:/tmp/worktree |       ││DATA: [OK] READY | Reviewed market data.                        │
+│Unpushed 2 | 2026-07-15 08:34:56 EDT                ││MODEL: [OK] READY | Reviewed active model.                      │
+│check:tests | PASS | 2026-07-15 08:34:56 EDT |      ││STRATEGY: [OK] READY | Reviewed strategy.                       │
+│REASON NONE                                         ││RISK: [OK] READY | Reviewed risk limits.                        │
+│[?] UNAVAILABLE repository:missing | Repository     ││RECONCILIATION: [OK] READY | Reviewed position match.           │
+│unavailable                                         ││INCIDENT: [OK] READY | No blocking incident.                    │
+│                                                    ││AUTHORITY: [!] BLOCKED | Live authority is not granted.         │
+│                                                    ││Privacy: SHOWN [p hide] | Primary brokerage | ACCT-12345        │
+│                                                    ││Funds | Balance 1000.25 | Capital 900                           │
+│                                                    ││Transition portfolio:candidate | 2026-07-15 08:34:56 EDT | Order│
+│                                                    ││BUY NVDA 2.5 | APPROVAL REQUIRED                                │
+└────────────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘

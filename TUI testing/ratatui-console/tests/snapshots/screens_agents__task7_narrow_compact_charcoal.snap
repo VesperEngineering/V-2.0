@@ -1,0 +1,89 @@
+---
+source: tests/screens_agents.rs
+expression: "composite_snapshot(76, Theme::Charcoal, DisplayMode::Compact)"
+---
+AGENTS
+┌QUEUED - PANEL 1/5────────────────────────────────────────────────────────┐
+│[!] URGENT | QUEUED | urgent queued | agent:queue | P1 | 1m 05s | qwen:64k│
+│| portfolio, evidence | work:queued-urgent                                │
+│                                                                          │
+│[ ] QUEUED | normal queued | agent:queue | P90 | 1m 05s | qwen:64k |      │
+│portfolio, evidence | work:queued-normal                                  │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+MODELS & REGIME
+┌MODEL OPINIONS / FINAL - PANEL 1/3────────────────────────────────────────┐
+│FINAL REGIME: sideways | CONFIDENCE 73.0%                                 │
+│ACTIVE model:active                                                       │
+│ROLLBACK model:rollback                                                   │
+│FAMILY approved-family                                                    │
+│STRATEGY ml_model                                                         │
+│FEATURE SET features:v20                                                  │
+│AUTOMATIC CHANGES: BLOCKED                                                │
+│BLOCK REASON: Risk gate requires review.                                  │
+│MODEL OPINIONS                                                            │
+│  model:macro | risk-on | 80.0%                                           │
+│2026-08-02 20:00:00 EDT                                                   │
+│  model:micro | risk-off | 60.0%                                          │
+│2026-08-02 20:00:00 EDT                                                   │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+TIMELINE
+┌TIMELINE - IMPACT ONLY────────────────────────────────────────────────────┐
+│EXCLUDED BY FILTER 1 | HIDDEN BY SOURCE 7                                 │
+│                                                                          │
+│[!] URGENT | 2026-08-02 20:00:00 EDT | Portfolio impact detected          │
+│ID event:impact | AGENT agent:queue | SYMBOL AAPL | MODEL model:macro |   │
+│ORDER order:1 | EVIDENCE evidence:impact                                  │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘

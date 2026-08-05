@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 import typer
+
+from .paths import default_platform_root
 
 _DEFAULT_RESEARCH_DATA_ROOT = Path(__file__).resolve().parents[2] / "vesper" / "data" / "massive"
 
@@ -96,10 +96,7 @@ class PlatformRuntimeUnavailable(RuntimeError):
 
 
 def _default_platform_root() -> Path:
-    base = os.environ.get("LOCALAPPDATA")
-    if not base:
-        base = tempfile.gettempdir()
-    return Path(base) / "V20" / "agent-platform"
+    return default_platform_root()
 
 
 @dataclass(frozen=True, slots=True)

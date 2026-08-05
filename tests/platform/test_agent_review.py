@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from vesper.platform import service as service_module
-from vesper.platform.agent_queue import AgentWorkQueue, WorkQueueEmpty
+from vesper.platform.agent_queue import AgentWorkQueue, WorkQueueConflict, WorkQueueEmpty
 from vesper.platform.cadence import CadencePolicy
 from vesper.platform.contracts import AgentRole, JournalEventType
 from vesper.platform.journals import AgentJournal
@@ -21,9 +21,21 @@ def test_queue_is_priority_fifo_deduplicated_and_persistent(tmp_path):
     paths = PlatformPaths.below(tmp_path / "state")
     with open_persistence(paths) as persistence:
         queue = AgentWorkQueue(persistence.store)
-        queue.enqueue("normal", AgentRole.MODEL_RESEARCHER, "session", "normal", 10, NOW)
-        queue.enqueue("urgent", AgentRole.QUANT_RESEARCH_LEAD, "session", "urgent", 90, NOW)
-        queue.enqueue("normal", AgentRole.MODEL_RESEARCHER, "session", "changed", 10, NOW)
+        queue.enqueue(
+            "normal", AgentRole.MODEL_RESEARCHER, "session", "normal", "normal", 10, NOW
+        )
+        queue.enqueue(
+            "urgent",
+            AgentRole.QUANT_RESEARCH_LEAD,
+            "session",
+            "urgent",
+            "urgent",
+            90,
+            NOW,
+        )
+        queue.enqueue(
+            "normal", AgentRole.MODEL_RESEARCHER, "session", "normal", "normal", 10, NOW
+        )
         claimed = queue.claim("worker-1", NOW, lease_seconds=60)
         assert claimed.work_id == "urgent"
         assert len(queue.list()) == 2
@@ -34,7 +46,15 @@ def test_queue_is_priority_fifo_deduplicated_and_persistent(tmp_path):
 def test_expired_queue_claim_can_be_reclaimed(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         queue = AgentWorkQueue(persistence.store)
-        queue.enqueue("work", AgentRole.PRODUCT, "session", "objective", 10, NOW)
+        queue.enqueue(
+            "work",
+            AgentRole.MODEL_RESEARCHER,
+            "session",
+            "objective",
+            "objective",
+            10,
+            NOW,
+        )
         queue.claim("worker-1", NOW, lease_seconds=1)
         reclaimed = queue.claim("worker-2", NOW + timedelta(seconds=2), lease_seconds=1)
         assert reclaimed.claimed_by == "worker-2"
@@ -45,7 +65,9 @@ def test_expired_queue_claim_can_be_reclaimed(tmp_path):
 def test_stale_same_worker_attempt_cannot_mutate_successor_claim(tmp_path, operation):
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         queue = AgentWorkQueue(persistence.store)
-        queue.enqueue("work", AgentRole.PRODUCT, "session", "objective", 10, NOW)
+        queue.enqueue(
+            "work", AgentRole.MODEL_RESEARCHER, "session", "objective", "objective", 10, NOW
+        )
         stale = queue.claim("worker-1", NOW, lease_seconds=1)
         current = queue.claim("worker-1", NOW + timedelta(seconds=2), lease_seconds=60)
 
@@ -70,7 +92,9 @@ def test_two_persistence_connections_cannot_claim_the_same_work_item(tmp_path, m
     with open_persistence(paths) as first, open_persistence(paths) as second:
         first_queue = AgentWorkQueue(first.store)
         second_queue = AgentWorkQueue(second.store)
-        first_queue.enqueue("work", AgentRole.PRODUCT, "session", "objective", 10, NOW)
+        first_queue.enqueue(
+            "work", AgentRole.MODEL_RESEARCHER, "session", "objective", "objective", 10, NOW
+        )
 
         original_list = AgentWorkQueue.list
         selections_ready = threading.Barrier(2)
@@ -172,7 +196,9 @@ def test_active_blocking_turn_renews_queue_ownership(tmp_path, monkeypatch):
 def test_queue_renew_requires_current_unexpired_owner(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         queue = AgentWorkQueue(persistence.store)
-        queue.enqueue("work", AgentRole.PRODUCT, "session", "objective", 10, NOW)
+        queue.enqueue(
+            "work", AgentRole.MODEL_RESEARCHER, "session", "objective", "objective", 10, NOW
+        )
         claimed = queue.claim("worker-1", NOW, lease_seconds=60)
 
         assert hasattr(queue, "renew"), "queue renewal is missing"
@@ -343,7 +369,9 @@ def test_agent_error_is_preserved_after_lease_passes_to_successor(tmp_path, monk
 def test_queue_finish_requires_current_owner_and_clears_lease(tmp_path, operation, expected_status):
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         queue = AgentWorkQueue(persistence.store)
-        queue.enqueue("work", AgentRole.PRODUCT, "session", "objective", 10, NOW)
+        queue.enqueue(
+            "work", AgentRole.MODEL_RESEARCHER, "session", "objective", "objective", 10, NOW
+        )
         claimed = queue.claim("worker-1", NOW, lease_seconds=60)
 
         with pytest.raises(WorkQueueEmpty, match="not owned"):
@@ -378,6 +406,56 @@ def test_service_marks_claimed_work_failed_when_agent_run_raises(tmp_path, monke
     assert failed.status == "failed"
     assert failed.claimed_by is None
     assert failed.lease_expires_at is None
+
+
+def test_legacy_queue_row_without_title_decodes_across_all_operations(tmp_path):
+    paths = PlatformPaths.below(tmp_path / "state")
+    with open_persistence(paths) as persistence:
+        persistence.store.put(
+            ("agent-work", "items"),
+            "legacy-work",
+            {
+                "work_id": "legacy-work",
+                "role": AgentRole.MODEL_RESEARCHER.value,
+                "session_id": "legacy-session",
+                "objective": "Legacy objective",
+                "priority": 50,
+                "created_at": NOW.isoformat(),
+                "status": "queued",
+                "attempt": 0,
+                "claimed_by": None,
+                "lease_expires_at": None,
+            },
+        )
+        queue = AgentWorkQueue(persistence.store)
+
+        loaded = queue.get("legacy-work")
+        assert loaded is not None
+        assert loaded.title == "Legacy objective"
+        assert queue.list() == (loaded,)
+        claimed = queue.claim("worker-1", NOW, lease_seconds=60)
+        assert claimed.title == "Legacy objective"
+        completed = queue.complete("legacy-work", "worker-1", claimed.attempt)
+        assert completed.title == "Legacy objective"
+        assert queue.enqueue(
+            "legacy-work",
+            AgentRole.MODEL_RESEARCHER,
+            "legacy-session",
+            "Legacy objective",
+            "Legacy objective",
+            50,
+            NOW,
+        ) == completed
+        with pytest.raises(WorkQueueConflict, match="conflicting agent work"):
+            queue.enqueue(
+                "legacy-work",
+                AgentRole.MODEL_RESEARCHER,
+                "legacy-session",
+                "Changed title",
+                "Legacy objective",
+                50,
+                NOW,
+            )
 
 
 def test_cadence_is_decision_only_and_digest_is_close_plus_fifteen():

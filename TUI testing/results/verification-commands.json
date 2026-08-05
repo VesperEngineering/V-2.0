@@ -1,0 +1,25 @@
+{
+  "generated_at_utc": "2026-08-05T07:17:20.3210312+00:00",
+  "commands": [
+    {
+      "command": "uv run --locked python -m pytest --basetemp C:\\Users\\bgonn\\.codex\\visualizations\\2026\\08\\05\\019fd0b5-1049-7bc2-8f99-134dd5d827ad\\tui-closeout\\official\\pytest -o cache_dir=C:\\Users\\bgonn\\.codex\\visualizations\\2026\\08\\05\\019fd0b5-1049-7bc2-8f99-134dd5d827ad\\tui-closeout\\official\\pytest-cache tests/platform/tui tests/platform/ops -q",
+      "exit_code": 0,
+      "duration_ms": 150947
+    },
+    {
+      "command": "cargo fmt --manifest-path TUI testing/ratatui-console/Cargo.toml -- --check",
+      "exit_code": 0,
+      "duration_ms": 623
+    },
+    {
+      "command": "cargo clippy --manifest-path TUI testing/ratatui-console/Cargo.toml --all-targets --locked -- -D warnings",
+      "exit_code": 0,
+      "duration_ms": 16245
+    },
+    {
+      "command": "cargo test --manifest-path TUI testing/ratatui-console/Cargo.toml --all-targets --locked",
+      "exit_code": 0,
+      "duration_ms": 88194
+    }
+  ]
+}

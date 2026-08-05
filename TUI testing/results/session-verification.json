@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-08-05T04:26:59.6300092Z",
+  "source": {
+    "branch": "codex/vesper/ratatui-console",
+    "head": "8174e0531d2c9e7334314a796097614caa0cd079",
+    "worktree_dirty": true,
+    "source_manifest": {
+      "algorithm": "sha256 over sorted path:sha256 rows",
+      "files": 130,
+      "sha256": "89625e960f7648f06ced178b6728a493304288f5cea279f0f9be1d1eb2d797a3",
+      "excludes": [
+        "TUI testing/results",
+        "dist",
+        "sandbox pytest directories",
+        "untracked ="
+      ]
+    }
+  },
+  "checks": [
+    {
+      "id": "changed-python-ruff-format",
+      "status": "PASS",
+      "scope": "48 changed Python files",
+      "result": "clean"
+    },
+    {
+      "id": "changed-python-ruff-check",
+      "status": "PASS",
+      "scope": "48 changed Python files",
+      "result": "clean"
+    },
+    {
+      "id": "focused-python",
+      "status": "PASS",
+      "passed": 1313,
+      "duration_seconds": 160.696
+    },
+    {
+      "id": "reproducible-verification-python",
+      "status": "PASS",
+      "scope": "tests/platform/tui tests/platform/ops",
+      "passed": 1313,
+      "duration_seconds": 160.696,
+      "receipt": "TUI testing/results/verification-commands.json"
+    },
+    {
+      "id": "full-python-repository",
+      "status": "BLOCKED",
+      "passed": 2070,
+      "skipped": 5,
+      "failed": 4,
+      "duration_seconds": 311.35,
+      "blocker_kind": "sandbox",
+      "blocker": "Four existing OpenCode process-tree tests required Windows taskkill, and all four taskkill calls were denied by the sandbox.",
+      "tui_failure_attributed": false
+    },
+    {
+      "id": "rust-debug",
+      "status": "PASS",
+      "passed": 428,
+      "ignored": 4,
+      "duration_seconds": 91.039
+    },
+    {
+      "id": "rust-release",
+      "status": "PASS",
+      "passed": 428,
+      "ignored": 4
+    },
+    {
+      "id": "cargo-format",
+      "status": "PASS",
+      "duration_seconds": 0.698,
+      "receipt": "TUI testing/results/verification-commands.json"
+    },
+    {
+      "id": "cargo-clippy-all-targets",
+      "status": "PASS",
+      "duration_seconds": 17.616,
+      "receipt": "TUI testing/results/verification-commands.json"
+    },
+    {
+      "id": "readme-and-packaging-scripts",
+      "status": "PASS",
+      "passed": 15,
+      "duration_seconds": 7.0
+    }
+  ],
+  "release_gaps": [
+    {
+      "id": "broker-backed-views",
+      "status": "NOT ACTIVATED",
+      "reason": "No approved controller-owned production adapter is configured; broker and account reads require separate approval."
+    },
+    {
+      "id": "accepted-deep-screen-contracts",
+      "status": "PASS",
+      "reason": "Direct strict fields now carry the accepted agent, model, risk, data, memory-use, and System detail contracts; Rust deep-screen suites pass."
+    },
+    {
+      "id": "production-backup-restore-command-path",
+      "status": "BLOCKED",
+      "severity": "P2",
+      "reason": "Backup and restore pass temporary-state tests, but the production gateway does not inject a BackupCommandPort."
+    },
+    {
+      "id": "permanently-hung-gateway-handler-shutdown",
+      "status": "BLOCKED",
+      "severity": "P2",
+      "reason": "Gateway coordinator stop and late disconnect use an unbounded join."
+    },
+    {
+      "id": "one-hour-retained-memory-component",
+      "status": "PASS",
+      "duration_seconds": 3608.02,
+      "max_growth_bytes": 9068088,
+      "end_growth_bytes": 5936,
+      "limit_bytes": 10485760,
+      "receipt": "TUI testing/results/performance.json"
+    },
+    {
+      "id": "real-terminal-and-full-process-performance",
+      "status": "UNVERIFIED",
+      "reason": "ConPTY, Crossterm, production named-pipe, complete-process startup, idle CPU, shutdown, and memory were not measured end to end."
+    },
+    {
+      "id": "manual-windows-console-toast-shortcut",
+      "status": "UNVERIFIED",
+      "reason": "Manual console acceptance, actual Windows toast display/activation/cleanup, and shortcut installation/launch were not performed."
+    },
+    {
+      "id": "final-git-commit",
+      "status": "BLOCKED",
+      "blocker_kind": "sandbox",
+      "reason": "The sandbox denied creation of the linked-worktree index.lock; no stale lock file is present."
+    }
+  ],
+  "package": {
+    "built_at_utc": "2026-08-05T03:17:27.7960487+00:00",
+    "tools": {
+      "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "uv": "uv 0.11.32 (3010295ae 2026-07-23 x86_64-pc-windows-msvc)"
+    },
+    "files": [
+      {
+        "path": "dist/tui/vesper-ratatui-console.exe",
+        "bytes": 5321216,
+        "sha256": "c0c253c85897a619a7b03c9068e411fefa7685d1854e5c2918bde482e8ca831c"
+      },
+      {
+        "path": "dist/tui/README.md",
+        "bytes": 11722,
+        "sha256": "00e6436d9caa6efcdbd2425ba3ce16f5102724fd6f639386131bdfe041bc77cd"
+      },
+      {
+        "path": "dist/tui/build-receipt.json",
+        "bytes": 394,
+        "sha256": "87a33eb079bf2edc5b9196519ca4daa09f7cd9974acdca0bc50b9052ea68ec43"
+      }
+    ]
+  },
+  "limits": [
+    "This file persists exact counts, durations, blockers, and package hashes from the current verification console summary and existing receipts.",
+    "Command text not present in the console summary is not reconstructed.",
+    "The one-hour retained-memory component result is preserved in performance.json."
+  ]
+}
