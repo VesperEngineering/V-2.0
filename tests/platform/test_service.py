@@ -106,6 +106,15 @@ def create_research_data_fixture(root: Path) -> Path:
     return research_data
 
 
+def filesystem_snapshot(root: Path):
+    if not root.exists():
+        return None
+    return {
+        path.relative_to(root).as_posix(): (None if path.is_dir() else path.read_bytes())
+        for path in sorted(root.rglob("*"))
+    }
+
+
 def test_service_syncs_searches_and_reports_repository_knowledge(tmp_path, monkeypatch):
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -425,6 +434,487 @@ def service(tmp_path, ids):
         clock=lambda: NOW,
         id_factory=lambda: next(identifiers),
     )
+
+
+def test_service_runs_direct_financial_research_below_platform_root(tmp_path):
+    research_data = create_research_data_fixture(tmp_path)
+    identifiers = iter(("run-financial-001", "task-financial-001", "event-financial-001"))
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+
+    result = platform.start_financial_research(
+        "direct-request",
+        "Check coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        None,
+        None,
+    )
+    inspected = platform.inspect_financial_research("run-financial-001")
+
+    assert result["status"] == "completed"
+    assert result["run_id"] == "run-financial-001"
+    assert inspected["request"]["time_window_start"] == "2026-07-27"
+    assert inspected["request"]["time_window_end"] == "2026-07-27"
+    assert (platform.paths.root / "derived").is_dir()
+
+
+def test_financial_status_uses_only_the_read_only_terminal_store(tmp_path, monkeypatch):
+    research_data = create_research_data_fixture(tmp_path)
+    identifiers = iter(("run-financial-001", "task-financial-001", "event-financial-001"))
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+    platform.start_financial_research(
+        "direct-request",
+        "Check coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        None,
+        None,
+    )
+    before = filesystem_snapshot(platform.paths.root)
+
+    def writable_path_used(*_args, **_kwargs):
+        raise AssertionError("status must not construct writable persistence or an executor")
+
+    monkeypatch.setattr("vesper.platform.service.open_persistence", writable_path_used)
+    monkeypatch.setattr(platform, "_financial_research_controller", writable_path_used)
+
+    inspected = platform.inspect_financial_research("run-financial-001")
+
+    assert inspected["status"] == "completed"
+    assert filesystem_snapshot(platform.paths.root) == before
+
+
+@pytest.mark.parametrize("missing_state", ("root", "store", "malformed"))
+def test_financial_status_missing_state_is_generic_and_does_not_mutate_disk(
+    tmp_path,
+    missing_state,
+):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    if missing_state == "store":
+        paths.root.mkdir(parents=True)
+        (paths.root / "sentinel.txt").write_text("unchanged\n", encoding="utf-8")
+    elif missing_state == "malformed":
+        paths.root.mkdir(parents=True)
+        paths.store_db.write_bytes(b"private malformed sqlite database")
+    before = filesystem_snapshot(paths.root)
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+    )
+
+    with pytest.raises(
+        SpecialistRuntimeUnavailable,
+        match="financial research run is unavailable",
+    ):
+        platform.inspect_financial_research("missing-run")
+
+    assert filesystem_snapshot(paths.root) == before
+
+
+def test_financial_status_sanitizes_corrupt_terminal_state(tmp_path):
+    research_data = create_research_data_fixture(tmp_path)
+    paths = PlatformPaths.below(tmp_path / "platform")
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=iter(
+            ("run-financial-001", "task-financial-001", "event-financial-001")
+        ).__next__,
+    )
+    platform.start_financial_research(
+        "direct-request",
+        "Check coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        None,
+        None,
+    )
+    with open_persistence(paths) as persistence:
+        record = dict(persistence.store.get(("financial-research", "runs"), "run-financial-001"))
+        record["private_claim"] = "secret database path"
+        persistence.store.put(("financial-research", "runs"), "run-financial-001", record)
+
+    with pytest.raises(
+        SpecialistRuntimeUnavailable,
+        match="financial research run is unavailable",
+    ) as caught:
+        platform.inspect_financial_research("run-financial-001")
+
+    assert "secret" not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+def test_service_runs_weak_financial_research_only_below_threshold(tmp_path):
+    research_data = create_research_data_fixture(tmp_path)
+    identifiers = iter(
+        (
+            "run-weak-complete",
+            "task-weak-complete",
+            "event-weak-complete",
+            "run-weak-ignored",
+            "task-weak-ignored",
+            "event-weak-ignored",
+        )
+    )
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=research_data,
+        clock=lambda: NOW,
+        id_factory=lambda: next(identifiers),
+    )
+
+    completed = platform.start_financial_research(
+        "weak-model-result",
+        "Check weak coverage",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        0.01,
+        0.03,
+    )
+    ignored = platform.start_financial_research(
+        "weak-model-result",
+        "Do not rerun sufficient result",
+        ("SPY",),
+        "2026-07-27",
+        "2026-07-27",
+        0.03,
+        0.03,
+    )
+
+    assert completed["status"] == "completed"
+    assert ignored["status"] == "ignored"
+    assert platform.inspect_financial_research("run-weak-ignored")["status"] == "ignored"
+
+
+@pytest.mark.parametrize(
+    ("event_type", "start", "end", "metric", "threshold"),
+    (
+        ("direct-request", "2026-07-27", "2026-07-27", 0.01, 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", None, 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, None),
+        ("unsupported", "2026-07-27", "2026-07-27", None, None),
+        ("direct-request", "2026-07-28", "2026-07-27", None, None),
+        ("weak-model-result", "2026-07-27", "2026-07-27", float("nan"), 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", float("inf"), 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", float("-inf"), 0.03),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, float("nan")),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, float("inf")),
+        ("weak-model-result", "2026-07-27", "2026-07-27", 0.01, float("-inf")),
+    ),
+)
+def test_service_rejects_invalid_financial_research_before_persistence(
+    tmp_path,
+    event_type,
+    start,
+    end,
+    metric,
+    threshold,
+):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+        clock=lambda: NOW,
+        id_factory=iter(("run-invalid", "task-invalid", "event-invalid")).__next__,
+    )
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="invalid financial research request"):
+        platform.start_financial_research(
+            event_type,
+            "Invalid request",
+            ("SPY",),
+            start,
+            end,
+            metric,
+            threshold,
+        )
+
+    assert not paths.checkpoint_db.exists()
+    assert not paths.store_db.exists()
+
+
+def test_service_rejects_overlapping_financial_roots_before_persistence(tmp_path, monkeypatch):
+    root = tmp_path / "platform"
+    paths = PlatformPaths(
+        root=root,
+        checkpoint_db=root / "checkpoints.sqlite3",
+        store_db=root / "store.sqlite3",
+        knowledge_index_db=root / "knowledge-index.sqlite3",
+        evidence_root=root / "derived",
+    )
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+        clock=lambda: NOW,
+        id_factory=iter(("run-invalid", "task-invalid", "event-invalid")).__next__,
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
+        platform.start_financial_research(
+            "direct-request",
+            "Invalid roots",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert opened is False
+
+
+def test_service_rejects_reparse_financial_roots_before_persistence(tmp_path, monkeypatch):
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=create_research_data_fixture(tmp_path),
+        clock=lambda: NOW,
+        id_factory=iter(("run-invalid", "task-invalid", "event-invalid")).__next__,
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr(platform, "_has_reparse_component", lambda _path: True, raising=False)
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
+        platform.start_financial_research(
+            "direct-request",
+            "Invalid roots",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert opened is False
+
+
+@pytest.mark.parametrize(
+    ("database_field", "unsafe_location"),
+    (
+        ("checkpoint_db", "repository"),
+        ("store_db", "massive"),
+        ("knowledge_index_db", "evidence"),
+    ),
+)
+def test_service_rejects_unsafe_financial_database_paths_before_persistence(
+    tmp_path,
+    monkeypatch,
+    database_field,
+    unsafe_location,
+):
+    research_data = create_research_data_fixture(tmp_path)
+    safe = PlatformPaths.below(tmp_path / "platform")
+    unsafe_roots = {
+        "repository": REPOSITORY_ROOT,
+        "massive": research_data,
+        "evidence": safe.evidence_root,
+    }
+    unsafe_path = unsafe_roots[unsafe_location] / "uncreated" / f"{database_field}.sqlite3"
+    values = {
+        "root": safe.root,
+        "checkpoint_db": safe.checkpoint_db,
+        "store_db": safe.store_db,
+        "knowledge_index_db": safe.knowledge_index_db,
+        "evidence_root": safe.evidence_root,
+    }
+    values[database_field] = unsafe_path
+    platform = LocalPlatformService(
+        PlatformPaths(**values),
+        research_data_root=research_data,
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
+        platform.start_financial_research(
+            "direct-request",
+            "Reject unsafe persistence",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert opened is False
+    assert unsafe_path.parent.exists() is False
+
+
+def test_service_rejects_overlapping_financial_database_paths_before_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    safe = PlatformPaths.below(tmp_path / "platform")
+    paths = PlatformPaths(
+        root=safe.root,
+        checkpoint_db=safe.checkpoint_db,
+        store_db=safe.checkpoint_db,
+        knowledge_index_db=safe.knowledge_index_db,
+        evidence_root=safe.evidence_root,
+    )
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
+        platform.start_financial_research(
+            "direct-request",
+            "Reject overlapping persistence",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert opened is False
+
+
+def test_service_rejects_reparse_financial_database_path_before_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr(
+        platform,
+        "_has_reparse_component",
+        lambda candidate: Path(candidate) == paths.knowledge_index_db,
+    )
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(SpecialistRuntimeUnavailable, match="separate safe locations"):
+        platform.start_financial_research(
+            "direct-request",
+            "Reject reparse persistence",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert opened is False
+
+
+def test_service_sanitizes_unknown_financial_research_run(tmp_path):
+    missing_run_id = "missing-secret-run-id"
+    platform = LocalPlatformService(
+        PlatformPaths.below(tmp_path / "platform"),
+        research_data_root=create_research_data_fixture(tmp_path),
+    )
+
+    with pytest.raises(
+        SpecialistRuntimeUnavailable,
+        match="financial research run is unavailable",
+    ) as caught:
+        platform.inspect_financial_research(missing_run_id)
+
+    assert missing_run_id not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "revision_error",
+    (
+        OSError("secret operating-system detail"),
+        subprocess.TimeoutExpired(("git", "rev-parse"), 15, stderr="secret timeout detail"),
+    ),
+)
+def test_service_sanitizes_financial_repository_revision_lookup_errors(
+    tmp_path,
+    monkeypatch,
+    revision_error,
+):
+    paths = PlatformPaths.below(tmp_path / "platform")
+    platform = LocalPlatformService(
+        paths,
+        research_data_root=create_research_data_fixture(tmp_path),
+        id_factory=iter(("run-revision", "task-revision", "event-revision")).__next__,
+    )
+    opened = False
+
+    def should_not_open(_paths):
+        nonlocal opened
+        opened = True
+        raise AssertionError("persistence must not open")
+
+    monkeypatch.setattr(
+        "vesper.platform.service.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(revision_error),
+    )
+    monkeypatch.setattr("vesper.platform.service.open_persistence", should_not_open)
+
+    with pytest.raises(
+        SpecialistRuntimeUnavailable,
+        match="financial research repository revision is unavailable",
+    ) as caught:
+        platform.start_financial_research(
+            "direct-request",
+            "Check revision",
+            ("SPY",),
+            "2026-07-27",
+            "2026-07-27",
+            None,
+            None,
+        )
+
+    assert "secret" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert opened is False
 
 
 def test_service_create_inspect_approve_and_resume(tmp_path):

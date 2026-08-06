@@ -6,6 +6,8 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
+from datetime import date
+from math import isfinite
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
@@ -37,6 +39,19 @@ class PlatformService(Protocol):
     ): ...
 
     def inspect_run(self, run_id: str): ...
+
+    def start_financial_research(
+        self,
+        event_type: str,
+        objective: str,
+        symbols: tuple[str, ...],
+        start_date: str,
+        end_date: str,
+        observed_metric: float | None,
+        threshold: float | None,
+    ): ...
+
+    def inspect_financial_research(self, run_id: str): ...
 
     def resume_run(self, run_id: str): ...
 
@@ -147,6 +162,62 @@ def _call(context: typer.Context, method: str, *args) -> None:
     _emit(result, json_output=settings.json_output)
 
 
+def _iso_date(value: str, option: str) -> str:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise typer.BadParameter("must use ISO YYYY-MM-DD", param_hint=option) from exc
+    if parsed.isoformat() != value:
+        raise typer.BadParameter("must use ISO YYYY-MM-DD", param_hint=option)
+    return value
+
+
+def _validate_financial_research_options(
+    event_type: str,
+    objective: str,
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    observed_metric: float | None,
+    threshold: float | None,
+) -> tuple[str, str]:
+    if event_type not in {"direct-request", "weak-model-result"}:
+        raise typer.BadParameter(
+            "must be direct-request or weak-model-result",
+            param_hint="--event-type",
+        )
+    if not objective.strip():
+        raise typer.BadParameter("must not be blank", param_hint="--objective")
+    if not symbols or any(not symbol.strip() for symbol in symbols):
+        raise typer.BadParameter("must not be blank", param_hint="--symbol")
+    start = _iso_date(start_date, "--start-date")
+    end = _iso_date(end_date, "--end-date")
+    if start > end:
+        raise typer.BadParameter(
+            "must not follow --end-date",
+            param_hint="--start-date",
+        )
+    for value, option in (
+        (observed_metric, "--observed-metric"),
+        (threshold, "--threshold"),
+    ):
+        if value is not None and not isfinite(value):
+            raise typer.BadParameter("must be finite", param_hint=option)
+    has_metric = observed_metric is not None
+    has_threshold = threshold is not None
+    if event_type == "direct-request" and (has_metric or has_threshold):
+        raise typer.BadParameter(
+            "metrics are valid only for weak-model-result",
+            param_hint="--observed-metric/--threshold",
+        )
+    if event_type == "weak-model-result" and not (has_metric and has_threshold):
+        raise typer.BadParameter(
+            "weak-model-result requires both options",
+            param_hint="--observed-metric/--threshold",
+        )
+    return start, end
+
+
 def build_app(
     *,
     service_factory: Callable[[CliConfig], PlatformService] = _default_service_factory,
@@ -247,6 +318,44 @@ def build_app(
     def inspect_run(context: typer.Context, run_id: str) -> None:
         """Inspect status without initializing a specialist."""
         _call(context, "inspect_run", run_id)
+
+    @app.command("financial-research-start")
+    def start_financial_research(
+        context: typer.Context,
+        event_type: str = typer.Option(..., "--event-type"),
+        objective: str = typer.Option(..., "--objective"),
+        symbols: list[str] = typer.Option(..., "--symbol"),
+        start_date: str = typer.Option(..., "--start-date"),
+        end_date: str = typer.Option(..., "--end-date"),
+        observed_metric: float | None = typer.Option(None, "--observed-metric"),
+        threshold: float | None = typer.Option(None, "--threshold"),
+    ) -> None:
+        """Start bounded Phase 1 financial research."""
+        start, end = _validate_financial_research_options(
+            event_type,
+            objective,
+            symbols,
+            start_date,
+            end_date,
+            observed_metric,
+            threshold,
+        )
+        _call(
+            context,
+            "start_financial_research",
+            event_type,
+            objective,
+            tuple(symbols),
+            start,
+            end,
+            observed_metric,
+            threshold,
+        )
+
+    @app.command("financial-research-status")
+    def inspect_financial_research(context: typer.Context, run_id: str) -> None:
+        """Inspect a persisted Phase 1 financial-research run."""
+        _call(context, "inspect_financial_research", run_id)
 
     @app.command("resume")
     def resume_run(context: typer.Context, run_id: str) -> None:

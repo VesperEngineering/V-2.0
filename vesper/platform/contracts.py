@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from enum import StrEnum
+from math import isfinite
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -153,6 +155,196 @@ class RunContract(ContractModel):
         if value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
             raise ValueError("timestamps must use UTC")
         return value.astimezone(timezone.utc)
+
+
+class FinancialEventType(StrEnum):
+    DIRECT_REQUEST = "direct-request"
+    WEAK_MODEL_RESULT = "weak-model-result"
+
+
+class FinancialResearchStatus(StrEnum):
+    REQUESTED = "requested"
+    PLANNED = "planned"
+    COMPLETE = "complete"
+    COMPLETED = "completed"
+    IGNORED = "ignored"
+    NEEDS_RESEARCH = "needs-research"
+    NEEDS_ANALYSIS = "needs-analysis"
+    STOPPED = "stopped"
+
+
+class FinancialResearchContract(RunContract):
+    event_id: NonEmptyStr
+    non_authority: NonEmptyStr
+
+
+class FinancialEventEnvelope(FinancialResearchContract):
+    event_type: FinancialEventType
+    occurred_at: AwareDatetime
+    observed_at: AwareDatetime
+    requested_start_date: NonEmptyStr
+    requested_end_date: NonEmptyStr
+    symbols: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    origin: NonEmptyStr
+    deduplication_key: NonEmptyStr
+    payload_sha256: Sha256
+    summary: NonEmptyStr
+    observed_metric: float | None = None
+    threshold: float | None = None
+
+    @field_validator("occurred_at", "observed_at")
+    @classmethod
+    def require_event_utc(cls, value: datetime) -> datetime:
+        return RunContract.require_utc(value)
+
+    @model_validator(mode="after")
+    def validate_event_metrics(self) -> FinancialEventEnvelope:
+        try:
+            start = date.fromisoformat(self.requested_start_date)
+            end = date.fromisoformat(self.requested_end_date)
+        except ValueError as exc:
+            raise ValueError("requested dates must use ISO YYYY-MM-DD") from exc
+        if (
+            start.isoformat() != self.requested_start_date
+            or end.isoformat() != self.requested_end_date
+            or start > end
+        ):
+            raise ValueError("requested dates must be ordered ISO YYYY-MM-DD bounds")
+        if any(
+            value is not None and not isfinite(value)
+            for value in (self.observed_metric, self.threshold)
+        ):
+            raise ValueError("financial research metrics must be finite")
+        has_metrics = self.observed_metric is not None and self.threshold is not None
+        if self.event_type is FinancialEventType.WEAK_MODEL_RESULT and not has_metrics:
+            raise ValueError("weak model results require metrics")
+        if self.event_type is FinancialEventType.DIRECT_REQUEST and (
+            self.observed_metric is not None or self.threshold is not None
+        ):
+            raise ValueError("direct requests forbid metrics")
+        return self
+
+
+class FinancialTriggerDecision(FinancialResearchContract):
+    triggered: bool
+    status: FinancialResearchStatus
+    reason: NonEmptyStr
+    workflow: Literal["analysis-only"]
+    resource_budget: NonEmptyStr
+
+    @property
+    def should_research(self) -> bool:
+        return self.triggered
+
+
+class FinancialResearchRequest(FinancialResearchContract):
+    request_id: NonEmptyStr
+    status: FinancialResearchStatus
+    questions: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    source_classes: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    symbols: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    time_window_start: NonEmptyStr
+    time_window_end: NonEmptyStr
+    sufficiency_criteria: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    prior_attempt_ids: tuple[NonEmptyStr, ...] = ()
+
+
+class AnalysisNode(FinancialResearchContract):
+    node_id: NonEmptyStr
+    kind: NonEmptyStr
+    depends_on: tuple[NonEmptyStr, ...] = ()
+    output_schema: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    transform_sha256: Sha256
+
+
+class FinancialAnalysisPlan(FinancialResearchContract):
+    plan_id: NonEmptyStr
+    status: FinancialResearchStatus
+    nodes: Annotated[tuple[AnalysisNode, ...], Field(min_length=1)]
+    acceptance_checks: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_nodes(self) -> FinancialAnalysisPlan:
+        node_ids = {node.node_id for node in self.nodes}
+        if len(node_ids) != len(self.nodes):
+            raise ValueError("analysis plan node IDs must be unique")
+        for node in self.nodes:
+            if (
+                node.run_id != self.run_id
+                or node.task_id != self.task_id
+                or node.repository_revision != self.repository_revision
+                or node.event_id != self.event_id
+            ):
+                raise ValueError("analysis node authority must match its plan")
+            if node.node_id in node.depends_on or not set(node.depends_on).issubset(node_ids):
+                raise ValueError("analysis node dependencies must reference other plan nodes")
+        return self
+
+
+class DerivedDatasetReceipt(FinancialResearchContract):
+    dataset_id: NonEmptyStr
+    schema_fields: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    row_count: Annotated[int, Field(ge=0)]
+    ticker_count: Annotated[int, Field(ge=0)]
+    null_close_count: Annotated[int, Field(ge=0)]
+    source_hashes: Annotated[tuple[Sha256, ...], Field(min_length=1)]
+    transform_sha256: Sha256
+    cache_key_sha256: Sha256
+    coverage_start: NonEmptyStr
+    coverage_end: NonEmptyStr
+    lineage_ids: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    derived_output_path: RelativePath
+    validation_evidence: EvidenceArtifactRef
+
+    @model_validator(mode="after")
+    def validation_evidence_matches_authority(self) -> DerivedDatasetReceipt:
+        output_path = self.derived_output_path
+        posix_path = PurePosixPath(output_path)
+        windows_path = PureWindowsPath(output_path)
+        if (
+            "\\" in output_path
+            or posix_path.is_absolute()
+            or windows_path.is_absolute()
+            or ".." in posix_path.parts
+            or len(posix_path.parts) < 2
+            or posix_path.parts[0] != self.run_id
+        ):
+            raise ValueError("derived output path must be relative and scoped to its run")
+        _evidence_matches_authority(self, (self.validation_evidence,))
+        return self
+
+
+class FinancialGapAssessment(FinancialResearchContract):
+    assessment_id: NonEmptyStr
+    status: FinancialResearchStatus
+    supported_claims: tuple[NonEmptyStr, ...] = ()
+    unresolved_gaps: tuple[NonEmptyStr, ...] = ()
+    contradiction_state: NonEmptyStr
+    confidence: Annotated[float, Field(ge=0, le=1)]
+    next_action: Literal["request-research", "repair-analysis", "stop"]
+    loop_budget_used: Annotated[int, Field(ge=0)]
+    content_hashes: tuple[Sha256, ...] = ()
+    evidence: tuple[EvidenceArtifactRef, ...] = ()
+
+    @model_validator(mode="after")
+    def claims_are_evidence_bound(self) -> FinancialGapAssessment:
+        if self.supported_claims and (not self.content_hashes or not self.evidence):
+            raise ValueError("claims require evidence and content hashes")
+        _evidence_matches_authority(self, self.evidence)
+        return self
+
+
+class FinancialRecommendation(FinancialResearchContract):
+    recommendation_id: NonEmptyStr
+    status: FinancialResearchStatus
+    conclusions: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    uncertainty: NonEmptyStr
+    evidence: Annotated[tuple[EvidenceArtifactRef, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def evidence_matches_authority(self) -> FinancialRecommendation:
+        _evidence_matches_authority(self, self.evidence)
+        return self
 
 
 class PermissionSet(ContractModel):

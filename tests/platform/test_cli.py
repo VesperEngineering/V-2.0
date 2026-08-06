@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from vesper.platform.cli import CliConfig, build_app
+from vesper.platform.service import SpecialistRuntimeUnavailable
 
 
 @dataclass
@@ -20,6 +21,34 @@ class FakeService:
     def inspect_run(self, run_id):
         self.calls.append(("status", run_id))
         return {"run_id": run_id, "status": "interrupted"}
+
+    def start_financial_research(
+        self,
+        event_type,
+        objective,
+        symbols,
+        start_date,
+        end_date,
+        observed_metric,
+        threshold,
+    ):
+        self.calls.append(
+            (
+                "financial-research-start",
+                event_type,
+                objective,
+                symbols,
+                start_date,
+                end_date,
+                observed_metric,
+                threshold,
+            )
+        )
+        return {"run_id": "financial-001", "status": "completed"}
+
+    def inspect_financial_research(self, run_id):
+        self.calls.append(("financial-research-status", run_id))
+        return {"run_id": run_id, "status": "completed"}
 
     def resume_run(self, run_id):
         self.calls.append(("resume", run_id))
@@ -110,6 +139,66 @@ def cli():
             ("create", "Build offline slice", ".", "abc123", ("git-diff-check",)),
         ),
         (["status", "run-001"], ("status", "run-001")),
+        (
+            [
+                "financial-research-start",
+                "--event-type",
+                "direct-request",
+                "--objective",
+                "Check coverage",
+                "--symbol",
+                "SPY",
+                "--symbol",
+                "QQQ",
+                "--start-date",
+                "2026-01-01",
+                "--end-date",
+                "2026-01-31",
+            ],
+            (
+                "financial-research-start",
+                "direct-request",
+                "Check coverage",
+                ("SPY", "QQQ"),
+                "2026-01-01",
+                "2026-01-31",
+                None,
+                None,
+            ),
+        ),
+        (
+            ["financial-research-status", "financial-001"],
+            ("financial-research-status", "financial-001"),
+        ),
+        (
+            [
+                "financial-research-start",
+                "--event-type",
+                "weak-model-result",
+                "--objective",
+                "Check weak coverage",
+                "--symbol",
+                "SPY",
+                "--start-date",
+                "2026-01-01",
+                "--end-date",
+                "2026-01-31",
+                "--observed-metric",
+                "0.01",
+                "--threshold",
+                "0.03",
+            ],
+            (
+                "financial-research-start",
+                "weak-model-result",
+                "Check weak coverage",
+                ("SPY",),
+                "2026-01-01",
+                "2026-01-31",
+                0.01,
+                0.03,
+            ),
+        ),
         (["resume", "run-001"], ("resume", "run-001")),
         (["receipts", "run-001"], ("receipts", "run-001")),
         (["evidence", "run-001"], ("evidence", "run-001")),
@@ -232,6 +321,195 @@ def test_read_only_help_does_not_construct_service(cli):
     assert "knowledge-reactivation-plan" in result.output
     assert service.calls == []
     assert configs == []
+
+
+def test_cli_exposes_only_start_and_status_for_phase_one(cli):
+    runner, app, service, configs = cli
+
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "financial-research-start" in result.stdout
+    assert "financial-research-status" in result.stdout
+    assert "financial-research-promote" not in result.stdout
+    assert service.calls == []
+    assert configs == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        (
+            "financial-research-start",
+            "--event-type",
+            "direct-request",
+            "--objective",
+            "Invalid metrics",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+            "--observed-metric",
+            "0.01",
+            "--threshold",
+            "0.03",
+        ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "weak-model-result",
+            "--objective",
+            "Missing metrics",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+        ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "unsupported",
+            "--objective",
+            "Unsupported event",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+        ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "direct-request",
+            "--objective",
+            "Reversed dates",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-02-01",
+            "--end-date",
+            "2026-01-31",
+        ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "direct-request",
+            "--objective",
+            "Invalid date",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-1-01",
+            "--end-date",
+            "2026-01-31",
+        ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "direct-request",
+            "--objective",
+            "   ",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+        ),
+        (
+            "financial-research-start",
+            "--event-type",
+            "direct-request",
+            "--objective",
+            "Check blank symbol",
+            "--symbol",
+            "   ",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+        ),
+    ),
+)
+def test_cli_rejects_invalid_financial_research_before_service(cli, arguments):
+    runner, app, service, configs = cli
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert service.calls == []
+    assert configs == []
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("--observed-metric", "nan"),
+        ("--observed-metric", "inf"),
+        ("--observed-metric", "-inf"),
+        ("--threshold", "nan"),
+        ("--threshold", "inf"),
+        ("--threshold", "-inf"),
+    ),
+)
+def test_cli_rejects_non_finite_metrics_before_service_construction(cli, option, value):
+    runner, app, service, configs = cli
+    observed_metric = value if option == "--observed-metric" else "0.01"
+    threshold = value if option == "--threshold" else "0.03"
+
+    result = runner.invoke(
+        app,
+        (
+            "financial-research-start",
+            "--event-type",
+            "weak-model-result",
+            "--objective",
+            "Reject non-finite metrics",
+            "--symbol",
+            "SPY",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-31",
+            "--observed-metric",
+            observed_metric,
+            "--threshold",
+            threshold,
+        ),
+    )
+
+    assert result.exit_code == 2
+    assert service.calls == []
+    assert configs == []
+
+
+def test_cli_reports_unknown_financial_research_run_without_raw_detail():
+    raw_detail = "secret missing-run lookup detail"
+    constructed = False
+
+    class MissingRunService(FakeService):
+        def inspect_financial_research(self, run_id):
+            raise SpecialistRuntimeUnavailable("financial research run is unavailable") from None
+
+    def factory(_config):
+        nonlocal constructed
+        constructed = True
+        return MissingRunService()
+
+    result = CliRunner().invoke(
+        build_app(service_factory=factory),
+        ["financial-research-status", raw_detail],
+    )
+
+    assert result.exit_code == 4
+    assert "platform unavailable: financial research run is unavailable" in result.output
+    assert raw_detail not in result.output
+    assert constructed is True
 
 
 @pytest.mark.parametrize(
