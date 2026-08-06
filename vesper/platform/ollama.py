@@ -63,6 +63,7 @@ class OllamaClient:
         messages: Sequence[Mapping[str, object]],
         tools: Sequence[Mapping[str, object]] = (),
         response_format: Mapping[str, object] | None = None,
+        think: bool | None = None,
     ) -> OllamaResponse:
         payload: dict[str, object] = {
             "model": QWEN_MODEL,
@@ -72,6 +73,8 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = list(tools)
+        if think is not None:
+            payload["think"] = think
         if response_format is not None:
             payload["format"] = dict(response_format)
             payload["options"]["temperature"] = 0

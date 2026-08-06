@@ -442,7 +442,7 @@ def test_chat_keeps_running_when_tool_turn_has_empty_final_response(tmp_path):
     )
 
     class Client:
-        def chat(self, _messages, tools=(), response_format=None):
+        def chat(self, _messages, tools=(), response_format=None, think=None):
             return next(responses)
 
     prompts = iter(("inspect the note", "/quit"))

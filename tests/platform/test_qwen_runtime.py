@@ -368,8 +368,13 @@ def test_turn_continues_once_when_post_tool_response_is_empty(tmp_path):
     calls = []
 
     class Client:
-        def chat(self, messages, tools=()):
-            calls.append([dict(message) for message in messages])
+        def chat(self, messages, tools=(), think=None):
+            calls.append(
+                {
+                    "messages": [dict(message) for message in messages],
+                    "think": think,
+                }
+            )
             return next(responses)
 
     result = QwenTurnRunner(
@@ -381,9 +386,28 @@ def test_turn_continues_once_when_post_tool_response_is_empty(tmp_path):
     assert result.content == "final"
     assert result.tool_calls_used == 1
     assert len(calls) == 3
-    assert calls[-1][-1]["role"] == "system"
+    assert calls[2]["messages"] == calls[1]["messages"]
+    assert calls[2]["think"] is False
     assert all(
-        "The requested controller tool completed successfully."
-        not in str(message.get("content", ""))
-        for message in result.messages
+        message["role"] != "system" or index == 0
+        for index, message in enumerate(calls[2]["messages"])
     )
+
+
+def test_ollama_client_sends_top_level_think_flag():
+    payloads = []
+
+    def transport(_url, payload, _timeout):
+        payloads.append(payload)
+        return {
+            "message": {"content": "done", "tool_calls": []},
+            "prompt_eval_count": 1,
+        }
+
+    OllamaClient(transport=transport).chat(
+        [{"role": "user", "content": "hello"}],
+        think=False,
+    )
+
+    assert payloads[0]["think"] is False
+    assert "think" not in payloads[0]["options"]
