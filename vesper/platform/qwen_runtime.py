@@ -112,9 +112,17 @@ class QwenTurnRunner:
         transcript_events: list[dict[str, object]] = []
         schemas = self._tool_schemas(agent_role, allowed_tools, extra_tool_schemas)
         permitted_tools = {schema["function"]["name"] for schema in schemas}
+        empty_post_tool_continuations = 0
+        transient_retry_message: dict[str, object] | None = None
         with inference_lease(self.state_root, wait_seconds=self.wait_seconds):
             while True:
-                response = self.client.chat(conversation, tools=schemas)
+                request_messages = (
+                    conversation
+                    if transient_retry_message is None
+                    else [*conversation, transient_retry_message]
+                )
+                transient_retry_message = None
+                response = self.client.chat(request_messages, tools=schemas)
                 observed = response.prompt_tokens
                 self.guard.validate(
                     prompt_tokens=observed, tool_calls=used + len(response.tool_calls)
@@ -131,6 +139,20 @@ class QwenTurnRunner:
                     )
                 if not response.tool_calls:
                     if response_format is None:
+                        if (
+                            used > 0
+                            and not response.content.strip()
+                            and empty_post_tool_continuations < 1
+                        ):
+                            empty_post_tool_continuations += 1
+                            transient_retry_message = {
+                                "role": "system",
+                                "content": (
+                                    "The requested controller tool completed successfully. "
+                                    "Return the final answer to the user's request now."
+                                ),
+                            }
+                            continue
                         transcript_events.append(
                             {
                                 "speaker": "assistant",

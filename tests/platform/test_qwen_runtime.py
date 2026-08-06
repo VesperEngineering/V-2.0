@@ -321,3 +321,69 @@ def test_service_accepts_qwen_runtime_without_fallback(tmp_path):
         PlatformPaths.below(tmp_path / "state"), specialist_runtime="ollama-qwen"
     )
     assert service._specialist_runtime == "ollama-qwen"
+
+
+def test_turn_continues_once_when_post_tool_response_is_empty(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "notes.txt").write_text("bounded", encoding="utf-8")
+
+    responses = iter(
+        (
+            type(
+                "Response",
+                (),
+                {
+                    "content": "",
+                    "prompt_tokens": 20,
+                    "tool_calls": (
+                        AgentToolRequest(
+                            name="read_file",
+                            arguments={"path": "notes.txt"},
+                        ),
+                    ),
+                },
+            )(),
+            type(
+                "Response",
+                (),
+                {
+                    "content": "",
+                    "prompt_tokens": 30,
+                    "tool_calls": (),
+                },
+            )(),
+            type(
+                "Response",
+                (),
+                {
+                    "content": "final",
+                    "prompt_tokens": 35,
+                    "tool_calls": (),
+                },
+            )(),
+        )
+    )
+
+    calls = []
+
+    class Client:
+        def chat(self, messages, tools=()):
+            calls.append([dict(message) for message in messages])
+            return next(responses)
+
+    result = QwenTurnRunner(
+        Client(),
+        AgentToolGateway(root),
+        tmp_path / "state",
+    ).run(AgentRole.PRODUCT, "inspect")
+
+    assert result.content == "final"
+    assert result.tool_calls_used == 1
+    assert len(calls) == 3
+    assert calls[-1][-1]["role"] == "system"
+    assert all(
+        "The requested controller tool completed successfully."
+        not in str(message.get("content", ""))
+        for message in result.messages
+    )

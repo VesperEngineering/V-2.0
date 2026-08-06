@@ -428,6 +428,16 @@ def test_chat_keeps_running_when_tool_turn_has_empty_final_response(tmp_path):
                     "tool_calls": (),
                 },
             )(),
+            type(
+                "Response",
+                (),
+                {
+                    "content": "",
+                    "prompt_tokens": 185,
+                    "completion_tokens": 0,
+                    "tool_calls": (),
+                },
+            )(),
         )
     )
 
