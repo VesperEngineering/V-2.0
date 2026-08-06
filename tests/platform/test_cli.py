@@ -65,6 +65,26 @@ class FakeService:
         self.calls.append(("knowledge-status",))
         return {"documents": 1, "memory": 0, "skill": 1}
 
+    def knowledge_budget(self):
+        self.calls.append(("knowledge-budget",))
+        return {"total_lines": 10, "line_limit": 3000, "over_by": 0}
+
+    def session_status(self):
+        self.calls.append(("session-status",))
+        return {"session_count": 1, "turn_count": 2, "dream_inputs_ready": True}
+
+    def run_dream(self):
+        self.calls.append(("dream-run",))
+        return {"dream_id": "dream-1", "proposals": 0}
+
+    def working_memory_status(self, agent_id):
+        self.calls.append(("memory-status", agent_id))
+        return {"agent_id": agent_id, "active_words": 0, "word_limit": 2000}
+
+    def curate_working_memory(self, agent_id, candidates_json):
+        self.calls.append(("memory-curate", agent_id, candidates_json))
+        return {"agent_id": agent_id, "active_ids": []}
+
     def agent_roster(self):
         self.calls.append(("agent-roster",))
         return {"count": 8, "agents": []}
@@ -213,6 +233,14 @@ def cli():
             ("knowledge-search", "documentation marker", "v20-development"),
         ),
         (["knowledge-status"], ("knowledge-status",)),
+        (["knowledge-budget"], ("knowledge-budget",)),
+        (["session-status"], ("session-status",)),
+        (["dream-run"], ("dream-run",)),
+        (["memory-status", "--agent-id", "v20-development"], ("memory-status", "v20-development")),
+        (
+            ["memory-curate", "--agent-id", "v20-development", "--candidates-json", "[]"],
+            ("memory-curate", "v20-development", "[]"),
+        ),
     ],
 )
 def test_cli_routes_explicit_commands_to_injected_service(cli, arguments, expected_call):
@@ -231,6 +259,11 @@ def test_cli_routes_explicit_commands_to_injected_service(cli, arguments, expect
         "knowledge-sync",
         "knowledge-search",
         "knowledge-status",
+        "knowledge-budget",
+        "session-status",
+        "dream-run",
+        "memory-status",
+        "memory-curate",
     }
 
 
@@ -276,7 +309,7 @@ def test_cli_passes_explicit_opencode_runtime_boundary_to_service(cli):
             "OPENROUTER_API_KEY",
             "--allow-repository-root-workspace",
             "--research-data-root",
-            "D:/vesper/vesper_data/massive",
+            "C:/Users/bgonn/Desktop/v20/vesper/data/massive",
             "--knowledge-root",
             "knowledge",
             "status",
@@ -290,7 +323,9 @@ def test_cli_passes_explicit_opencode_runtime_boundary_to_service(cli):
     assert configs[0].model == "openrouter/approved-model"
     assert configs[0].credential_environment_key == "OPENROUTER_API_KEY"
     assert configs[0].allow_repository_root_workspace is True
-    assert configs[0].research_data_root == Path("D:/vesper/vesper_data/massive")
+    assert configs[0].research_data_root == Path(
+        "C:/Users/bgonn/Desktop/v20/vesper/data/massive"
+    )
     assert configs[0].knowledge_root == Path("knowledge")
 
 

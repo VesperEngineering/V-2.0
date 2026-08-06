@@ -24,7 +24,6 @@ def test_repository_baseline_tracks_required_review_surface() -> None:
         "ls-files",
         "--error-unmatch",
         "AGENTS.md",
-        "SKILLS/CODE.md",
         "README.md",
         "config/settings.yaml",
         "vesper/engine.py",
@@ -41,6 +40,11 @@ def test_repository_baseline_ignores_local_and_protected_paths() -> None:
         ".venv/pyvenv.cfg",
         ".fusion/project.json",
         ".codegraph/codegraph.db",
+        ".tmp/example",
+        "tmp/example",
+        ".state/example",
+        "target/example",
+        "node_modules/example",
         ".pytest_tmp/example",
         ".worktrees/example",
         "vesper/data/massive/example",
@@ -52,3 +56,13 @@ def test_repository_baseline_ignores_local_and_protected_paths() -> None:
             text=True,
             capture_output=True,
         )
+
+
+def test_native_runtime_has_no_retired_hermes_dependency() -> None:
+    hits = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "vesper").rglob("*.py")
+        if "hermes" in path.read_text(encoding="utf-8").lower()
+    ]
+
+    assert hits == []

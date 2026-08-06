@@ -1,7 +1,7 @@
 # V20 data and evaluation admission audit v1
 
 **Decision date:** 2026-07-23 UTC  
-**Scope:** V20 local files and a read-only SQLite inspection only. No data, code, configuration, model artifact, provider, or `D:/vesper` content was changed or read.
+**Scope:** V20 local files and a read-only SQLite inspection only. No data, code, configuration, model artifact, provider, or `<legacy-vesper-root>` content was changed or read.
 
 ## Decision standard
 
@@ -25,7 +25,7 @@ A fresh CPU experiment contract needs a reproducible source path and freshness e
 
 - `reports/model_iteration_log.md` repeatedly describes prior runs as using “local split-adjusted Massive data,” but the current checkout has no local split-adjustment map and the current trainer warns then uses raw prices when none is found. This audit classifies the active local input as raw; the historical adjustment claim is **unverified** for a fresh run.
 - The database is structurally usable (single table, complete latest-date coverage across 502 tickers, no duplicate ticker/date groups), but structural checks do not establish point-in-time availability, corporate-action correctness, or constituent history.
-- This audit intentionally did not compare against `D:/vesper`, because local V20 evidence already fails admission and no integrity comparison is required to identify the blockers.
+- This audit intentionally did not compare against `<legacy-vesper-root>`, because local V20 evidence already fails admission and no integrity comparison is required to identify the blockers.
 
 ## Conditions required before a new CPU experiment contract
 

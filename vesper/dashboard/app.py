@@ -18,7 +18,6 @@ from tkinter import ttk
 
 from vesper.dashboard.backtest_evidence import load_backtest_evidence
 from vesper.dashboard.model_runs import best_oos_so_far, model_run_rows, promotion_oos_ic
-from vesper.dashboard.worker_monitor import WorkerMonitorWindow
 
 logger = logging.getLogger("vesper.dashboard")
 
@@ -66,8 +65,6 @@ class DashboardApp:
         self._model_window: tk.Frame | None = None
         self._model_runs_frame: tk.Frame | None = None
         self._backtest_evidence_window: tk.Toplevel | None = None
-        self._worker_monitor: WorkerMonitorWindow | None = None
-        self._live_team_frame: tk.Frame | None = None
 
         self._apply_theme()
         self._build_ui()
@@ -131,13 +128,6 @@ class DashboardApp:
             relief="flat", cursor="hand2", command=self._open_backtest_evidence
         )
         self.backtest_evidence_btn.pack(side="left", padx=(8, 0))
-
-        self.live_team_btn = tk.Button(
-            appbar, text="Live Team", font=("Segoe UI", 9),
-            bg=BTN_BG, fg=FG, activebackground=SELECT,
-            relief="flat", cursor="hand2", command=self._open_live_team
-        )
-        self.live_team_btn.pack(side="left", padx=(8, 0))
 
         self.refresh_lbl = tk.Label(appbar, text="—", font=("Segoe UI", 9),
                                     bg=BG, fg=FG)
@@ -360,8 +350,6 @@ class DashboardApp:
     def _open_model_runs(self):
         if self._model_window:
             return
-        if self._worker_monitor:
-            self._show_dashboard()
         self._main.pack_forget()
 
         window = tk.Frame(self.root, bg=BG)
@@ -438,24 +426,6 @@ class DashboardApp:
         if self._backtest_evidence_window:
             self._backtest_evidence_window.destroy()
         self._backtest_evidence_window = None
-
-    def _open_live_team(self):
-        if self._worker_monitor:
-            return
-        if self._model_window:
-            self._close_model_runs()
-        self._main.pack_forget()
-        self._live_team_frame = tk.Frame(self.root, bg=BG)
-        self._live_team_frame.pack(fill="both", expand=True, padx=8, pady=8)
-        self._worker_monitor = WorkerMonitorWindow(self._live_team_frame, self._show_dashboard)
-
-    def _show_dashboard(self):
-        monitor = self._worker_monitor
-        self._worker_monitor = None
-        if monitor and monitor.window.winfo_exists():
-            monitor.close()
-        self._live_team_frame = None
-        self._main.pack(fill="both", expand=True, padx=8, pady=8)
 
     def _refresh_backtest_evidence(self):
         if not self._backtest_evidence_window or not self._backtest_evidence_window.winfo_exists():
@@ -661,8 +631,6 @@ class DashboardApp:
         self.root.after(2000, self._poll)
 
     def close(self):
-        if self._worker_monitor and self._worker_monitor.window.winfo_exists():
-            self._worker_monitor.close()
         if self._model_window and self._model_window.winfo_exists():
             self._model_window.destroy()
         self.root.destroy()

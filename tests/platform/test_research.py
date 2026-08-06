@@ -29,7 +29,7 @@ def _request(run_id: str = "run-research") -> TaskRequest:
     )
 
 
-def _market_database(root: Path) -> Path:
+def _market_database(root: Path, *, include_null_price: bool = False) -> Path:
     database = root / DATABASE_RELATIVE
     database.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(database) as connection:
@@ -42,7 +42,15 @@ def _market_database(root: Path) -> Path:
             "INSERT INTO sp500_ohlcv VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 ("AAA", "2026-01-02", 98765.4321, 11.0, 9.0, 10.5, 100.0),
-                ("AAA", "2026-01-03", 10.5, 12.0, 10.0, None, 110.0),
+                (
+                    "AAA",
+                    "2026-01-03",
+                    10.5,
+                    12.0,
+                    10.0,
+                    None if include_null_price else 11.0,
+                    110.0,
+                ),
                 ("BBB", "2026-01-05", 20.0, 21.0, 19.0, 20.5, 200.0),
             ),
         )
@@ -97,7 +105,7 @@ strategy:
 
 def test_data_research_is_read_only_and_reports_only_bounded_aggregates(tmp_path):
     repository = tmp_path / "repository"
-    database = _market_database(repository)
+    database = _market_database(repository, include_null_price=True)
     splits = _split_adjustments(repository)
     evidence = FilesystemEvidenceStore(tmp_path / "evidence")
     database_before = database.read_bytes()
@@ -106,13 +114,14 @@ def test_data_research_is_read_only_and_reports_only_bounded_aggregates(tmp_path
 
     result = LocalDataResearcher(repository, evidence, clock=lambda: NOW).research(_request())
 
-    assert result.available is True
+    assert result.available is False
     assert result.row_count == 3
     assert result.ticker_count == 2
     assert result.start_date == "2026-01-02"
     assert result.end_date == "2026-01-05"
     assert result.null_price_rows == 1
     assert result.invalid_date_rows == 0
+    assert any("null price" in warning.lower() for warning in result.warnings)
     assert result.split_adjustments_sha256 == hashlib.sha256(splits_before).hexdigest()
     assert database.read_bytes() == database_before
     assert splits.read_bytes() == splits_before
@@ -126,6 +135,19 @@ def test_data_research_is_read_only_and_reports_only_bounded_aggregates(tmp_path
     assert b'"AAA"' not in report
     assert b'"open"' in report
     assert len(tuple((evidence.root / "runs" / result.run_id).glob("*.json"))) == 1
+
+
+def test_data_research_declares_replay_stable_timestamp_scope(tmp_path):
+    repository = tmp_path / "repository"
+    _market_database(repository)
+    _split_adjustments(repository)
+    evidence = FilesystemEvidenceStore(tmp_path / "evidence")
+
+    result = LocalDataResearcher(repository, evidence).research(_request())
+
+    assert result.created_at == NOW
+    assert result.timestamp_scope == "run-created-at-for-replay"
+    assert result.evidence[0].created_at == NOW
 
 
 @pytest.mark.parametrize("database_body", (None, b"not-a-sqlite-database SECRET-PRICE-123"))
@@ -252,11 +274,16 @@ def test_model_evaluation_hashes_without_loading_and_redacts_unbounded_inputs(tm
     evidence = FilesystemEvidenceStore(tmp_path / "evidence")
     snapshots = {path: path.read_bytes() for path in (settings, model, metadata)}
 
-    result = LocalModelEvaluator(repository, evidence, clock=lambda: NOW).evaluate(_request())
+    result = LocalModelEvaluator(repository, evidence).evaluate(_request())
 
     assert result.available is True
     assert result.hash_matches is True
     assert result.evaluation_passed is True
+    assert result.evaluation_scope == "artifact-integrity-only"
+    assert result.integrity_passed is True
+    assert result.created_at == NOW
+    assert result.timestamp_scope == "run-created-at-for-replay"
+    assert result.evidence[0].created_at == NOW
     assert result.configured_model_path == "models/xgb_ranker.json"
     assert result.metadata_path == "models/xgb_ranker.metadata.json"
     assert result.label_horizon == 5

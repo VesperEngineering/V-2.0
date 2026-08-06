@@ -12,6 +12,7 @@ from vesper.platform.qwen_runtime import QwenTurnResult
 from vesper.platform.quant_agents import OUTPUT_MODELS
 from vesper.platform.service import LocalPlatformService
 from vesper.platform.review import DailyReviewService
+from vesper.platform.session_recorder import SessionRecorder
 
 
 NOW = datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc)
@@ -154,11 +155,13 @@ def test_runner_rejects_prohibited_model_text_without_model_derived_event(
 
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         journal = AgentJournal(persistence.store)
+        recorder = SessionRecorder(tmp_path / "knowledge", clock=lambda: NOW)
         runner = AutonomousAgentRunner(
             repository_root=ROOT,
             profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
             qwen=Qwen(),
             journal=journal,
+            session_recorder=recorder,
         )
         with pytest.raises(ValueError, match="prohibited model content") as captured:
             runner.run(
@@ -310,11 +313,13 @@ def test_runner_journals_validated_completed_output_for_each_role(tmp_path, role
 
     with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
         journal = AgentJournal(persistence.store)
+        recorder = SessionRecorder(tmp_path / "knowledge", clock=lambda: NOW)
         runner = AutonomousAgentRunner(
             repository_root=ROOT,
             profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
             qwen=Qwen(),
             journal=journal,
+            session_recorder=recorder,
         )
         result = runner.run(
             role=role,
@@ -334,6 +339,18 @@ def test_runner_journals_validated_completed_output_for_each_role(tmp_path, role
             JournalEventType.PROPOSAL_CREATED,
             JournalEventType.ROUTING_DECISION,
         ]
+        session = (
+            tmp_path
+            / "knowledge"
+            / "sessions"
+            / "2026-08-02"
+            / f"{role.value}--session-1.md"
+        )
+        session_text = session.read_text(encoding="utf-8")
+        assert "Inspect signal." in session_text
+        assert '"summary": "Bounded evidence review."' in session_text
+        assert "producer_reasoning" not in session_text
+        assert session_text.count("## Event ") == 2
         completed_output = events[1].payload
         assert completed_output == {
             "summary": "Bounded evidence review.",
@@ -355,6 +372,65 @@ def test_runner_journals_validated_completed_output_for_each_role(tmp_path, role
         assert all(key in markdown for key in conclusions)
         assert "Run a bounded follow-up." in markdown
         assert role.value in markdown
+
+
+def test_runner_persists_qwen_tool_events_after_output_validation(tmp_path):
+    role = AgentRole.MODEL_RESEARCHER
+
+    class Qwen:
+        def run(self, actual_role, prompt, **kwargs):
+            assert actual_role is role
+            output = json.dumps(output_document(role))
+            return QwenTurnResult(
+                output,
+                100,
+                1,
+                (
+                    {
+                        "speaker": "assistant",
+                        "event_type": "tool_call",
+                        "content": "",
+                        "metadata": {"name": "read_file", "token": "secret-value"},
+                    },
+                    {
+                        "speaker": "tool",
+                        "event_type": "tool_result",
+                        "content": {"output": "bounded tool result", "password": "secret-value"},
+                    },
+                    {"speaker": "assistant", "event_type": "message", "content": output},
+                ),
+            )
+
+    with open_persistence(PlatformPaths.below(tmp_path / "state")) as persistence:
+        runner = AutonomousAgentRunner(
+            repository_root=ROOT,
+            profiles=AgentProfileCatalog(ROOT / "profiles" / "native"),
+            qwen=Qwen(),
+            journal=AgentJournal(persistence.store),
+            session_recorder=SessionRecorder(tmp_path / "knowledge", clock=lambda: NOW),
+        )
+        runner.run(
+            role=role,
+            session_id="session-1",
+            run_id="run-1",
+            task_id="task-1",
+            repository_revision="abc123",
+            created_at=NOW,
+            objective="Inspect signal.",
+            evidence={"artifact-1": {"claim": "bounded"}},
+        )
+
+    session = (
+        tmp_path
+        / "knowledge"
+        / "sessions"
+        / "2026-08-02"
+        / f"{role.value}--session-1.md"
+    )
+    session_text = session.read_text(encoding="utf-8")
+    assert "bounded tool result" in session_text
+    assert "secret-value" not in session_text
+    assert session_text.count("## Event ") == 4
 
 
 def test_runner_binds_controller_authority_into_prompt_and_response_schema(tmp_path):

@@ -4,6 +4,10 @@ Status: ready for operator review
 Date: 2026-08-03
 Design: `TUI testing/RATATUI_DESIGN.md`
 
+Documentation status (2026-08-04): the candidate [CLI and TUI operator guide](../../knowledge/inbox/v20-cli-tui-how-to.md)
+is drafted and linked from the root README and Obsidian vault index. The CLI
+workflow is current; no TUI implementation or launch command exists yet.
+
 ## Outcome
 
 Build the approved Ratatui console as four testable phases. Each phase leaves a

@@ -95,6 +95,63 @@ def test_approved_skill_note_is_typed_as_role_scoped_procedure(tmp_path):
     assert document.title == "Reproduce failures before repair"
 
 
+def test_v20_active_subtrees_scan_recursively_but_cold_tiers_do_not(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(
+        vault,
+        "memory/v20-core/architecture.md",
+        knowledge_id="v20-core-architecture",
+        title="V20 architecture",
+    )
+    _write_note(
+        vault,
+        "dreams/reports/proposal.md",
+        knowledge_id="dream-proposal",
+        title="Dream proposal",
+    )
+    _write_note(
+        vault,
+        "sessions/2026/session.md",
+        knowledge_id="session-summary",
+        title="Session summary",
+    )
+
+    documents = _knowledge_module().load_approved_documents(vault)
+
+    assert [document.knowledge_id for document in documents] == [
+        "v20-core-architecture"
+    ]
+
+
+def test_active_knowledge_budget_counts_source_lines_and_proposes_adaptive_notes(tmp_path):
+    vault = tmp_path / "knowledge"
+    note = _write_note(vault, "memory/v20-core/large.md", knowledge_id="large")
+    note.write_text(note.read_text(encoding="utf-8") + "one\ntwo\nthree\n", encoding="utf-8")
+
+    budget = _knowledge_module().assess_active_budget(vault, line_limit=3)
+
+    assert budget.total_lines == len(note.read_text(encoding="utf-8").splitlines())
+    assert budget.over_by == budget.total_lines - 3
+    assert budget.compaction_candidates == ("memory/v20-core/large.md",)
+
+
+def test_sync_fails_closed_before_store_mutation_when_active_budget_is_exceeded(tmp_path):
+    vault = tmp_path / "knowledge"
+    _write_note(vault, "memory/too-large.md", knowledge_id="too-large", body="one\ntwo\nthree")
+    paths = PlatformPaths.below(tmp_path / "platform")
+
+    with open_persistence(paths) as persistence:
+        service = _knowledge_module().ObsidianKnowledgeService(
+            vault_root=vault,
+            store=persistence.store,
+            index=persistence.knowledge_index,
+            active_line_limit=3,
+        )
+        with pytest.raises(_knowledge_module().KnowledgeSyncError, match="line budget"):
+            service.sync()
+        assert persistence.store.search(("knowledge", "obsidian", "documents")) == ()
+
+
 def test_candidate_and_out_of_scope_markdown_never_enter_approved_documents(tmp_path):
     vault = tmp_path / "knowledge"
     _write_note(

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from .composition import NativeSpecialistComposition
+from .chat import ChatService
 from .agent_profiles import AgentProfileCatalog, AUTONOMOUS_AGENT_ROLES
 from .agent_queue import AgentWorkQueue, WorkQueueEmpty
 from .agent_runner import AutonomousAgentRunner
@@ -25,6 +26,7 @@ from .contracts import (
     JournalEventType,
     HumanApprovalDecision,
     HumanApprovalRequest,
+    WorkingMemoryCandidate,
     RunStatus,
     SpecialistReceipt,
     SpecialistRole,
@@ -35,7 +37,9 @@ from .journals import AgentJournal, JournalConflictError
 from .ollama import OllamaClient, QWEN_MODEL, QwenSpecialistAdapter
 from .persistence import PlatformPaths, PlatformPersistence, open_persistence
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
-from .knowledge import ObsidianKnowledgeService
+from .knowledge import ObsidianKnowledgeService, assess_active_budget
+from .dreaming import DreamGate
+from .working_memory import WorkingMemoryStore
 from .opencode import (
     OpenCodeGateway,
     _process_exists,
@@ -47,6 +51,7 @@ from .qwen_runtime import QwenTurnRunner
 from .review import DailyDigest, DailyReviewService, HybridReviewGate
 from .research import LocalDataResearcher, LocalModelEvaluator
 from .sandbox_runtime import DockerCodexRuntime
+from .session_recorder import SessionRecorder, is_cold_transcript
 from .validation import LocalDeterministicValidator, validate_acceptance_checks
 from .worktree import inspect_worktree
 from .workflow import (
@@ -229,6 +234,7 @@ class LocalPlatformService:
         clock: Callable[[], datetime] = _utc_now,
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
         cancellation_wait_seconds: float = 360,
+        dream_client: object | None = None,
     ) -> None:
         self.paths = paths
         self.control = RuntimeControl(paths.root / "control")
@@ -267,6 +273,7 @@ class LocalPlatformService:
         self._clock = clock
         self._id_factory = id_factory
         self._cancellation_wait_seconds = cancellation_wait_seconds
+        self._dream_client = dream_client
 
     def create_run(
         self,
@@ -572,6 +579,102 @@ class LocalPlatformService:
                 index=persistence.knowledge_index,
             ).status()
 
+    def knowledge_budget(self) -> dict[str, object]:
+        budget = assess_active_budget(self._operator_knowledge_root())
+        return {
+            "line_limit": budget.line_limit,
+            "total_lines": budget.total_lines,
+            "over_by": budget.over_by,
+            "per_note": [
+                {"source_path": path, "lines": lines}
+                for path, lines in budget.per_note
+            ],
+            "compaction_candidates": list(budget.compaction_candidates),
+        }
+
+    def session_status(self) -> dict[str, object]:
+        root = self._operator_knowledge_root() / "sessions"
+        paths = ()
+        if root.is_dir():
+            paths = tuple(
+                path
+                for path in sorted(root.rglob("*.md"))
+                if path.name.casefold() != "readme.md"
+                and is_cold_transcript(path.read_text(encoding="utf-8"))
+            )
+        event_count = 0
+        turn_count = 0
+        for path in paths:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("## Event "):
+                    event_count += 1
+                    if " / message" in line:
+                        turn_count += 1
+                elif line.startswith("## Turn "):
+                    event_count += 1
+                    turn_count += 1
+        latest = None if not paths else paths[-1].relative_to(self._operator_knowledge_root()).as_posix()
+        return {
+            "sessions_root": root.as_posix(),
+            "session_count": len(paths),
+            "event_count": event_count,
+            "turn_count": turn_count,
+            "latest_session": latest,
+            "dream_inputs_ready": bool(paths),
+        }
+
+    def run_dream(self, dry_run: bool = False) -> dict[str, object]:
+        """Run one Dream Gate pass and apply ordinary memory learnings."""
+        report = DreamGate(
+            self._operator_knowledge_root(),
+            client=self._dream_client,
+            clock=self._clock,
+            id_factory=self._id_factory,
+        ).run(dry_run=dry_run)
+        return report.model_dump(mode="json")
+
+    def working_memory_status(self, agent_id: str) -> dict[str, object]:
+        store = WorkingMemoryStore(
+            self._operator_knowledge_root() / "working-memory",
+            clock=self._clock,
+            id_factory=self._id_factory,
+        )
+        try:
+            return store.status(agent_id)
+        finally:
+            store.close()
+
+    def curate_working_memory(self, agent_id: str, candidates_json: str) -> dict[str, object]:
+        try:
+            raw_candidates = json.loads(candidates_json)
+        except json.JSONDecodeError as exc:
+            raise SpecialistRuntimeUnavailable("candidates-json must be valid JSON") from exc
+        if not isinstance(raw_candidates, list):
+            raise SpecialistRuntimeUnavailable("candidates-json must be a JSON list")
+        store = WorkingMemoryStore(
+            self._operator_knowledge_root() / "working-memory",
+            clock=self._clock,
+            id_factory=self._id_factory,
+        )
+        try:
+            for raw in raw_candidates:
+                candidate = WorkingMemoryCandidate.model_validate_json(json.dumps(raw))
+                if candidate.agent_id != agent_id:
+                    raise SpecialistRuntimeUnavailable(
+                        "working-memory candidate agent does not match --agent-id"
+                    )
+                store.propose(candidate)
+            change = store.curate(agent_id)
+            return {
+                "change_id": change.change_id,
+                "agent_id": change.agent_id,
+                "word_count": change.word_count,
+                "active_ids": list(change.active_ids),
+                "archived_ids": list(change.archived_ids),
+            }
+        finally:
+            store.close()
+
     def agent_roster(self) -> dict[str, object]:
         autonomous = AgentProfileCatalog(self._profiles_root).load_all()
         rows = [
@@ -593,6 +696,35 @@ class LocalPlatformService:
             for profile in autonomous
         )
         return {"count": len(rows), "agents": rows, "scheduler_active": False}
+
+    def chat(
+        self,
+        *,
+        role: str,
+        model: str,
+        workspace: str,
+        skills: tuple[str, ...],
+        tools: tuple[str, ...] | None,
+        allow_write: bool,
+        session_id: str,
+        json_output: bool,
+    ) -> dict[str, object]:
+        """Run the bounded interactive V20 development chat; no scheduler or broker access."""
+        repository_root = Path.cwd().resolve()
+        return ChatService(
+            repository_root,
+            self.paths.root,
+            self._knowledge_root_for_repository(repository_root),
+        ).run(
+            role=role,
+            model=model,
+            workspace=workspace,
+            skills=skills,
+            tools=tools,
+            allow_write=allow_write,
+            session_id=session_id,
+            json_output=json_output,
+        )
 
     def run_agent(
         self,
@@ -635,6 +767,10 @@ class LocalPlatformService:
                 ),
                 journal=journal,
                 router=ProposalRouter(),
+                session_recorder=SessionRecorder(
+                    self._knowledge_root_for_repository(repository_root),
+                    clock=self._clock,
+                ),
             ).run(
                 role=agent_role,
                 session_id=session_id,
@@ -894,6 +1030,10 @@ class LocalPlatformService:
                 evidence=persistence.evidence,
                 turn_store=persistence.store,
                 agent_journal=AgentJournal(persistence.store),
+                session_recorder=SessionRecorder(
+                    self._knowledge_root_for_repository(repository_root),
+                    clock=self._clock,
+                ),
                 protected_paths=protected_paths,
                 model_override=(
                     opencode_model
@@ -930,7 +1070,8 @@ class LocalPlatformService:
             )
             graph = build_workflow(
                 checkpointer=persistence.checkpointer,
-                store=persistence.langgraph_store,
+                langgraph_store=persistence.langgraph_store,
+                approval_store=persistence.store,
                 specialists=composition,
                 data_researcher=LocalDataResearcher(
                     repository_root,
@@ -955,6 +1096,11 @@ class LocalPlatformService:
                     clock=self._clock,
                 ),
                 memory_validator=DeterministicMemoryCandidateValidator(),
+                working_memory_store=WorkingMemoryStore(
+                    self._knowledge_root_for_repository(repository_root) / "working-memory",
+                    clock=self._clock,
+                    id_factory=self._id_factory,
+                ),
                 evidence_reader=persistence.evidence.read_verified,
                 clock=self._clock,
             )
@@ -967,7 +1113,8 @@ class LocalPlatformService:
             )
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=_UnavailableSpecialists(),
             data_researcher=_UnavailableDataResearcher(),
             model_evaluator=_UnavailableModelEvaluator(),

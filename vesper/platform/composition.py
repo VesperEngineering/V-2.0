@@ -47,6 +47,7 @@ from .contracts import (
 from .evidence import FilesystemEvidenceStore
 from .journals import AgentJournal
 from .profiles import LoadedProfile, ProfileCatalog
+from .session_recorder import SessionRecorder
 
 
 class CompositionError(RuntimeError):
@@ -158,6 +159,7 @@ class NativeSpecialistComposition:
         evidence: FilesystemEvidenceStore,
         turn_store: TurnJournalStore | None = None,
         agent_journal: AgentJournal | None = None,
+        session_recorder: SessionRecorder | None = None,
         protected_paths: tuple[Path, ...] = (),
         model_override: str | None = None,
         execution_runtime: str = "codex",
@@ -176,6 +178,7 @@ class NativeSpecialistComposition:
         self.evidence = evidence
         self.turn_store = turn_store
         self.agent_journal = agent_journal
+        self.session_recorder = session_recorder
         self.model_override = model_override
         self.execution_runtime = execution_runtime
         self.authentication_type = authentication_type
@@ -201,6 +204,8 @@ class NativeSpecialistComposition:
         cached, execution_id = self._prepare_turn(request, before, workspace)
         if cached is not None:
             return cached
+        self._record_user_turn(request)
+        before = self._snapshot_repository()
         model = self.model_override or profile.model.name
         try:
             execution = self.adapter.execute(
@@ -229,6 +234,12 @@ class NativeSpecialistComposition:
         )
         if receipt.status is not ExecutionStatus.COMPLETED:
             self._rollback_turn(before)
+        else:
+            try:
+                self._record_execution_transcript(request, execution)
+            except Exception:
+                self._rollback_turn(before)
+                raise
         self._complete_turn(request, receipt)
         self._journal_receipt(request, receipt)
         return receipt
@@ -310,6 +321,8 @@ class NativeSpecialistComposition:
         if cached is not None:
             receipt = cached
         else:
+            self._record_user_turn(item)
+            before = self._snapshot_repository()
             model = self.model_override or profile.model.name
             try:
                 execution = self.adapter.execute(
@@ -333,6 +346,12 @@ class NativeSpecialistComposition:
             )
             if receipt.status is not ExecutionStatus.COMPLETED:
                 self._rollback_turn(before)
+            else:
+                try:
+                    self._record_execution_transcript(item, execution)
+                except Exception:
+                    self._rollback_turn(before)
+                    raise
         if receipt.status is not ExecutionStatus.COMPLETED:
             self._complete_turn(item, receipt)
             self._journal_receipt(item, receipt)
@@ -374,6 +393,82 @@ class NativeSpecialistComposition:
         self._complete_turn(item, receipt)
         self._journal_receipt(item, receipt)
         return RiskReviewExecution(receipt=receipt, decision=decision)
+
+    def _record_user_turn(self, request: SpecialistInput) -> None:
+        if self.session_recorder is None:
+            return
+        self.session_recorder.record_turn(
+            role=request.role.value,
+            session_id=request.run_id,
+            run_id=request.run_id,
+            task_id=request.task_id,
+            repository_revision=request.repository_revision,
+            speaker="user",
+            content=request.instructions,
+            created_at=request.created_at,
+        )
+
+    def _record_execution_transcript(
+        self,
+        request: SpecialistInput,
+        execution: CodexExecutionReceipt,
+    ) -> None:
+        if self.session_recorder is None:
+            return
+        assistant_message_seen = False
+        for event in execution.streamed_events:
+            if not isinstance(event, Mapping):
+                speaker = "runtime"
+                event_type = "runtime"
+                content = event
+                metadata = None
+            else:
+                event_speaker = event.get("speaker")
+                event_type_value = event.get("event_type")
+                if (
+                    isinstance(event_speaker, str)
+                    and event_speaker in {"user", "assistant", "tool", "runtime"}
+                    and isinstance(event_type_value, str)
+                    and event_type_value
+                    in {"message", "tool_call", "tool_result", "runtime"}
+                ):
+                    speaker = event_speaker
+                    event_type = event_type_value
+                    content = event.get("content", "")
+                    metadata = event.get("metadata")
+                    if metadata is not None and not isinstance(metadata, Mapping):
+                        metadata = {"value": metadata}
+                else:
+                    speaker = "runtime"
+                    event_type = "runtime"
+                    content = event
+                    metadata = None
+            if speaker == "assistant" and event_type == "message":
+                assistant_message_seen = True
+            self.session_recorder.record_event(
+                role=request.role.value,
+                session_id=request.run_id,
+                run_id=request.run_id,
+                task_id=request.task_id,
+                repository_revision=request.repository_revision,
+                speaker=speaker,
+                event_type=event_type,
+                content=content,
+                metadata=metadata,
+                created_at=request.created_at,
+            )
+        if not assistant_message_seen and execution.final_response:
+            self.session_recorder.record_event(
+                role=request.role.value,
+                session_id=request.run_id,
+                run_id=request.run_id,
+                task_id=request.task_id,
+                repository_revision=request.repository_revision,
+                speaker="assistant",
+                event_type="message",
+                content=execution.final_response,
+                created_at=request.created_at,
+            )
 
     def _journal_receipt(self, request: SpecialistInput, receipt: SpecialistReceipt) -> None:
         if self.agent_journal is None:
@@ -937,6 +1032,7 @@ class NativeSpecialistComposition:
                 .relative_to(workspace)
                 .as_posix()
                 for relative in paths
+                if not self._is_protected(self.repository_root.joinpath(*Path(relative).parts))
             )
         )
 
@@ -1229,13 +1325,14 @@ class NativeSpecialistComposition:
             },
             "model": {
                 "available": model_evaluation.available,
+                "evaluation_scope": model_evaluation.evaluation_scope,
+                "integrity_passed": model_evaluation.integrity_passed,
                 "hash_matches": model_evaluation.hash_matches,
                 "label_horizon": model_evaluation.label_horizon,
                 "train_ic": model_evaluation.train_ic,
                 "out_of_sample_ic": model_evaluation.out_of_sample_ic,
                 "train_samples": model_evaluation.train_samples,
                 "test_samples": model_evaluation.test_samples,
-                "evaluation_passed": model_evaluation.evaluation_passed,
                 "warnings": model_evaluation.warnings,
             },
         }

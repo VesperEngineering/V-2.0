@@ -18,6 +18,7 @@ from .contracts import AgentRole, JournalEventType, ProposalRoutingDecision
 from .journals import AgentJournal
 from .quant_agents import OUTPUT_MODELS, QuantAgentOutput
 from .qwen_runtime import QwenTurnResult
+from .session_recorder import SessionRecorder
 
 
 # Ollama grammar-generation budgets only; the Pydantic output contracts stay unchanged.
@@ -61,12 +62,14 @@ class AutonomousAgentRunner:
         qwen,
         journal: AgentJournal,
         router: ProposalRouter | None = None,
+        session_recorder: SessionRecorder | None = None,
     ) -> None:
         self.repository_root = repository_root.resolve()
         self.profiles = profiles
         self.qwen = qwen
         self.journal = journal
         self.router = router or ProposalRouter()
+        self.session_recorder = session_recorder
 
     def run(
         self,
@@ -94,6 +97,17 @@ class AutonomousAgentRunner:
             role, authority, evidence_ids=tuple(bounded_evidence)
         )
         prompt = self._prompt(profile, objective, bounded_evidence, authority, response_format)
+        if self.session_recorder is not None:
+            self.session_recorder.record_turn(
+                role=role.value,
+                session_id=session_id,
+                run_id=run_id,
+                task_id=task_id,
+                repository_revision=repository_revision,
+                speaker="user",
+                content=objective,
+                created_at=created_at,
+            )
         self.journal.append(
             event_id=f"{run_id}:{role.value}:observation",
             role=role,
@@ -174,6 +188,15 @@ class AutonomousAgentRunner:
         ):
             record_validation_failure("UnboundProposalEvidence")
             raise ValueError("agent proposal cites evidence not supplied by the controller")
+        self._record_transcript(
+            role=role,
+            session_id=session_id,
+            run_id=run_id,
+            task_id=task_id,
+            repository_revision=repository_revision,
+            created_at=created_at,
+            turn=turn,
+        )
         self.journal.append(
             event_id=f"{run_id}:{role.value}:action-completed",
             role=role,
@@ -222,6 +245,48 @@ class AutonomousAgentRunner:
                 },
             )
         return AgentRunResult(output, tuple(decisions), turn)
+
+    def _record_transcript(
+        self,
+        *,
+        role: AgentRole,
+        session_id: str,
+        run_id: str,
+        task_id: str,
+        repository_revision: str,
+        created_at: datetime,
+        turn: QwenTurnResult,
+    ) -> None:
+        if self.session_recorder is None:
+            return
+        events = turn.transcript_events or (
+            {
+                "speaker": "assistant",
+                "event_type": "message",
+                "content": turn.content,
+            },
+        )
+        for event in events:
+            if not isinstance(event, Mapping):
+                event = {"speaker": "runtime", "event_type": "runtime", "content": event}
+            speaker = str(event.get("speaker", "runtime"))
+            event_type = str(event.get("event_type", "runtime"))
+            content = event.get("content", "")
+            metadata = event.get("metadata")
+            if metadata is not None and not isinstance(metadata, Mapping):
+                metadata = {"value": metadata}
+            self.session_recorder.record_event(
+                role=role.value,
+                session_id=session_id,
+                run_id=run_id,
+                task_id=task_id,
+                repository_revision=repository_revision,
+                speaker=speaker,
+                event_type=event_type,
+                content=content,
+                metadata=metadata,
+                created_at=created_at,
+            )
 
     @staticmethod
     def _completed_output_payload(output: QuantAgentOutput) -> dict[str, str | float | int]:

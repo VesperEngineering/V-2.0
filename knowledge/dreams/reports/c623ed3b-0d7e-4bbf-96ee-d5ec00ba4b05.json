@@ -1,0 +1,49 @@
+{
+  "dream_id": "c623ed3b-0d7e-4bbf-96ee-d5ec00ba4b05",
+  "created_at": "2026-08-05T04:12:50.784396Z",
+  "mode": "cross-session",
+  "model": "qwen:64k",
+  "source_session_ids": [
+    "sessions/2026-08-04-proposal-evidence-binding-canary-handoff.md"
+  ],
+  "source_hashes": [
+    "8fa9cd07dedfe4e6c73153093701256ccf0e147bd86ee9f8ed4d672f1ac0c786"
+  ],
+  "active_memory_sha256": "0064a760a53a52498fb4fee550207c29ecf9b7634801cb4b9780bc8a57e2a3ea",
+  "proposals": [
+    {
+      "proposal_id": "PROC-2026-08-04-CANARY-PROBE",
+      "proposal_type": "duplicate",
+      "target": "knowledge/inbox/canary-evidence-binding-procedure.md",
+      "summary": "Standardize the requirement for a deterministic controller probe in evidence-binding canaries to validate zero-proposal states without forcing artifacts.",
+      "evidence": "sessions/2026-08-04-proposal-evidence-binding-canary-handoff.md (Remaining #1, Blockers)",
+      "confidence": "high",
+      "auto_apply": false,
+      "status": "pending"
+    },
+    {
+      "proposal_id": "PREF-2026-08-04-WORKTREE-ISOLATION",
+      "proposal_type": "duplicate",
+      "target": "knowledge/inbox/worktree-isolation-preference.md",
+      "summary": "Enforce worktree isolation during canary runs to preserve unrelated changes; use integration worktrees only when ownership overlaps.",
+      "evidence": "sessions/2026-08-04-proposal-evidence-binding-canary-handoff.md (Blockers), ACTIVE skills/v20-engineering.md (Procedure #3)",
+      "confidence": "high",
+      "auto_apply": false,
+      "status": "pending"
+    },
+    {
+      "proposal_id": "CONSTRAINT-2026-08-04-DIGEST-GATE",
+      "proposal_type": "duplicate",
+      "target": "knowledge/inbox/digest-acknowledgment-gate.md",
+      "summary": "Prohibit digest acknowledgment until route count and evidence binding are verified in the canary phase.",
+      "evidence": "sessions/2026-08-04-proposal-evidence-binding-canary-handoff.md (Blockers)",
+      "confidence": "high",
+      "auto_apply": false,
+      "status": "pending"
+    }
+  ],
+  "limitations": [
+    "Proposal-only: no active memory or skill file was changed.",
+    "Human review is required before promotion."
+  ]
+}

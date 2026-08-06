@@ -212,7 +212,8 @@ def main() -> None:
     with open_persistence(paths) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=Specialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),

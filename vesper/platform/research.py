@@ -25,6 +25,8 @@ _DEFAULT_MODEL_PATH = "models/xgb_ranker.json"
 _SHA256_CHUNK_SIZE = 1024 * 1024
 _MAX_RESEARCH_DOCUMENT_BYTES = 1024 * 1024
 _MAX_MODEL_PATH_LENGTH = 240
+_REPLAY_STABLE_TIMESTAMP_SCOPE = "run-created-at-for-replay"
+_MODEL_EVALUATION_SCOPE = "artifact-integrity-only"
 _WINDOWS_INVALID_PATH_CHARACTERS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -239,23 +241,26 @@ class LocalDataResearcher:
                     valid_dates = all(
                         _is_iso_date(value) for value in (candidate_start, candidate_end)
                     )
-                    if (
-                        valid_counts
-                        and valid_dates
-                        and candidate_rows > 0
-                        and candidate_tickers > 0
-                        and (candidate_nulls or 0) >= 0
-                        and (candidate_invalid_dates or 0) == 0
-                    ):
+                    if valid_counts:
                         row_count = candidate_rows
                         ticker_count = candidate_tickers
-                        start_date = candidate_start
-                        end_date = candidate_end
                         null_price_rows = candidate_nulls or 0
                         invalid_date_rows = candidate_invalid_dates or 0
-                        available = True
+                        if (
+                            valid_dates
+                            and row_count > 0
+                            and ticker_count > 0
+                            and invalid_date_rows == 0
+                        ):
+                            start_date = candidate_start
+                            end_date = candidate_end
+                            if null_price_rows == 0:
+                                available = True
+                            else:
+                                warnings.append("Market database contains null price rows.")
+                        else:
+                            warnings.append("Market database has no usable coverage.")
                     else:
-                        invalid_date_rows = candidate_invalid_dates or 0
                         warnings.append("Market database has no usable coverage.")
             except (OSError, sqlite3.Error, TypeError, ValueError):
                 warnings.append("Market database could not be queried safely.")
@@ -277,6 +282,7 @@ class LocalDataResearcher:
             available = False
 
         result_fields: dict[str, object] = {
+            "timestamp_scope": _REPLAY_STABLE_TIMESTAMP_SCOPE,
             "available": available,
             "database_path": _DATABASE_PATH,
             "table_name": _TABLE_NAME,
@@ -434,6 +440,8 @@ class LocalModelEvaluator:
 
         evaluation_passed = bool(available and hash_matches)
         result_fields: dict[str, object] = {
+            "timestamp_scope": _REPLAY_STABLE_TIMESTAMP_SCOPE,
+            "evaluation_scope": _MODEL_EVALUATION_SCOPE,
             "available": available,
             "configured_model_path": configured_model_path,
             "metadata_path": metadata_path,

@@ -1,9 +1,0 @@
-{
-  "last_report_path": "C:\\Users\\bgonn\\AppData\\Local\\hermes\\logs\\curator\\20260725-173533",
-  "last_run_at": "2026-07-25T17:35:33.193331+00:00",
-  "last_run_duration_seconds": 1.418437,
-  "last_run_summary": "auto: no changes; llm: skipped (consolidation off)",
-  "last_run_summary_shown_at": "2026-07-25T17:35:33.193331+00:00",
-  "paused": false,
-  "run_count": 3
-}

@@ -116,7 +116,6 @@ At migration time, update:
 
 - `evidence/README.md` with authority, naming, retention, immutability, and resolver rules;
 - the root `README.md` with the evidence lookup and verification commands;
-- `architecture.txt` with the filesystem evidence boundary;
 - `AGENTS.md` with protected evidence paths and migration safety rules;
 - ADR-0001 references after the historical architecture files move;
 - dashboard/operator documentation that names `reports/backtest_accounting_audit.json` or `reports/model_iteration_state.json`;

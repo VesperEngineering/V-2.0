@@ -167,6 +167,11 @@ def test_turn_executes_allowlisted_tool_then_returns_content(tmp_path):
     assert audit[0]["name"] == "read_file"
     assert audit[0]["status"] == "completed"
     assert "output_sha256" in audit[0]
+    assert result.transcript_events[0]["speaker"] == "assistant"
+    assert result.transcript_events[0]["event_type"] == "tool_call"
+    assert result.transcript_events[1]["speaker"] == "tool"
+    assert result.transcript_events[1]["event_type"] == "tool_result"
+    assert result.transcript_events[-1]["content"] == "final"
 
 
 def test_turn_separates_tool_calls_from_final_structured_response(tmp_path):
@@ -304,6 +309,8 @@ def test_qwen_specialist_adapter_returns_existing_receipt_contract(tmp_path):
     assert receipt.model == "qwen:64k"
     assert receipt.authentication_type == "local-ollama"
     assert receipt.final_response == "{}"
+    assert receipt.streamed_events[0]["speaker"] == "assistant"
+    assert receipt.streamed_events[0]["event_type"] == "message"
     assert "tools" in payloads[0] and "format" not in payloads[0]
     assert payloads[1]["format"] == {"type": "object"}
     assert "tools" not in payloads[1]

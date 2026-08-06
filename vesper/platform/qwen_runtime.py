@@ -25,6 +25,9 @@ class QwenTurnResult:
     content: str
     prompt_tokens: int
     tool_calls_used: int
+    transcript_events: tuple[dict[str, object], ...] = ()
+    messages: tuple[dict[str, object], ...] = ()
+    completion_tokens: int = 0
 
 
 @contextmanager
@@ -94,34 +97,115 @@ class QwenTurnRunner:
         allowed_tools: Sequence[str] | None = None,
         response_format: Mapping[str, object] | None = None,
         audit: Callable[[dict[str, str | int]], None] | None = None,
+        messages: Sequence[Mapping[str, object]] | None = None,
+        system_prompt: str | None = None,
+        extra_tool_schemas: Mapping[str, Mapping[str, object]] | None = None,
+        on_event: Callable[[dict[str, object]], None] | None = None,
     ) -> QwenTurnResult:
         agent_role = AgentRole(role)
-        messages: list[dict[str, object]] = [{"role": "user", "content": prompt}]
+        conversation: list[dict[str, object]] = [dict(message) for message in (messages or ())]
+        if not conversation and system_prompt:
+            conversation.append({"role": "system", "content": system_prompt})
+        conversation.append({"role": "user", "content": prompt})
         used = 0
         observed = 0
-        schemas = self._tool_schemas(agent_role, allowed_tools)
+        transcript_events: list[dict[str, object]] = []
+        schemas = self._tool_schemas(agent_role, allowed_tools, extra_tool_schemas)
         permitted_tools = {schema["function"]["name"] for schema in schemas}
         with inference_lease(self.state_root, wait_seconds=self.wait_seconds):
             while True:
-                response = self.client.chat(messages, tools=schemas)
+                response = self.client.chat(conversation, tools=schemas)
                 observed = response.prompt_tokens
                 self.guard.validate(
                     prompt_tokens=observed, tool_calls=used + len(response.tool_calls)
                 )
+                if on_event is not None:
+                    on_event(
+                        {
+                            "event_type": "model_response",
+                            "prompt_tokens": observed,
+                            "completion_tokens": getattr(response, "completion_tokens", 0),
+                            "tool_calls": len(response.tool_calls),
+                            "tool_calls_used": used,
+                        }
+                    )
                 if not response.tool_calls:
                     if response_format is None:
-                        return QwenTurnResult(response.content, observed, used)
-                    final = self.client.chat(messages, response_format=response_format)
+                        transcript_events.append(
+                            {
+                                "speaker": "assistant",
+                                "event_type": "message",
+                                "content": response.content,
+                            }
+                        )
+                        return QwenTurnResult(
+                            response.content,
+                            observed,
+                            used,
+                            tuple(transcript_events),
+                            tuple(conversation + [{"role": "assistant", "content": response.content}]),
+                            getattr(response, "completion_tokens", 0),
+                        )
+                    if response.content:
+                        transcript_events.append(
+                            {
+                                "speaker": "assistant",
+                                "event_type": "message",
+                                "content": response.content,
+                                "metadata": {"phase": "pre-structured"},
+                            }
+                        )
+                    final = self.client.chat(conversation, response_format=response_format)
                     observed = final.prompt_tokens
                     self.guard.validate(
                         prompt_tokens=observed, tool_calls=used + len(final.tool_calls)
                     )
+                    if on_event is not None:
+                        on_event(
+                            {
+                                "event_type": "model_response",
+                                "prompt_tokens": observed,
+                                "completion_tokens": getattr(final, "completion_tokens", 0),
+                                "tool_calls": 0,
+                                "tool_calls_used": used,
+                            }
+                        )
                     if final.tool_calls:
                         raise ToolPermissionError(
                             "tools are disabled during the final structured response"
                         )
-                    return QwenTurnResult(final.content, observed, used)
-                messages.append(
+                    transcript_events.append(
+                        {
+                            "speaker": "assistant",
+                            "event_type": "message",
+                            "content": final.content,
+                            "metadata": {"phase": "structured-final"},
+                        }
+                    )
+                    return QwenTurnResult(
+                        final.content,
+                        observed,
+                        used,
+                        tuple(transcript_events),
+                        tuple(conversation + [{"role": "assistant", "content": final.content}]),
+                        getattr(final, "completion_tokens", 0),
+                    )
+                transcript_events.append(
+                    {
+                        "speaker": "assistant",
+                        "event_type": "tool_call",
+                        "content": response.content,
+                        "metadata": {
+                            "tool_calls": [
+                                {"name": call.name, "arguments": call.arguments}
+                                for call in response.tool_calls
+                            ]
+                        },
+                    }
+                )
+                if on_event is not None:
+                    on_event(transcript_events[-1])
+                conversation.append(
                     {
                         "role": "assistant",
                         "content": response.content,
@@ -174,28 +258,36 @@ class QwenTurnRunner:
                                 ).hexdigest(),
                             }
                         )
-                    messages.append(
+                    conversation.append(
                         {
                             "role": "tool",
                             "tool_name": call.name,
                             "content": json.dumps(result.model_dump()),
                         }
                     )
+                    transcript_events.append(
+                        {
+                            "speaker": "tool",
+                            "event_type": "tool_result",
+                            "content": result.model_dump(),
+                            "metadata": {
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            },
+                        }
+                    )
+                    if on_event is not None:
+                        on_event(transcript_events[-1])
 
     @staticmethod
     def _tool_schemas(
-        role: AgentRole, allowed_tools: Sequence[str] | None = None
+        role: AgentRole,
+        allowed_tools: Sequence[str] | None = None,
+        extra_tool_schemas: Mapping[str, Mapping[str, object]] | None = None,
     ) -> tuple[dict[str, object], ...]:
         names = ["read_file", "search_text"]
         if role is AgentRole.DEVELOPMENT:
             names.extend(("write_file", "git_diff_check"))
-        if allowed_tools is not None:
-            unknown = set(allowed_tools) - set(names)
-            if unknown:
-                raise ValueError(
-                    f"role tool allowlist contains unsupported tools: {sorted(unknown)}"
-                )
-            names = [name for name in names if name in allowed_tools]
         parameters = {
             "read_file": {
                 "type": "object",
@@ -225,8 +317,20 @@ class QwenTurnRunner:
                 "additionalProperties": False,
             },
         }
+        if extra_tool_schemas:
+            names.extend(name for name in extra_tool_schemas if name not in names)
+        if allowed_tools is not None:
+            unknown = set(allowed_tools) - set(names)
+            if unknown:
+                raise ValueError(
+                    f"role tool allowlist contains unsupported tools: {sorted(unknown)}"
+                )
+            names = [name for name in names if name in allowed_tools]
+        extra = extra_tool_schemas or {}
         return tuple(
-            {
+            dict(extra[name])
+            if name in extra
+            else {
                 "type": "function",
                 "function": {
                     "name": name,

@@ -20,7 +20,7 @@ Brennan remains the final authority. Before implementation or execution, Brennan
 ### 2.1 Observed facts
 
 1. `reports/research/data_evaluation_admission_v1.md` found the current broad path NO-GO because adjustment, point-in-time universe, availability, purge/embargo, and independent-holdout gates were not met.
-2. `reports/research/data_evaluation_admission_review_v1.md` independently retained the NO-GO but corrected the adjustment account: all 30 run receipts say that `D:\vesper\vesper_data\split_adjustments.json` was loaded and applied to 502 tickers. Those receipts are runtime claims, not a V20-local checksummed adjustment contract.
+2. `reports/research/data_evaluation_admission_review_v1.md` independently retained the NO-GO but corrected the adjustment account: all 30 run receipts say that `<legacy-vesper-root>\vesper_data\split_adjustments.json` was loaded and applied to 502 tickers. Those receipts are runtime claims, not a V20-local checksummed adjustment contract.
 3. `vesper/data/massive/sp500/sp500_ohlcv.sqlite` is a raw fixed 502-ticker table with 2,482,807 rows from 2003-09-10 through 2026-07-21. It has no row receipt time, revision identifier, source key, or source hash. Its observed SHA-256 is `6ad6bc7ced7781b9f94dea030b06b71ed55a1f889a7e925cbb428398cecc1bb0`.
 4. `scripts/train_model.py:44-76,208-225` permits an external adjustment file, falls back to raw prices if no map is found, and splits only on feature date. It does not fail closed on a local adjustment checksum and does not purge the five-session label interval.
 5. `reports/model_iteration_state.json` records 30 rejected parameter runs and no accepted candidate. The receipts repeatedly evaluate the same post-2021 period. `reports/portfolio_ablation_2026-07-22.md` explicitly says its period is not a fresh promotion holdout.
@@ -219,7 +219,7 @@ This plan does not:
 - reopen the post-2021 period as a final holdout;
 - tune another tree, depth, regularization, feature, threshold, horizon, portfolio rule, or cost using the existing receipts;
 - edit code, data, configuration, models, schedules, broker state, risk limits, or trading parameters in this task;
-- train a model, use GPU, use a paid provider, access `D:/vesper`, or access broker/execution systems;
+- train a model, use GPU, use a paid provider, access `<legacy-vesper-root>`, or access broker/execution systems;
 - claim adjusted OHLC values are executable market prices;
 - authorize paper trading, live trading, deployment, capital allocation, or promotion;
 - create a new generalized research framework, data abstraction, or dependency.

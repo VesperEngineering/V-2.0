@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -28,6 +29,19 @@ class CliConfig:
 
 
 class PlatformService(Protocol):
+    def chat(
+        self,
+        *,
+        role: str,
+        model: str,
+        workspace: str,
+        skills: tuple[str, ...],
+        tools: tuple[str, ...] | None,
+        allow_write: bool,
+        session_id: str,
+        json_output: bool,
+    ): ...
+
     def create_run(
         self,
         objective: str,
@@ -59,6 +73,16 @@ class PlatformService(Protocol):
     def search_knowledge(self, query: str, role: str): ...
 
     def knowledge_status(self): ...
+
+    def knowledge_budget(self): ...
+
+    def session_status(self): ...
+
+    def run_dream(self, dry_run: bool = False): ...
+
+    def working_memory_status(self, agent_id: str): ...
+
+    def curate_working_memory(self, agent_id: str, candidates_json: str): ...
 
     def agent_roster(self): ...
 
@@ -162,6 +186,16 @@ def _call(context: typer.Context, method: str, *args) -> None:
     _emit(result, json_output=settings.json_output)
 
 
+def _chat_call(context: typer.Context, **kwargs) -> None:
+    settings: _Context = context.obj
+    try:
+        service = settings.service_factory(settings.config)
+        service.chat(json_output=settings.json_output, **kwargs)
+    except (RuntimeError, ValueError) as exc:
+        typer.echo(f"platform unavailable: {exc}", err=True)
+        raise typer.Exit(code=4) from exc
+
+
 def build_app(
     *,
     service_factory: Callable[[CliConfig], PlatformService] = _default_service_factory,
@@ -257,6 +291,29 @@ def build_app(
         """Create a run and execute until a durable stop or interrupt."""
         checks = None if not acceptance_check else tuple(acceptance_check)
         _call(context, "create_run", objective, workspace, repository_revision, checks)
+
+    @app.command("chat")
+    def chat(
+        context: typer.Context,
+        role: str = typer.Option("v20-development", "--role", help="Bounded chat role."),
+        model: str = typer.Option("qwen:64k", "--model", help="Pinned local Qwen model."),
+        workspace: str = typer.Option("TUI testing", "--workspace", help="Narrow repository-relative workspace."),
+        skill: list[str] | None = typer.Option(None, "--skill", help="Approved knowledge/skills file; repeatable."),
+        tool: list[str] | None = typer.Option(None, "--tool", help="Controller tool; repeatable."),
+        allow_write: bool = typer.Option(False, "--allow-write", help="Enable guarded writes and focused tests."),
+        session_id: str | None = typer.Option(None, "--session-id", help="Redacted transcript identity."),
+    ) -> None:
+        """Chat with local qwen:64k through V20 controller tools."""
+        _chat_call(
+            context,
+            role=role,
+            model=model,
+            workspace=workspace,
+            skills=tuple(skill or ()),
+            tools=None if tool is None else tuple(tool),
+            allow_write=allow_write,
+            session_id=session_id or f"interactive-{uuid.uuid4().hex[:12]}",
+        )
 
     @app.command("status")
     def inspect_run(context: typer.Context, run_id: str) -> None:
@@ -396,6 +453,44 @@ def build_app(
     def knowledge_status(context: typer.Context) -> None:
         """Report the documents in the derived knowledge store."""
         _call(context, "knowledge_status")
+
+    @app.command("knowledge-budget")
+    def knowledge_budget(context: typer.Context) -> None:
+        """Report the active knowledge line budget and compaction candidates."""
+        _call(context, "knowledge_budget")
+
+    @app.command("session-status")
+    def session_status(context: typer.Context) -> None:
+        """Report captured redacted sessions available to Dream Gate."""
+        _call(context, "session_status")
+
+    @app.command("dream-run")
+    def run_dream(
+        context: typer.Context,
+        dry_run: bool = typer.Option(False, "--dry-run"),
+    ) -> None:
+        """Run one Dream Gate pass; ordinary memory and procedures are applied."""
+        if dry_run:
+            _call(context, "run_dream", True)
+        else:
+            _call(context, "run_dream")
+
+    @app.command("memory-status")
+    def working_memory_status(
+        context: typer.Context,
+        agent_id: str = typer.Option(..., "--agent-id"),
+    ) -> None:
+        """Show one agent's bounded working-memory status."""
+        _call(context, "working_memory_status", agent_id)
+
+    @app.command("memory-curate")
+    def curate_working_memory(
+        context: typer.Context,
+        agent_id: str = typer.Option(..., "--agent-id"),
+        candidates_json: str = typer.Option("[]", "--candidates-json"),
+    ) -> None:
+        """Curate submitted candidates into one bounded agent core."""
+        _call(context, "curate_working_memory", agent_id, candidates_json)
 
     @app.command("approve")
     def approve_run(

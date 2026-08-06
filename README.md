@@ -130,6 +130,10 @@ frontmatter, review, promotion, retrieval, and recovery rules. The default vault
 is `knowledge/`; use global `--knowledge-root <path>` only for another approved
 repository-local vault.
 
+The [CLI and TUI how-to guide](knowledge/inbox/v20-cli-tui-how-to.md) collects
+copyable CLI workflows and records the current boundary: the CLI is runnable,
+while the TUI remains planned and not executable in this checkout.
+
 For a normal code task across an entire clone, the additional
 `--allow-repository-root-workspace` flag is required. It is accepted only for OpenCode
 in a clean standalone clone retaining origin provenance on an `m2/` branch. `.git`,
@@ -151,6 +155,30 @@ uv run --locked vesper-agent --runtime opencode --model opencode/mimo-v2.5-free 
   --repository-revision $revision `
   --acceptance-check git-diff-check
 ```
+
+## Task closeout
+
+Before declaring a task done, classify all `git status --short` entries. Commit,
+hand off, or explicitly park source changes; do not leave dirty branch work
+unexplained. Run the closeout command for a completed worktree:
+
+```powershell
+uv run --locked python scripts/cleanup_completed.py `
+  --path .worktrees/<completed-worktree> --done
+```
+
+It refuses dirty source, then removes allowlisted generated directories itself
+and reports `DONE OK`. For an explicit generated-only cleanup before closeout,
+after confirming no active build or test uses those artifacts, use:
+
+```powershell
+uv run --locked python scripts/cleanup_completed.py `
+  --path .worktrees/<completed-worktree> --apply
+```
+
+Both modes remove only generated directories. They never remove source or a
+whole Git worktree. Remove a completed clean worktree separately with
+`git worktree remove <path>`.
 
 ## Verification
 

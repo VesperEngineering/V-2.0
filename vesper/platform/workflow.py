@@ -23,6 +23,7 @@ from .contracts import (
     HumanApprovalDecision,
     HumanApprovalRequest,
     ModelEvaluationResult,
+    MemoryType,
     PermissionSet,
     ProductSpecialistOutput,
     RiskDecision,
@@ -35,9 +36,12 @@ from .contracts import (
     SpecialistRole,
     TaskRequest,
     ValidationResult,
+    WorkingMemoryCandidate,
+    WorkingMemoryType,
 )
 from .memory import DeterministicMemoryCandidateValidator, MemoryService
 from .runtime_env import enforce_offline_runtime_environment
+from .working_memory import WorkingMemoryStore
 
 enforce_offline_runtime_environment()
 
@@ -182,10 +186,12 @@ def _workspace_sha256(workspace: Path) -> str:
     if not root.is_dir():
         raise PendingApprovalError("approval workspace is unavailable")
     digest = hashlib.sha256()
+    excluded_root_metadata = {".git", ".state"}
     for current, directories, files in os.walk(root, followlinks=False):
         directory = Path(current)
         if directory == root:
-            directories[:] = [name for name in directories if name not in {".git", ".state"}]
+            directories[:] = [name for name in directories if name not in excluded_root_metadata]
+            files[:] = [name for name in files if name not in excluded_root_metadata]
         directories.sort()
         files.sort()
         for name in (*directories, *files):
@@ -251,13 +257,14 @@ def _research_summary(
         },
         "model": {
             "available": model_evaluation.available,
+            "evaluation_scope": model_evaluation.evaluation_scope,
+            "integrity_passed": model_evaluation.integrity_passed,
             "hash_matches": model_evaluation.hash_matches,
             "label_horizon": model_evaluation.label_horizon,
             "train_ic": model_evaluation.train_ic,
             "out_of_sample_ic": model_evaluation.out_of_sample_ic,
             "train_samples": model_evaluation.train_samples,
             "test_samples": model_evaluation.test_samples,
-            "evaluation_passed": model_evaluation.evaluation_passed,
             "warnings": model_evaluation.warnings,
         },
     }
@@ -266,7 +273,8 @@ def _research_summary(
 def build_workflow(
     *,
     checkpointer,
-    store,
+    langgraph_store,
+    approval_store: StorePort,
     specialists: SpecialistExecutor,
     data_researcher: DataResearcher,
     model_evaluator: ModelEvaluator,
@@ -274,6 +282,7 @@ def build_workflow(
     risk_reviewer: RiskReviewer,
     memory_service: MemoryService | None = None,
     memory_validator: DeterministicMemoryCandidateValidator | None = None,
+    working_memory_store: WorkingMemoryStore | None = None,
     workspace_hasher: Callable[[Path], str] = _workspace_sha256,
     evidence_reader: Callable[[EvidenceArtifactRef], bytes] | None = None,
     clock: Callable[[], datetime] = _utc_now,
@@ -305,7 +314,7 @@ def build_workflow(
                 "current_role": None,
                 "terminal_reason": "Model Evaluation authority mismatch",
             }
-        if not data_research.available or not result.evaluation_passed:
+        if not data_research.available or not result.integrity_passed:
             reasons = [
                 *data_research.warnings,
                 *result.warnings,
@@ -314,7 +323,7 @@ def build_workflow(
                 "status": RunStatus.OPERATOR_INTERVENTION.value,
                 "current_role": None,
                 "model_evaluation": _dump(result),
-                "terminal_reason": ("Research readiness gate failed: " + "; ".join(reasons)),
+                "terminal_reason": ("Research integrity gate failed: " + "; ".join(reasons)),
             }
         return {
             "status": RunStatus.PRODUCT.value,
@@ -330,12 +339,12 @@ def build_workflow(
             not _authority_matches(request, data_research)
             or not _authority_matches(request, model_evaluation)
             or not data_research.available
-            or not model_evaluation.evaluation_passed
+            or not model_evaluation.integrity_passed
         ):
             return {
                 "status": RunStatus.OPERATOR_INTERVENTION.value,
                 "current_role": None,
-                "terminal_reason": "Research readiness gate failed before Product.",
+                "terminal_reason": "Research integrity gate failed before Product.",
             }
         if evidence_reader is not None:
             try:
@@ -357,6 +366,9 @@ def build_workflow(
             attempt=1,
             instructions=(
                 f"Produce a bounded development brief for: {request.objective}\n"
+                "Controller-frozen acceptance checks (reproduce exactly):\n"
+                + json.dumps(request.acceptance_checks)
+                + "\n"
                 "Controller-owned read-only research context:\n"
                 + json.dumps(research_context, sort_keys=True)
             ),
@@ -395,7 +407,19 @@ def build_workflow(
                 "receipts": receipts,
                 "terminal_reason": "completed Product execution omitted typed output",
             }
-        _commit_receipt_memories(memory_service, memory_validator, receipt)
+        if receipt.output.acceptance_checks != request.acceptance_checks:
+            return {
+                "status": RunStatus.FAILED.value,
+                "current_role": None,
+                "receipts": receipts,
+                "terminal_reason": "Product acceptance checks differ from controller checks",
+            }
+        _commit_receipt_memories(
+            memory_service,
+            memory_validator,
+            working_memory_store,
+            receipt,
+        )
         product_output = receipt.output
         return {
             "status": RunStatus.DEVELOPMENT.value,
@@ -486,6 +510,7 @@ def build_workflow(
             _commit_receipt_memories(
                 memory_service,
                 memory_validator,
+                working_memory_store,
                 development_receipt,
                 validation=result,
             )
@@ -581,6 +606,7 @@ def build_workflow(
             _commit_receipt_memories(
                 memory_service,
                 memory_validator,
+                working_memory_store,
                 review.receipt,
                 risk_decision=decision,
             )
@@ -655,20 +681,20 @@ def build_workflow(
             }
         )
         decision = _parse(HumanApprovalDecision, response)
-        persisted_request_item = store.get(APPROVAL_REQUEST_NAMESPACE, request.run_id)
-        if persisted_request_item is None:
+        persisted_request = approval_store.get(APPROVAL_REQUEST_NAMESPACE, request.run_id)
+        if persisted_request is None:
             raise PendingApprovalError("no persisted approval request exists")
-        approval_request = _parse(HumanApprovalRequest, persisted_request_item.value)
+        approval_request = _parse(HumanApprovalRequest, persisted_request)
         if decision.decision is ApprovalDecision.APPROVE:
             if workspace_hasher(Path(request.repository_root)) != approval_request.workspace_sha256:
                 raise PendingApprovalError("approval workspace changed after Risk Review")
             if evidence_reader is not None:
                 for artifact in approval_request.evidence:
                     evidence_reader(artifact)
-        persisted_item = store.get(APPROVAL_DECISION_NAMESPACE, request.run_id)
-        if persisted_item is None:
+        persisted = approval_store.get(APPROVAL_DECISION_NAMESPACE, request.run_id)
+        if persisted is None:
             raise PendingApprovalError("no persisted operator decision exists")
-        persisted_decision = _parse(HumanApprovalDecision, persisted_item.value)
+        persisted_decision = _parse(HumanApprovalDecision, persisted)
         if decision != persisted_decision or decision.request_id != request_id:
             raise PendingApprovalError(
                 "resume payload does not match the persisted operator decision"
@@ -738,7 +764,7 @@ def build_workflow(
         {"development": "development", "human_approval": "human_approval", "end": END},
     )
     builder.add_edge("human_approval", END)
-    return builder.compile(checkpointer=checkpointer, store=store)
+    return builder.compile(checkpointer=checkpointer, store=langgraph_store)
 
 
 def _latest_development_receipt(state: WorkflowRuntimeState) -> SpecialistReceipt:
@@ -752,6 +778,7 @@ def _latest_development_receipt(state: WorkflowRuntimeState) -> SpecialistReceip
 def _commit_receipt_memories(
     memory_service: MemoryService | None,
     memory_validator: DeterministicMemoryCandidateValidator | None,
+    working_memory_store: WorkingMemoryStore | None,
     receipt: SpecialistReceipt,
     *,
     validation: ValidationResult | None = None,
@@ -759,6 +786,7 @@ def _commit_receipt_memories(
 ) -> None:
     if memory_service is None or memory_validator is None:
         return
+    proposed = False
     for candidate in receipt.memory_candidates:
         if memory_validator.accepts(
             receipt,
@@ -767,6 +795,39 @@ def _commit_receipt_memories(
             risk_decision=risk_decision,
         ):
             memory_service.commit(receipt.role, candidate, validated=True)
+            if working_memory_store is not None:
+                proposed = True
+                working_memory_store.propose(
+                    WorkingMemoryCandidate(
+                        memory_id=candidate.candidate_id,
+                        agent_id=receipt.role.value,
+                        memory_type=_working_memory_type(candidate.memory_type),
+                        content=candidate.content,
+                        evidence_ids=(candidate.source_artifact.artifact_id,),
+                        evidence=candidate.confidence,
+                        usefulness=candidate.confidence,
+                        reuse=candidate.confidence,
+                        relevance=candidate.confidence,
+                        age=candidate.confidence,
+                        safety_rarity=candidate.confidence,
+                        safety_critical=candidate.memory_type is MemoryType.RISK_DECISION,
+                        created_at=receipt.created_at,
+                    )
+                )
+    if proposed and working_memory_store is not None:
+        working_memory_store.curate(receipt.role.value)
+
+
+def _working_memory_type(memory_type: MemoryType) -> WorkingMemoryType:
+    return {
+        MemoryType.REPOSITORY_FACT: WorkingMemoryType.FACT,
+        MemoryType.PRODUCT_DECISION: WorkingMemoryType.DECISION,
+        MemoryType.DEVELOPMENT_EPISODE: WorkingMemoryType.LESSON,
+        MemoryType.RISK_DECISION: WorkingMemoryType.DECISION,
+        MemoryType.PROGRAM_STATE: WorkingMemoryType.FACT,
+        MemoryType.VERIFIED_PROCEDURE: WorkingMemoryType.PROCEDURE,
+        MemoryType.FAILED_ATTEMPT: WorkingMemoryType.LESSON,
+    }[memory_type]
 
 
 class WorkflowController:

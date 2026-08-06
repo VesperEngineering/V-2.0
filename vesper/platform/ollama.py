@@ -12,6 +12,7 @@ from typing import Callable, Mapping, Sequence
 from .agent_tools import AgentToolRequest
 from .context_budget import MAX_CONTEXT_TOKENS, OUTPUT_RESERVE_TOKENS
 from .contracts import CodexExecutionReceipt, ExecutionStatus, SpecialistInput
+from .session_recorder import SessionRecorder
 
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 QWEN_MODEL = "qwen:64k"
@@ -26,6 +27,7 @@ class OllamaResponse:
     content: str
     prompt_tokens: int
     tool_calls: tuple[AgentToolRequest, ...]
+    completion_tokens: int = 0
 
 
 def _default_transport(
@@ -76,7 +78,12 @@ class OllamaClient:
         raw = self._transport(OLLAMA_CHAT_URL, payload, self._timeout)
         message = raw.get("message")
         prompt_tokens = raw.get("prompt_eval_count")
-        if not isinstance(message, Mapping) or type(prompt_tokens) is not int:
+        completion_tokens = raw.get("eval_count", 0)
+        if (
+            not isinstance(message, Mapping)
+            or type(prompt_tokens) is not int
+            or type(completion_tokens) is not int
+        ):
             raise OllamaProtocolError("Ollama response lacks message or observed prompt usage")
         content = message.get("content", "")
         calls = message.get("tool_calls", ())
@@ -91,7 +98,10 @@ class OllamaClient:
                 AgentToolRequest(name=function.get("name"), arguments=function.get("arguments", {}))
             )
         return OllamaResponse(
-            content=content, prompt_tokens=prompt_tokens, tool_calls=tuple(parsed_calls)
+            content=content,
+            prompt_tokens=prompt_tokens,
+            tool_calls=tuple(parsed_calls),
+            completion_tokens=completion_tokens,
         )
 
 
@@ -182,6 +192,11 @@ class QwenSpecialistAdapter:
             audit=audit_tool,
         )
         finished_at = self._clock()
+        transcript_events: list[dict[str, object]] = []
+        for event in result.transcript_events:
+            redacted = SessionRecorder.redact_payload(event)
+            if isinstance(redacted, Mapping):
+                transcript_events.append({str(key): value for key, value in redacted.items()})
         return CodexExecutionReceipt(
             run_id=request.run_id,
             task_id=request.task_id,
@@ -201,6 +216,7 @@ class QwenSpecialistAdapter:
             finished_at=finished_at,
             final_response=result.content,
             streamed_events=(
+                *transcript_events,
                 {
                     "prompt_tokens": result.prompt_tokens,
                     "tool_calls_used": result.tool_calls_used,

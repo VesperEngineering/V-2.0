@@ -71,30 +71,3 @@ audit:
   log_signals: true
   log_risk_events: true
   log_format: json               # json | csv
-
-# --- Agent Governance (from Vespo) ---
-# AI agents (Codex/Hermes) working on this repo are BOUNDED:
-agent_governance:
-  denied_authority:
-    - broker_credentials
-    - risk_limits
-    - trading_parameters
-    - scheduler_config
-    - order_execution
-    - position_modification
-    - capital_allocation
-    - deployment
-    - paid_compute_or_provider_use
-    - protected_data_mutation
-    - model_promotion
-  allowed_authority:
-    - code_reading
-    - test_writing
-    - documentation
-    - bug_fixes_in_non_critical_paths
-    - strategy_research_code
-  review_required_for:
-    - risk/
-    - execution/
-    - config/
-    - scheduler/

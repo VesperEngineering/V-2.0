@@ -8,6 +8,7 @@ import re
 import sqlite3
 import stat
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -42,6 +43,19 @@ _REQUIRED_FIELDS = (
 _DOCUMENT_NAMESPACE = ("knowledge", "obsidian", "documents")
 _MAX_CONTEXT_DOCUMENTS = 5
 _MAX_CONTEXT_CHARACTERS = 8_000
+ACTIVE_KNOWLEDGE_LINE_LIMIT = 3_000
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveKnowledgeBudget:
+    line_limit: int
+    total_lines: int
+    per_note: tuple[tuple[str, int], ...]
+    compaction_candidates: tuple[str, ...]
+
+    @property
+    def over_by(self) -> int:
+        return max(0, self.total_lines - self.line_limit)
 
 
 class KnowledgeStorePort(Protocol):
@@ -139,13 +153,29 @@ class ObsidianKnowledgeService:
         vault_root: Path,
         store: KnowledgeStorePort,
         index: SqliteKnowledgeIndex,
+        active_line_limit: int = ACTIVE_KNOWLEDGE_LINE_LIMIT,
     ) -> None:
+        if active_line_limit < 1:
+            raise ValueError("active knowledge line limit must be positive")
         self._vault_root = vault_root
         self._store = store
         self._index = index
+        self._active_line_limit = active_line_limit
 
     def sync(self) -> dict[str, int]:
         documents = load_approved_documents(self._vault_root)
+        budget = assess_active_budget(
+            self._vault_root,
+            line_limit=self._active_line_limit,
+            documents=documents,
+        )
+        if budget.over_by:
+            candidates = ", ".join(budget.compaction_candidates) or "none"
+            raise KnowledgeSyncError(
+                "active knowledge line budget exceeded: "
+                f"{budget.total_lines}/{budget.line_limit} lines, "
+                f"over by {budget.over_by}; compaction candidates: {candidates}"
+            )
         current = {item.knowledge_id: item for item in documents}
         existing = {
             item.knowledge_id: item
@@ -295,6 +325,54 @@ def load_approved_documents(vault_root: Path) -> tuple[KnowledgeDocument, ...]:
                 )
             documents[document.knowledge_id] = document
     return tuple(documents[key] for key in sorted(documents))
+
+
+def assess_active_budget(
+    vault_root: Path,
+    *,
+    line_limit: int = ACTIVE_KNOWLEDGE_LINE_LIMIT,
+    documents: tuple[KnowledgeDocument, ...] | None = None,
+) -> ActiveKnowledgeBudget:
+    """Count approved source lines and return non-binding compaction candidates."""
+    if line_limit < 1:
+        raise ValueError("active knowledge line limit must be positive")
+    loaded = load_approved_documents(vault_root) if documents is None else documents
+    per_note: list[tuple[str, int]] = []
+    adaptive: list[tuple[str, int]] = []
+    for document in loaded:
+        path = vault_root.resolve() / document.source_path
+        source = path.read_text(encoding="utf-8")
+        line_count = len(source.splitlines())
+        per_note.append((document.source_path, line_count))
+        metadata = _read_frontmatter(path, document.source_path)
+        if metadata.get("vesper_retention", "adaptive") != "pinned":
+            adaptive.append((document.source_path, line_count))
+    total_lines = sum(lines for _, lines in per_note)
+    candidates = ()
+    if total_lines > line_limit:
+        candidates = tuple(
+            path for path, _ in sorted(adaptive, key=lambda item: (-item[1], item[0]))
+        )
+    return ActiveKnowledgeBudget(
+        line_limit=line_limit,
+        total_lines=total_lines,
+        per_note=tuple(sorted(per_note)),
+        compaction_candidates=candidates,
+    )
+
+
+def _read_frontmatter(path: Path, relative: str) -> Mapping[str, object]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise KnowledgeSyncError(f"{relative}: approved note has no frontmatter")
+    try:
+        boundary = next(index for index, line in enumerate(lines[1:], start=1) if line == "---")
+    except StopIteration as exc:
+        raise KnowledgeSyncError(f"{relative}: frontmatter is not terminated") from exc
+    raw = yaml.safe_load("\n".join(lines[1:boundary]))
+    if not isinstance(raw, Mapping):
+        raise KnowledgeSyncError(f"{relative}: frontmatter must be a mapping")
+    return raw
 
 
 def _load_note(

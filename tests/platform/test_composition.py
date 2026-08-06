@@ -38,6 +38,7 @@ from vesper.platform.contracts import (
 from vesper.platform.evidence import FilesystemEvidenceStore
 from vesper.platform.profiles import ProfileCatalog
 from vesper.platform.persistence import PlatformPaths, open_persistence
+from vesper.platform.session_recorder import SessionRecorder
 
 
 NOW = datetime(2026, 7, 27, 16, 0, tzinfo=timezone.utc)
@@ -75,7 +76,12 @@ def request(workspace: Path, role: SpecialistRole) -> SpecialistInput:
     )
 
 
-def codex_receipt(item: SpecialistInput, final_response: str) -> CodexExecutionReceipt:
+def codex_receipt(
+    item: SpecialistInput,
+    final_response: str,
+    *,
+    streamed_events: tuple[dict[str, object], ...] = (),
+) -> CodexExecutionReceipt:
     return CodexExecutionReceipt(
         run_id=item.run_id,
         task_id=item.task_id,
@@ -95,20 +101,26 @@ def codex_receipt(item: SpecialistInput, final_response: str) -> CodexExecutionR
         finished_at=NOW,
         thread_id=f"thread-{item.role.value}",
         final_response=final_response,
+        streamed_events=streamed_events,
     )
 
 
 class FakeCodexAdapter:
-    def __init__(self, outputs, mutate=None):
+    def __init__(self, outputs, mutate=None, streamed_events=()):
         self.outputs = iter(outputs)
         self.calls = []
         self.mutate = mutate
+        self.streamed_events = tuple(streamed_events)
 
     def execute(self, item, **kwargs):
         self.calls.append((item, kwargs))
         if self.mutate is not None:
             self.mutate(item)
-        return codex_receipt(item, json.dumps(next(self.outputs)))
+        return codex_receipt(
+            item,
+            json.dumps(next(self.outputs)),
+            streamed_events=self.streamed_events,
+        )
 
 
 class DictStore:
@@ -192,10 +204,48 @@ def test_product_loads_approved_profile_and_emits_typed_receipt(tmp_path):
                 "acceptance_checks": ["git-diff-check"],
                 "memory": [],
             }
-        ]
+        ],
+        streamed_events=(
+            {
+                "speaker": "assistant",
+                "event_type": "tool_call",
+                "content": "",
+                "metadata": {"name": "read_file", "token": "secret-value"},
+            },
+            {
+                "speaker": "tool",
+                "event_type": "tool_result",
+                "content": {"output": "bounded tool evidence", "password": "secret-value"},
+            },
+            {
+                "speaker": "assistant",
+                "event_type": "message",
+                "content": json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "run_id": "run-001",
+                        "task_id": "task-001",
+                        "repository_revision": "b5263eb",
+                        "created_at": "2026-07-27T16:00:00Z",
+                        "role": "v20-product",
+                        "attempt": 1,
+                        "route": "v20-development",
+                        "summary": "A bounded documentation task.",
+                        "development_instructions": "Create only the requested documentation file.",
+                        "acceptance_checks": ["git-diff-check"],
+                        "memory": [],
+                    }
+                ),
+            },
+        ),
     )
 
-    receipt = composition(tmp_path, adapter).execute(request(workspace, SpecialistRole.PRODUCT))
+    recorder = SessionRecorder(tmp_path / "knowledge", clock=lambda: NOW)
+    receipt = composition(
+        tmp_path,
+        adapter,
+        session_recorder=recorder,
+    ).execute(request(workspace, SpecialistRole.PRODUCT))
 
     assert receipt.status is ExecutionStatus.COMPLETED
     assert receipt.output.role is SpecialistRole.PRODUCT
@@ -209,6 +259,13 @@ def test_product_loads_approved_profile_and_emits_typed_receipt(tmp_path):
     assert "Copy schema_version, run_id, task_id" in options["prompt"]
     assert 'memory_type="product-decision"' in options["prompt"]
     assert 'content="Product routed task to v20-development."' in options["prompt"]
+    session = tmp_path / "knowledge" / "sessions" / "2026-07-27" / "v20-product--run-001.md"
+    session_text = session.read_text(encoding="utf-8")
+    assert "Perform the controller-scoped task." in session_text
+    assert '"route": "v20-development"' in session_text
+    assert "bounded tool evidence" in session_text
+    assert "secret-value" not in session_text
+    assert session_text.count("## Event ") == 4
 
 
 def test_specialist_prompt_includes_only_controller_snapshot_with_provenance(tmp_path):

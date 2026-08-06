@@ -126,6 +126,31 @@ def test_service_syncs_searches_and_reports_repository_knowledge(tmp_path, monke
         platform.search_knowledge("documentation marker", "unknown")
 
 
+def test_session_status_reports_captured_dream_inputs(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    monkeypatch.chdir(repository)
+    sessions = repository / "knowledge" / "sessions" / "2026-08-05"
+    sessions.mkdir(parents=True)
+    (sessions / "v20-development--session-1.md").write_text(
+        "---\nrole: v20-development\n---\n\n## Turn 1 — user\n\nObjective.\n",
+        encoding="utf-8",
+    )
+    (sessions / "README.md").write_text("Documentation only.", encoding="utf-8")
+
+    platform = LocalPlatformService(PlatformPaths.below(tmp_path / "state"))
+
+    assert platform.session_status() == {
+        "sessions_root": (repository / "knowledge" / "sessions").as_posix(),
+        "session_count": 1,
+        "event_count": 1,
+        "turn_count": 1,
+        "latest_session": "sessions/2026-08-05/v20-development--session-1.md",
+        "dream_inputs_ready": True,
+    }
+
+
 def test_operator_knowledge_commands_reject_vault_outside_current_repository(tmp_path, monkeypatch):
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -282,7 +307,8 @@ class ModelEvaluator:
 def runtime_factory(persistence):
     graph = build_workflow(
         checkpointer=persistence.checkpointer,
-        store=persistence.langgraph_store,
+        langgraph_store=persistence.langgraph_store,
+        approval_store=persistence.store,
         specialists=Specialists(),
         data_researcher=DataResearcher(),
         model_evaluator=ModelEvaluator(),
@@ -519,6 +545,12 @@ class CompositionAdapter:
     def execute(self, item, **kwargs):
         self.calls.append((item, kwargs))
         if item.role.value == "v20-product":
+            frozen_checks = json.loads(
+                item.instructions.split(
+                    "Controller-frozen acceptance checks (reproduce exactly):\n",
+                    1,
+                )[1].splitlines()[0]
+            )
             output = {
                 "schema_version": "1.0",
                 "run_id": item.run_id,
@@ -530,7 +562,7 @@ class CompositionAdapter:
                 "route": "v20-development",
                 "summary": "Bounded documentation exercise.",
                 "development_instructions": "Create M2-CONTROLLED-EXERCISE.md.",
-                "acceptance_checks": ["git-diff-check"],
+                "acceptance_checks": frozen_checks,
                 "memory": [
                     {
                         "memory_type": "product-decision",
@@ -667,10 +699,13 @@ def test_service_loads_selected_production_composition_without_real_provider(
             "task-001",
             "candidate-product",
             "memory-product",
+            "change-product",
             "candidate-development",
             "memory-development",
+            "change-development",
             "candidate-risk",
             "memory-risk",
+            "change-risk",
         )
     )
     adapter = adapter_type()
@@ -799,10 +834,13 @@ def test_opencode_service_allows_explicit_clean_disposable_clone_root(tmp_path):
             "task-001",
             "candidate-product",
             "memory-product",
+            "change-product",
             "candidate-development",
             "memory-development",
+            "change-development",
             "candidate-risk",
             "memory-risk",
+            "change-risk",
         )
     )
     platform = LocalPlatformService(
@@ -826,7 +864,6 @@ def test_opencode_service_allows_explicit_clean_disposable_clone_root(tmp_path):
             "path-exists::M2-CONTROLLED-EXERCISE.md",
         ),
     )
-
     assert created["status"] == RunStatus.AWAITING_APPROVAL.value
     assert (repository / "M2-CONTROLLED-EXERCISE.md").is_file()
 
@@ -1230,10 +1267,13 @@ def test_read_only_inspection_survives_removed_worktree_and_profile_catalog(tmp_
             "task-001",
             "candidate-product",
             "memory-product",
+            "change-product",
             "candidate-development",
             "memory-development",
+            "change-development",
             "candidate-risk",
             "memory-risk",
+            "change-risk",
         )
     )
     platform = LocalPlatformService(

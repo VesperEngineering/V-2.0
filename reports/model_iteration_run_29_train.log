@@ -1,6 +1,6 @@
 2026-07-22 18:18:46,110 | Loading bars from vesper\data\massive\sp500\sp500_ohlcv.sqlite
 2026-07-22 18:18:57,103 | Loaded 502 tickers
-2026-07-22 18:18:57,103 | Loading split adjustments from D:\vesper\vesper_data\split_adjustments.json
+2026-07-22 18:18:57,103 | Loading split adjustments from <legacy-vesper-root>\vesper_data\split_adjustments.json
 2026-07-22 18:19:01,383 | Applied split adjustments to 502 tickers
 2026-07-22 18:19:01,383 | Building training set...
 2026-07-22 18:19:40,830 | Training set after z-score: X=(2454458, 24), y=(2454458,)

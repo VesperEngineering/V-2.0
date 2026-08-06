@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+import re
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -154,6 +155,27 @@ class KnowledgeScope(StrEnum):
     RISK_REVIEW = "v20-risk-review"
 
 
+class DreamMode(StrEnum):
+    CROSS_SESSION = "cross-session"
+    MEMORY_AUDIT_ONLY = "memory-audit-only"
+
+
+class DreamProposalType(StrEnum):
+    ADDITION = "addition"
+    UPDATE = "update"
+    DEPRECATION = "deprecation"
+    DUPLICATE = "duplicate"
+    NO_CHANGE = "no-change"
+
+
+class WorkingMemoryType(StrEnum):
+    FACT = "fact"
+    PREFERENCE = "preference"
+    PROCEDURE = "procedure"
+    DECISION = "decision"
+    LESSON = "lesson"
+
+
 class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -194,6 +216,94 @@ class EvidenceArtifactRef(RunContract):
     sha256: Sha256
     size_bytes: Annotated[int, Field(ge=0)]
     media_type: NonEmptyStr
+
+
+class DreamAppliedChange(ContractModel):
+    proposal_id: NonEmptyStr
+    target: RelativePath
+    action: Literal["created", "updated", "replaced"]
+    sha256: Sha256
+
+
+class DreamGateProposal(ContractModel):
+    proposal_id: NonEmptyStr
+    proposal_type: DreamProposalType
+    target: RelativePath
+    summary: NonEmptyStr
+    evidence: NonEmptyStr
+    confidence: Literal["high", "medium", "low"]
+    auto_apply: Literal[True] = True
+    status: Literal["pending", "approved", "rejected", "applied"] = "pending"
+
+
+class DreamGateReport(ContractModel):
+    dream_id: NonEmptyStr
+    created_at: AwareDatetime
+    mode: DreamMode
+    model: Literal["qwen:64k"]
+    source_session_ids: tuple[NonEmptyStr, ...] = ()
+    source_hashes: tuple[Sha256, ...] = ()
+    active_memory_sha256: Sha256
+    proposals: tuple[DreamGateProposal, ...] = ()
+    applied_changes: tuple[DreamAppliedChange, ...] = ()
+    limitations: tuple[NonEmptyStr, ...] = ()
+
+    @field_validator("created_at")
+    @classmethod
+    def require_utc(cls, value: datetime) -> datetime:
+        if value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
+            raise ValueError("timestamps must use UTC")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def source_receipts_match(self) -> DreamGateReport:
+        if len(self.source_session_ids) != len(self.source_hashes):
+            raise ValueError("source session IDs and hashes must have matching lengths")
+        return self
+
+
+class WorkingMemoryCandidate(ContractModel):
+    memory_id: NonEmptyStr
+    agent_id: NonEmptyStr
+    memory_type: WorkingMemoryType
+    content: NonEmptyStr
+    evidence_ids: Annotated[tuple[NonEmptyStr, ...], Field(min_length=1)]
+    evidence: Annotated[float, Field(ge=0, le=1)]
+    usefulness: Annotated[float, Field(ge=0, le=1)]
+    reuse: Annotated[float, Field(ge=0, le=1)]
+    relevance: Annotated[float, Field(ge=0, le=1)]
+    age: Annotated[float, Field(ge=0, le=1)]
+    safety_rarity: Annotated[float, Field(ge=0, le=1)]
+    safety_critical: bool = False
+    created_at: AwareDatetime
+
+    @field_validator("content")
+    @classmethod
+    def reject_non_durable_content(cls, value: str) -> str:
+        if re.search(r"\b(todo|current blocker|api key|password|secret|credential)\b", value, re.I):
+            raise ValueError("working memory cannot contain temporary tasks, secrets, or credentials")
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def require_working_memory_utc(cls, value: datetime) -> datetime:
+        return RunContract.require_utc(value)
+
+    @property
+    def score(self) -> float:
+        value = (
+            self.evidence * 0.25
+            + self.usefulness * 0.20
+            + self.reuse * 0.20
+            + self.relevance * 0.15
+            + self.age * 0.10
+            + self.safety_rarity * 0.10
+        )
+        return max(value, 0.80 if self.safety_critical else 0.0)
+
+    @property
+    def word_count(self) -> int:
+        return len(re.findall(r"(?u)\b[\w]+(?:[-'][\w]+)*\b", self.content))
 
 
 def _evidence_matches_authority(
@@ -258,6 +368,7 @@ class JournalEvent(RunContract):
 
 
 class DataResearchResult(RunContract):
+    timestamp_scope: Literal["run-created-at-for-replay"] = "run-created-at-for-replay"
     available: bool
     database_path: RelativePath
     table_name: NonEmptyStr
@@ -281,13 +392,18 @@ class DataResearchResult(RunContract):
             or self.ticker_count == 0
             or self.start_date is None
             or self.end_date is None
+            or self.null_price_rows != 0
             or self.invalid_date_rows != 0
         ):
-            raise ValueError("available data research requires nonempty coverage")
+            raise ValueError(
+                "available data research requires nonempty coverage without null or invalid rows"
+            )
         return self
 
 
 class ModelEvaluationResult(RunContract):
+    timestamp_scope: Literal["run-created-at-for-replay"] = "run-created-at-for-replay"
+    evaluation_scope: Literal["artifact-integrity-only"] = "artifact-integrity-only"
     available: bool
     configured_model_path: RelativePath
     metadata_path: RelativePath
@@ -318,8 +434,14 @@ class ModelEvaluationResult(RunContract):
             and self.test_samples is not None
         )
         if self.evaluation_passed != complete:
-            raise ValueError("model evaluation status must match integrity and metadata checks")
+            raise ValueError("model integrity status must match artifact and metadata checks")
         return self
+
+    @property
+    def integrity_passed(self) -> bool:
+        """Expose what the serialized compatibility field actually proves."""
+
+        return self.evaluation_passed
 
 
 class SpecialistInput(RunContract):
@@ -651,8 +773,11 @@ class GraphState(RunContract):
         }:
             if self.data_research is None or not self.data_research.available:
                 raise ValueError("post-research execution requires available Data Research")
-            if self.model_evaluation is None or not self.model_evaluation.evaluation_passed:
-                raise ValueError("post-research execution requires a passing Model Evaluation")
+            if self.model_evaluation is None or not self.model_evaluation.integrity_passed:
+                raise ValueError(
+                    "post-research execution requires a passing Model Evaluation "
+                    "artifact-integrity check"
+                )
         if self.status is RunStatus.ACCEPTED:
             if self.validation is None or not self.validation.passed:
                 raise ValueError("acceptance requires deterministic validation")

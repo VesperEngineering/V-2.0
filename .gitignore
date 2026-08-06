@@ -17,13 +17,17 @@ venv/
 .pytest_cache/
 .pytest_tmp/
 .pytest-tmp-*/
+target/
+node_modules/
+.tmp/
+tmp/
+.state/
+.uv-cache*/
 
 # Fusion and local developer tooling state
 .fusion/
 .codegraph/
-.hermes/
 .worktrees/
-hermes-local/
 quant workers/
 IGNORE RUN.txt
 

@@ -158,5 +158,4 @@ This ADR does not authorize dependency installation or runtime integration. Befo
 
 - [Proposed evidence/history migration plan](../plans/evidence-history-migration-plan.md)
 - [Obsidian and LangGraph knowledge standard](ADR-0002-obsidian-langgraph-knowledge.md)
-- [Repository architecture overview](../../architecture.txt)
 - [Repository operating guidance](../../AGENTS.md)

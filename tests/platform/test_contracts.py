@@ -11,6 +11,11 @@ from vesper.platform.contracts import (
     CodexExecutionReceipt,
     CorrectionAttempt,
     DataResearchResult,
+    DreamAppliedChange,
+    DreamGateProposal,
+    DreamGateReport,
+    DreamMode,
+    DreamProposalType,
     EvidenceArtifactRef,
     ExecutionStatus,
     GraphState,
@@ -198,6 +203,14 @@ def test_research_and_model_evaluation_contracts_bind_evidence_authority():
 def test_available_data_research_rejects_invalid_source_dates():
     payload = available_data_research().model_dump()
     payload["invalid_date_rows"] = 1
+
+    with pytest.raises(ValidationError, match="nonempty coverage"):
+        DataResearchResult.model_validate(payload)
+
+
+def test_available_data_research_rejects_null_price_rows():
+    payload = available_data_research().model_dump()
+    payload["null_price_rows"] = 1
 
     with pytest.raises(ValidationError, match="nonempty coverage"):
         DataResearchResult.model_validate(payload)
@@ -554,4 +567,64 @@ def test_unknown_schema_version_is_rejected():
                 "repository_root": ".",
                 "acceptance_checks": ["pytest"],
             }
+        )
+
+
+def test_dream_gate_report_with_applied_change_round_trips():
+    proposal = DreamGateProposal(
+        proposal_id="dream-proposal-001",
+        proposal_type=DreamProposalType.UPDATE,
+        target="knowledge/memory/v20-core/architecture.md",
+        summary="Refresh the active architecture note.",
+        evidence="Source session sess-001: controller architecture review.",
+        confidence="high",
+    )
+    report = DreamGateReport(
+        dream_id="dream-001",
+        created_at=NOW,
+        mode=DreamMode.CROSS_SESSION,
+        model="qwen:64k",
+        source_session_ids=("sess-001",),
+        source_hashes=("a" * 64,),
+        active_memory_sha256="b" * 64,
+        proposals=(proposal,),
+        applied_changes=(
+            DreamAppliedChange(
+                proposal_id="dream-proposal-001",
+                target="knowledge/memory/v20-core/architecture.md",
+                action="updated",
+                sha256="c" * 64,
+            ),
+        ),
+        limitations=("Review required before activation.",),
+    )
+
+    restored = DreamGateReport.model_validate_json(report.model_dump_json())
+
+    assert restored == report
+    assert restored.applied_changes[0].action == "updated"
+    assert restored.proposals[0].status == "pending"
+
+
+def test_dream_gate_rejects_disabled_auto_apply_and_mismatched_sources():
+    with pytest.raises(ValidationError, match="auto_apply"):
+        DreamGateProposal(
+            proposal_id="dream-proposal-002",
+            proposal_type=DreamProposalType.ADDITION,
+            target="knowledge/memory/v20-core/new.md",
+            summary="Unsafe automatic memory write.",
+            evidence="Unverified model claim.",
+            confidence="low",
+            auto_apply=False,
+        )
+
+    with pytest.raises(ValidationError, match="source session IDs and hashes"):
+        DreamGateReport(
+            dream_id="dream-002",
+            created_at=NOW,
+            mode=DreamMode.CROSS_SESSION,
+            model="qwen:64k",
+            source_session_ids=("sess-001",),
+            source_hashes=(),
+            active_memory_sha256="c" * 64,
         )

@@ -44,7 +44,6 @@ MODEL_PARAMS = {
 # Candidate paths for split-adjustment map (cumulative forward factors)
 SPLIT_ADJ_PATHS = [
     Path("vesper/data/massive/split_adjustments.json"),
-    Path("D:/vesper/vesper_data/split_adjustments.json"),
     Path("../vesper_data/split_adjustments.json"),
 ]
 

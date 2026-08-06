@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import urllib.request
 from collections import defaultdict, deque
@@ -72,6 +73,23 @@ def test_workspace_hash_excludes_git_and_controller_state(tmp_path):
     assert _workspace_sha256(tmp_path) != initial
 
 
+def test_workspace_hash_excludes_worktree_metadata_files(tmp_path):
+    git_file = tmp_path / ".git"
+    state_file = tmp_path / ".state"
+    source = tmp_path / "source.py"
+    git_file.write_text("gitdir: C:/worktrees/v20\n", encoding="utf-8")
+    state_file.write_text("controller state\n", encoding="utf-8")
+    source.write_text("before\n", encoding="utf-8")
+
+    initial = _workspace_sha256(tmp_path)
+    git_file.write_text("gitdir: D:/other-worktree\n", encoding="utf-8")
+    state_file.write_text("changed controller state\n", encoding="utf-8")
+
+    assert _workspace_sha256(tmp_path) == initial
+    source.write_text("after\n", encoding="utf-8")
+    assert _workspace_sha256(tmp_path) != initial
+
+
 def artifact(name: str = "result") -> EvidenceArtifactRef:
     return EvidenceArtifactRef(
         **COMMON,
@@ -93,7 +111,7 @@ def receipt(role: SpecialistRole, attempt: int = 1) -> SpecialistReceipt:
             route=SpecialistRole.DEVELOPMENT,
             summary="Bounded task.",
             development_instructions="Implement only the bounded task.",
-            acceptance_checks=("offline-test",),
+            acceptance_checks=("python -m pytest tests/platform",),
         )
     elif role is SpecialistRole.DEVELOPMENT:
         output = DevelopmentSpecialistOutput(
@@ -242,7 +260,8 @@ def controller(
     reviewer = QueuedRiskReviewer(risks)
     graph = build_workflow(
         checkpointer=persistence.checkpointer,
-        store=persistence.langgraph_store,
+        langgraph_store=persistence.langgraph_store,
+        approval_store=persistence.store,
         specialists=specialists,
         data_researcher=data_researcher,
         model_evaluator=model_evaluator,
@@ -333,7 +352,7 @@ def test_research_readiness_failure_stops_before_product(tmp_path, failed_stage)
         view = workflow.start(task(tmp_path))
 
     assert view.state.status is RunStatus.OPERATOR_INTERVENTION
-    assert "Research readiness gate failed" in view.state.terminal_reason
+    assert "Research integrity gate failed" in view.state.terminal_reason
     assert specialists.calls == []
     assert validator.calls == []
     assert reviewer.calls == []
@@ -660,7 +679,8 @@ def test_usage_limit_stops_without_consuming_correction_budget(tmp_path):
         specialists = UsageLimitedSpecialists()
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=specialists,
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -686,7 +706,8 @@ def test_completed_product_without_typed_output_fails_closed(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=MissingOutputSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -734,7 +755,8 @@ def test_risk_infrastructure_failure_persists_receipt_and_stops(
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=QueuedSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -764,7 +786,8 @@ def test_mismatched_risk_authority_fails_closed_without_approval(tmp_path):
         specialists = QueuedSpecialists()
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=specialists,
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -791,7 +814,8 @@ def test_mismatched_specialist_evidence_authority_fails_closed(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=MismatchedEvidenceSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -818,7 +842,8 @@ def test_mismatched_validation_evidence_authority_fails_closed(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=QueuedSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -846,7 +871,8 @@ def test_mismatched_risk_evidence_authority_fails_closed(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=QueuedSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -925,7 +951,7 @@ def test_product_typed_brief_is_injected_into_development(tmp_path):
                     route=SpecialistRole.DEVELOPMENT,
                     summary="Bounded documentation change.",
                     development_instructions="Create only M2-CONTROLLED-EXERCISE.md.",
-                    acceptance_checks=("git-diff-check",),
+                    acceptance_checks=("python -m pytest tests/platform",),
                 )
                 return item.model_copy(update={"output": output})
             return item
@@ -934,7 +960,8 @@ def test_product_typed_brief_is_injected_into_development(tmp_path):
         specialists = BriefingSpecialists()
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=specialists,
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -952,6 +979,39 @@ def test_product_typed_brief_is_injected_into_development(tmp_path):
 
     assert view.state.status is RunStatus.AWAITING_APPROVAL
     assert "Create only M2-CONTROLLED-EXERCISE.md." in specialists.calls[1].instructions
+
+
+def test_product_acceptance_checks_must_match_controller_checks(tmp_path):
+    class MismatchedProductChecks(QueuedSpecialists):
+        def execute(self, request):
+            self.calls.append(request)
+            item = receipt(request.role, request.attempt)
+            if request.role is SpecialistRole.PRODUCT:
+                output = item.output.model_copy(update={"acceptance_checks": ("offline-test",)})
+                return item.model_copy(update={"output": output})
+            return item
+
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        specialists = MismatchedProductChecks()
+        workflow, _, _, _ = controller(persistence, specialist_executor=specialists)
+        view = workflow.start(task(tmp_path))
+
+    assert view.state.status is RunStatus.FAILED
+    assert view.state.terminal_reason == "Product acceptance checks differ from controller checks"
+    assert [call.role for call in specialists.calls] == [SpecialistRole.PRODUCT]
+
+
+def test_product_receives_explicit_artifact_integrity_scope(tmp_path):
+    with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
+        specialists = QueuedSpecialists()
+        workflow, _, _, _ = controller(persistence, specialist_executor=specialists)
+        workflow.start(task(tmp_path))
+
+    product_instructions = specialists.calls[0].instructions
+    assert json.dumps(task(tmp_path).acceptance_checks) in product_instructions
+    assert '"evaluation_scope": "artifact-integrity-only"' in product_instructions
+    assert '"integrity_passed": true' in product_instructions
+    assert '"evaluation_passed"' not in product_instructions
 
 
 def test_risk_execution_receipt_is_persisted_in_graph_state(tmp_path):
@@ -972,7 +1032,8 @@ def test_risk_execution_receipt_is_persisted_in_graph_state(tmp_path):
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=QueuedSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -1023,7 +1084,8 @@ def test_risk_hold_or_failed_compliance_requires_operator_intervention(
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=QueuedSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
@@ -1056,7 +1118,8 @@ def test_legacy_risk_approval_without_compliance_gates_cannot_reach_approval(tmp
     with open_persistence(PlatformPaths.below(tmp_path / "platform")) as persistence:
         graph = build_workflow(
             checkpointer=persistence.checkpointer,
-            store=persistence.langgraph_store,
+            langgraph_store=persistence.langgraph_store,
+            approval_store=persistence.store,
             specialists=QueuedSpecialists(),
             data_researcher=DataResearcher(),
             model_evaluator=ModelEvaluator(),
